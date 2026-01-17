@@ -75,6 +75,121 @@ static void build_demo_rom(uint8_t* mem, uint32_t base_addr)
     pc += 4;
 }
 
+// Mini programme GTE (COP2) :
+// - configure t0 = 0x1F000000 (MMIO print)
+// - configure quelques registres GTE via CTC2/MTC2
+// - exécute RTPS + lit SXYP/SZ3/OTZ via MFC2
+// - imprime les valeurs via SW sur MMIO
+// - BREAK
+//
+// Objectif: vérifier rapidement "CPU -> COP2 -> GTE" + load delay slot sur MFC2.
+static uint32_t enc_cop2_xfer(uint32_t rs_field, uint32_t rt_cpu, uint32_t rd_gte)
+{
+    return (0x12u << 26) | ((rs_field & 31u) << 21) | ((rt_cpu & 31u) << 16) |
+           ((rd_gte & 31u) << 11);
+}
+
+static uint32_t enc_cop2_cmd(uint32_t funct6, uint32_t sf = 0, uint32_t lm = 0)
+{
+    // Command word (subset): sf bit(19), lm bit(10), funct bits(5..0).
+    const uint32_t cmd = ((sf & 1u) << 19) | ((lm & 1u) << 10) | (funct6 & 63u);
+    return (0x12u << 26) | (0x10u << 21) | cmd;
+}
+
+static void build_gte_demo_rom(uint8_t* mem, uint32_t base_addr)
+{
+    uint32_t pc = base_addr;
+
+    // lui  t0, 0x1F00  (MMIO print)
+    write_u32_le(mem, pc, enc_i(0x0F, 0, 8, 0x1F00));
+    pc += 4;
+    // ori  t0, t0, 0x0000
+    write_u32_le(mem, pc, enc_i(0x0D, 8, 8, 0x0000));
+    pc += 4;
+
+    // ---- Setup GTE control regs (identity rotation, H=256) ----
+    // t1 = 0x00010000 (r11=1, r12=0)  -> CTC2 t1, C_R11R12 (idx 0)
+    write_u32_le(mem, pc, enc_i(0x0F, 0, 9, 0x0001));
+    pc += 4;
+    write_u32_le(mem, pc, enc_cop2_xfer(0x06, 9, 0));
+    pc += 4;
+
+    // t1 = 0x00000001 (r33=1) -> CTC2 t1, C_R33 (idx 4)
+    write_u32_le(mem, pc, enc_i(0x09, 0, 9, 1));
+    pc += 4;
+    write_u32_le(mem, pc, enc_cop2_xfer(0x06, 9, 4));
+    pc += 4;
+
+    // t1 = 0x00000100 (H=256) -> CTC2 t1, C_H (idx 26)
+    write_u32_le(mem, pc, enc_i(0x09, 0, 9, 0x0100));
+    pc += 4;
+    write_u32_le(mem, pc, enc_cop2_xfer(0x06, 9, 26));
+    pc += 4;
+
+    // ZSF3=1, ZSF4=1 (pour AVSZ3/4 si besoin)
+    write_u32_le(mem, pc, enc_i(0x09, 0, 9, 1));
+    pc += 4;
+    write_u32_le(mem, pc, enc_cop2_xfer(0x06, 9, 29));
+    pc += 4;
+    write_u32_le(mem, pc, enc_cop2_xfer(0x06, 9, 30));
+    pc += 4;
+
+    // ---- Setup V0 = (x=100,y=50,z=1000) ----
+    // t2 = (y<<16)|x
+    write_u32_le(mem, pc, enc_i(0x09, 0, 10, 100));
+    pc += 4;
+    write_u32_le(mem, pc, enc_i(0x09, 0, 11, 50));
+    pc += 4;
+    // sll t3, t3, 16 ; or t2, t2, t3
+    write_u32_le(mem, pc, enc_r(0, 11, 12, 16, 0x00));
+    pc += 4;
+    write_u32_le(mem, pc, enc_r(10, 12, 10, 0, 0x25));
+    pc += 4;
+    // MTC2 t2, VXY0 (idx 0)
+    write_u32_le(mem, pc, enc_cop2_xfer(0x04, 10, 0));
+    pc += 4;
+
+    // t2 = z (1000) ; MTC2 t2, VZ0 (idx 1)
+    write_u32_le(mem, pc, enc_i(0x09, 0, 10, 1000));
+    pc += 4;
+    write_u32_le(mem, pc, enc_cop2_xfer(0x04, 10, 1));
+    pc += 4;
+
+    // ---- Execute RTPS ----
+    write_u32_le(mem, pc, enc_cop2_cmd(0x01));
+    pc += 4;
+
+    // MFC2 t1, SXYP (idx 15) ; NOP ; SW t1, 0(t0)
+    write_u32_le(mem, pc, enc_cop2_xfer(0x00, 9, 15));
+    pc += 4;
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0)); // nop (load delay)
+    pc += 4;
+    write_u32_le(mem, pc, enc_i(0x2B, 8, 9, 0));
+    pc += 4;
+
+    // MFC2 t1, SZ3 (idx 19) ; NOP ; SW
+    write_u32_le(mem, pc, enc_cop2_xfer(0x00, 9, 19));
+    pc += 4;
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0));
+    pc += 4;
+    write_u32_le(mem, pc, enc_i(0x2B, 8, 9, 0));
+    pc += 4;
+
+    // AVSZ3 ; MFC2 OTZ ; NOP ; SW
+    write_u32_le(mem, pc, enc_cop2_cmd(0x2D));
+    pc += 4;
+    write_u32_le(mem, pc, enc_cop2_xfer(0x00, 9, 7));
+    pc += 4;
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0));
+    pc += 4;
+    write_u32_le(mem, pc, enc_i(0x2B, 8, 9, 0));
+    pc += 4;
+
+    // break
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0x0D));
+    pc += 4;
+}
+
 static const char* arg_value(int argc, char** argv, const char* key_prefix)
 {
     const size_t n = std::strlen(key_prefix);
@@ -123,7 +238,11 @@ int main(int argc, char** argv)
 
     // ROM chargée à 0x00000000 (démo).
     const uint32_t reset_pc = 0x00000000u;
-    build_demo_rom(ram, reset_pc);
+    const char* demo = arg_value(argc, argv, "--demo=");
+    if (demo && std::strcmp(demo, "gte") == 0)
+        build_gte_demo_rom(ram, reset_pc);
+    else
+        build_demo_rom(ram, reset_pc);
 
     r3000::Bus bus(ram, kRamSize, &logger);
     r3000::Cpu cpu(bus, &logger);

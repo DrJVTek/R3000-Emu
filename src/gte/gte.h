@@ -31,7 +31,8 @@ class Gte
     // Exécute une instruction COP2 "CO" (commande GTE).
     // On attend typiquement le mot d'instruction complet (opcode 0x12 inclus), car les bits
     // de contrôle (sf/lm/mx/v/tx) sont dedans.
-    void execute(uint32_t cop2_instruction);
+    // Retourne 1 si la commande est reconnue/implémentée, 0 sinon.
+    int execute(uint32_t cop2_instruction);
 
   private:
     // Index des registres GTE (data/control) pour rendre le code lisible en live.
@@ -132,7 +133,13 @@ class Gte
     // Commandes (subset utile pour démarrer "matrices").
     void cmd_mvmva(uint32_t cmd);
     void cmd_rtps(uint32_t cmd);
+    void cmd_rtpt(uint32_t cmd);
     void cmd_nclip(uint32_t cmd);
+    void cmd_avsz3(uint32_t cmd);
+    void cmd_avsz4(uint32_t cmd);
+    void cmd_sqr(uint32_t cmd);
+    void cmd_gpf(uint32_t cmd);
+    void cmd_gpl(uint32_t cmd);
 
     uint32_t data_[32]{};
     uint32_t ctrl_[32]{};

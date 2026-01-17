@@ -224,7 +224,137 @@ void Gte::cmd_rtps(uint32_t cmd)
     push_sxy(sx, sy);
 }
 
-void Gte::execute(uint32_t cop2_instruction)
+void Gte::cmd_rtpt(uint32_t cmd)
+{
+    // RTPT: comme RTPS mais sur V0, V1, V2 (3 points) en une commande.
+    //
+    // Version pédagogique: on applique 3 fois une logique RTPS (rotation+translation+projection)
+    // en réutilisant nos helpers Vn.
+    //
+    // NOTE: dans le vrai hardware, certains registres/pipelines ont des comportements subtils.
+    // Ici on vise un 1er socle correct "dans l'esprit" pour le live.
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        // Hack simple: on réécrit temporairement V0 = Vi puis on appelle RTPS.
+        const uint32_t save_vxy0 = data_[D_VXY0];
+        const uint32_t save_vz0 = data_[D_VZ0];
+
+        const uint32_t src_vxy = (i == 0) ? D_VXY0 : (i == 1) ? D_VXY1 : D_VXY2;
+        const uint32_t src_vz = (i == 0) ? D_VZ0 : (i == 1) ? D_VZ1 : D_VZ2;
+        data_[D_VXY0] = data_[src_vxy];
+        data_[D_VZ0] = data_[src_vz];
+
+        cmd_rtps(cmd);
+
+        data_[D_VXY0] = save_vxy0;
+        data_[D_VZ0] = save_vz0;
+    }
+}
+
+void Gte::cmd_avsz3(uint32_t)
+{
+    // AVSZ3: OTZ = ZSF3 * (SZ1+SZ2+SZ3) >> 12
+    // (approx. dans cette version; OTZ est 16-bit en pratique)
+    const uint32_t sz1 = data_[D_SZ1] & 0xFFFFu;
+    const uint32_t sz2 = data_[D_SZ2] & 0xFFFFu;
+    const uint32_t sz3 = data_[D_SZ3] & 0xFFFFu;
+    const int32_t zsf3 = s16(ctrl_[C_ZSF3]);
+
+    const int64_t sum = (int64_t)sz1 + (int64_t)sz2 + (int64_t)sz3;
+    const int64_t mac0 = (int64_t)zsf3 * sum;
+    set_mac(0, mac0);
+    data_[D_OTZ] = clamp_u16((int32_t)(mac0 >> 12));
+}
+
+void Gte::cmd_avsz4(uint32_t)
+{
+    // AVSZ4: OTZ = ZSF4 * (SZ0+SZ1+SZ2+SZ3) >> 12
+    const uint32_t sz0 = data_[D_SZ0] & 0xFFFFu;
+    const uint32_t sz1 = data_[D_SZ1] & 0xFFFFu;
+    const uint32_t sz2 = data_[D_SZ2] & 0xFFFFu;
+    const uint32_t sz3 = data_[D_SZ3] & 0xFFFFu;
+    const int32_t zsf4 = s16(ctrl_[C_ZSF4]);
+
+    const int64_t sum = (int64_t)sz0 + (int64_t)sz1 + (int64_t)sz2 + (int64_t)sz3;
+    const int64_t mac0 = (int64_t)zsf4 * sum;
+    set_mac(0, mac0);
+    data_[D_OTZ] = clamp_u16((int32_t)(mac0 >> 12));
+}
+
+void Gte::cmd_sqr(uint32_t cmd)
+{
+    // SQR: MACi = IRi * IRi (i=1..3), puis IRi = MACi >> (sf?12:0)
+    const int sf = (cmd >> 19) & 1;
+    const int lm = (cmd >> 10) & 1;
+    const int shift = sf ? 12 : 0;
+
+    const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t ir3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    const int64_t mac1 = (int64_t)ir1 * (int64_t)ir1;
+    const int64_t mac2 = (int64_t)ir2 * (int64_t)ir2;
+    const int64_t mac3 = (int64_t)ir3 * (int64_t)ir3;
+    set_mac(1, mac1);
+    set_mac(2, mac2);
+    set_mac(3, mac3);
+    set_ir(1, (int32_t)(mac1 >> shift), lm);
+    set_ir(2, (int32_t)(mac2 >> shift), lm);
+    set_ir(3, (int32_t)(mac3 >> shift), lm);
+}
+
+void Gte::cmd_gpf(uint32_t cmd)
+{
+    // GPF: MACi = IRi * IR0, IRi = MACi >> (sf?12:0)
+    const int sf = (cmd >> 19) & 1;
+    const int lm = (cmd >> 10) & 1;
+    const int shift = sf ? 12 : 0;
+
+    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
+    const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t ir3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    const int64_t mac1 = (int64_t)ir1 * ir0;
+    const int64_t mac2 = (int64_t)ir2 * ir0;
+    const int64_t mac3 = (int64_t)ir3 * ir0;
+    set_mac(1, mac1);
+    set_mac(2, mac2);
+    set_mac(3, mac3);
+    set_ir(1, (int32_t)(mac1 >> shift), lm);
+    set_ir(2, (int32_t)(mac2 >> shift), lm);
+    set_ir(3, (int32_t)(mac3 >> shift), lm);
+}
+
+void Gte::cmd_gpl(uint32_t cmd)
+{
+    // GPL: MACi = MACi + IRi*IR0, IRi = MACi >> (sf?12:0)
+    const int sf = (cmd >> 19) & 1;
+    const int lm = (cmd >> 10) & 1;
+    const int shift = sf ? 12 : 0;
+
+    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
+    const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t ir3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    const int32_t mac1_old = (int32_t)data_[D_MAC1];
+    const int32_t mac2_old = (int32_t)data_[D_MAC2];
+    const int32_t mac3_old = (int32_t)data_[D_MAC3];
+
+    const int64_t mac1 = (int64_t)mac1_old + (int64_t)ir1 * ir0;
+    const int64_t mac2 = (int64_t)mac2_old + (int64_t)ir2 * ir0;
+    const int64_t mac3 = (int64_t)mac3_old + (int64_t)ir3 * ir0;
+
+    set_mac(1, mac1);
+    set_mac(2, mac2);
+    set_mac(3, mac3);
+    set_ir(1, (int32_t)(mac1 >> shift), lm);
+    set_ir(2, (int32_t)(mac2 >> shift), lm);
+    set_ir(3, (int32_t)(mac3 >> shift), lm);
+}
+
+int Gte::execute(uint32_t cop2_instruction)
 {
     // On extrait le champ "function" sur 6 bits (commande).
     const uint32_t cmd = cop2_instruction & 0x01FF'FFFFu;
@@ -234,18 +364,36 @@ void Gte::execute(uint32_t cop2_instruction)
     {
         case 0x06: // NCLIP
             cmd_nclip(cmd);
-            break;
+            return 1;
         case 0x12: // MVMVA
             cmd_mvmva(cmd);
-            break;
+            return 1;
         case 0x01: // RTPS
             cmd_rtps(cmd);
-            break;
+            return 1;
+        case 0x30: // RTPT
+            cmd_rtpt(cmd);
+            return 1;
+        case 0x2D: // AVSZ3
+            cmd_avsz3(cmd);
+            return 1;
+        case 0x2E: // AVSZ4
+            cmd_avsz4(cmd);
+            return 1;
+        case 0x28: // SQR
+            cmd_sqr(cmd);
+            return 1;
+        case 0x3D: // GPF
+            cmd_gpf(cmd);
+            return 1;
+        case 0x3E: // GPL
+            cmd_gpl(cmd);
+            return 1;
         default:
             // Pour une base éducative, on ne “fake” pas: si non implémenté, on laisse MAC/IR
             // inchangés. Le CPU pourra décider de lever RI sur l'instruction COP2 correspondante si
             // voulu.
-            break;
+            return 0;
     }
 }
 

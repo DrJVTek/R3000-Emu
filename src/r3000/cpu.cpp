@@ -1409,7 +1409,10 @@ Cpu::StepResult Cpu::step()
                 else if (rs_field == 0x10)
                 {
                     // CO: commande GTE (RTPS/MVMVA/NCLIP/...)
-                    gte_.execute(instr);
+                    if (!gte_.execute(instr))
+                    {
+                        raise_exception(EXC_RI, 0, r.pc);
+                    }
                 }
                 else
                 {
