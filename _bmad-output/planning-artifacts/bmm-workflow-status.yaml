@@ -1,0 +1,31 @@
+# Workflow Status Template
+#
+# This tracks progress through BMM methodology Analysis, Planning, and Solutioning phases.
+# Implementation phase is tracked separately in sprint-status.yaml
+#
+# STATUS DEFINITIONS:
+# ==================
+# Initial Status (before completion):
+#   - required: Must be completed to progress
+#   - optional: Can be completed but not required
+#   - recommended: Strongly suggested but not required
+#   - conditional: Required only if certain conditions met (e.g., if_has_ui)
+#
+# Completion Status:
+#   - {file-path}: File created/found (e.g., "docs/product-brief.md")
+#   - skipped: Optional/conditional workflow that was skipped
+#
+generated: "{{generated}}"
+project: "R3000 Ému"
+user_description: |
+  Objectif: créer un émulateur éducatif du CPU R3000 (MIPS I, PS1) en ligne de commande, pour montrer en live comment on construit un émulateur.
+  - Approche: interpréteur (pas de JIT), gros switch-case pour décoder/exécuter les instructions
+  - Logs/affichage: possibilité de tracer l'exécution (printf/équivalent) pendant le fetch/decode/execute
+  - Validation: petit programme type "hello world"/compteur pour vérifier que ça tourne
+  - Extension prévue: ajouter la partie GTE ensuite
+project_type: "software"
+selected_track: "quickflow"
+field_type: "greenfield"
+workflow_path: "{{workflow_path_file}}"
+workflow_status: "{{workflow_items}}"
+
