@@ -1406,6 +1406,11 @@ Cpu::StepResult Cpu::step()
                     // CTC2: écriture CPU -> ctrl reg GTE
                     gte_.write_ctrl(d, gpr_[t]);
                 }
+                else if (rs_field == 0x10)
+                {
+                    // CO: commande GTE (RTPS/MVMVA/NCLIP/...)
+                    gte_.execute(instr);
+                }
                 else
                 {
                     // Commandes GTE (RTPS/MVMVA/...) viendront ici (rs=0x10/0x12 selon forme).
