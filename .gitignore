@@ -1,9 +1,4 @@
 build/
-_bmad/
-_bmad-output/
-.cursor/
-.claude/
-.agent/
 out/
 .vs/
 .vscode/
