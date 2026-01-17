@@ -37,6 +37,47 @@ void Gte::write_ctrl(uint32_t idx, uint32_t v)
     ctrl_[idx & 31u] = v;
 }
 
+void Gte::lwc2(uint32_t gte_reg, uint32_t word)
+{
+    write_data(gte_reg, word);
+}
+
+uint32_t Gte::swc2(uint32_t gte_reg) const
+{
+    return read_data(gte_reg);
+}
+
+// ---------------------------------------
+// Helpers "couleur" (pédagogiques)
+// ---------------------------------------
+static inline uint8_t u8_clamp(int32_t v)
+{
+    if (v < 0)
+        return 0;
+    if (v > 255)
+        return 255;
+    return (uint8_t)v;
+}
+
+static inline void unpack_rgbc(uint32_t rgbc, int32_t& r, int32_t& g, int32_t& b, uint8_t& c)
+{
+    r = (int32_t)(rgbc & 0xFFu);
+    g = (int32_t)((rgbc >> 8) & 0xFFu);
+    b = (int32_t)((rgbc >> 16) & 0xFFu);
+    c = (uint8_t)((rgbc >> 24) & 0xFFu);
+}
+
+static inline uint32_t pack_rgbc(uint8_t r, uint8_t g, uint8_t b, uint8_t c)
+{
+    return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)c << 24);
+}
+
+static inline int32_t fixed_mul8(int32_t a, int32_t b_q12)
+{
+    // a (0..255) * b (0..4096) -> 0..255 (>>12)
+    return (int32_t)(((int64_t)a * (int64_t)b_q12) >> 12);
+}
+
 int32_t Gte::s16(uint32_t v)
 {
     return (int32_t)(int16_t)(v & 0xFFFFu);
@@ -354,6 +395,244 @@ void Gte::cmd_gpl(uint32_t cmd)
     set_ir(3, (int32_t)(mac3 >> shift), lm);
 }
 
+static inline void shift_rgb_pipeline(uint32_t* data)
+{
+    // RGB pipeline registers are data regs 20..22.
+    data[20] = data[21];
+    data[21] = data[22];
+}
+
+static inline void light_matrix_mul(
+    const uint32_t* ctrl,
+    int32_t nx,
+    int32_t ny,
+    int32_t nz,
+    int32_t& out1,
+    int32_t& out2,
+    int32_t& out3
+)
+{
+    // L matrix (3x3) packée en 16-bit:
+    const int32_t l11 = (int32_t)(int16_t)(ctrl[8] & 0xFFFFu);
+    const int32_t l12 = (int32_t)(int16_t)((ctrl[8] >> 16) & 0xFFFFu);
+    const int32_t l13 = (int32_t)(int16_t)(ctrl[9] & 0xFFFFu);
+    const int32_t l21 = (int32_t)(int16_t)((ctrl[9] >> 16) & 0xFFFFu);
+    const int32_t l22 = (int32_t)(int16_t)(ctrl[10] & 0xFFFFu);
+    const int32_t l23 = (int32_t)(int16_t)((ctrl[10] >> 16) & 0xFFFFu);
+    const int32_t l31 = (int32_t)(int16_t)(ctrl[11] & 0xFFFFu);
+    const int32_t l32 = (int32_t)(int16_t)((ctrl[11] >> 16) & 0xFFFFu);
+    const int32_t l33 = (int32_t)(int16_t)(ctrl[12] & 0xFFFFu);
+
+    const int64_t mac1 = (int64_t)l11 * nx + (int64_t)l12 * ny + (int64_t)l13 * nz;
+    const int64_t mac2 = (int64_t)l21 * nx + (int64_t)l22 * ny + (int64_t)l23 * nz;
+    const int64_t mac3 = (int64_t)l31 * nx + (int64_t)l32 * ny + (int64_t)l33 * nz;
+
+    out1 = (int32_t)(mac1 >> 12);
+    out2 = (int32_t)(mac2 >> 12);
+    out3 = (int32_t)(mac3 >> 12);
+}
+
+void Gte::cmd_op(uint32_t cmd)
+{
+    const int sf = (cmd >> 19) & 1;
+    const int lm = (cmd >> 10) & 1;
+    const int shift = sf ? 12 : 0;
+
+    const int32_t r11 = s16(ctrl_[C_R11R12]);
+    const int32_t r22 = s16(ctrl_[C_R22R23]);
+    const int32_t r33 = s16(ctrl_[C_R33]);
+
+    const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t ir3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    const int64_t mac1 = (int64_t)r22 * ir3 - (int64_t)r33 * ir2;
+    const int64_t mac2 = (int64_t)r33 * ir1 - (int64_t)r11 * ir3;
+    const int64_t mac3 = (int64_t)r11 * ir2 - (int64_t)r22 * ir1;
+
+    set_mac(1, mac1);
+    set_mac(2, mac2);
+    set_mac(3, mac3);
+    set_ir(1, (int32_t)(mac1 >> shift), lm);
+    set_ir(2, (int32_t)(mac2 >> shift), lm);
+    set_ir(3, (int32_t)(mac3 >> shift), lm);
+}
+
+void Gte::cmd_dpcs(uint32_t)
+{
+    int32_t r, g, b;
+    uint8_t code = 0;
+    unpack_rgbc(data_[D_RGBC], r, g, b, code);
+
+    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
+    const int32_t fc_r = (int32_t)(ctrl_[C_RFC] & 0xFFu);
+    const int32_t fc_g = (int32_t)(ctrl_[C_GFC] & 0xFFu);
+    const int32_t fc_b = (int32_t)(ctrl_[C_BFC] & 0xFFu);
+
+    const int32_t out_r = r + (int32_t)(((int64_t)(fc_r - r) * ir0) >> 12);
+    const int32_t out_g = g + (int32_t)(((int64_t)(fc_g - g) * ir0) >> 12);
+    const int32_t out_b = b + (int32_t)(((int64_t)(fc_b - b) * ir0) >> 12);
+
+    shift_rgb_pipeline(data_);
+    data_[D_RGB2] = pack_rgbc(u8_clamp(out_r), u8_clamp(out_g), u8_clamp(out_b), code);
+}
+
+void Gte::cmd_intpl(uint32_t cmd)
+{
+    const int sf = (cmd >> 19) & 1;
+    const int lm = (cmd >> 10) & 1;
+    const int shift = sf ? 12 : 0;
+
+    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
+    const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t ir3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    const int32_t fc1 = ((int32_t)(ctrl_[C_RFC] & 0xFFu)) << 4;
+    const int32_t fc2 = ((int32_t)(ctrl_[C_GFC] & 0xFFu)) << 4;
+    const int32_t fc3 = ((int32_t)(ctrl_[C_BFC] & 0xFFu)) << 4;
+
+    const int64_t mac1 = (int64_t)ir1 + (((int64_t)(fc1 - ir1) * ir0) >> 12);
+    const int64_t mac2 = (int64_t)ir2 + (((int64_t)(fc2 - ir2) * ir0) >> 12);
+    const int64_t mac3 = (int64_t)ir3 + (((int64_t)(fc3 - ir3) * ir0) >> 12);
+
+    set_mac(1, mac1);
+    set_mac(2, mac2);
+    set_mac(3, mac3);
+    set_ir(1, (int32_t)(mac1 >> shift), lm);
+    set_ir(2, (int32_t)(mac2 >> shift), lm);
+    set_ir(3, (int32_t)(mac3 >> shift), lm);
+}
+
+void Gte::cmd_ncs(uint32_t cmd)
+{
+    const int lm = (cmd >> 10) & 1;
+
+    int32_t ir1, ir2, ir3;
+    light_matrix_mul(ctrl_, vx(0), vy(0), vz(0), ir1, ir2, ir3);
+    set_ir(1, ir1, lm);
+    set_ir(2, ir2, lm);
+    set_ir(3, ir3, lm);
+
+    int32_t r, g, b;
+    uint8_t code = 0;
+    unpack_rgbc(data_[D_RGBC], r, g, b, code);
+
+    const int32_t i1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t i2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t i3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    const int32_t out_r = fixed_mul8(r, i1);
+    const int32_t out_g = fixed_mul8(g, i2);
+    const int32_t out_b = fixed_mul8(b, i3);
+
+    shift_rgb_pipeline(data_);
+    data_[D_RGB2] = pack_rgbc(u8_clamp(out_r), u8_clamp(out_g), u8_clamp(out_b), code);
+}
+
+void Gte::cmd_nct(uint32_t cmd)
+{
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        const uint32_t save_vxy0 = data_[D_VXY0];
+        const uint32_t save_vz0 = data_[D_VZ0];
+        const uint32_t src_vxy = (i == 0) ? D_VXY0 : (i == 1) ? D_VXY1 : D_VXY2;
+        const uint32_t src_vz = (i == 0) ? D_VZ0 : (i == 1) ? D_VZ1 : D_VZ2;
+        data_[D_VXY0] = data_[src_vxy];
+        data_[D_VZ0] = data_[src_vz];
+        cmd_ncs(cmd);
+        data_[D_VXY0] = save_vxy0;
+        data_[D_VZ0] = save_vz0;
+    }
+}
+
+void Gte::cmd_nccs(uint32_t cmd)
+{
+    cmd_ncs(cmd);
+    cmd_dpcs(cmd);
+}
+
+void Gte::cmd_ncct(uint32_t cmd)
+{
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        const uint32_t save_vxy0 = data_[D_VXY0];
+        const uint32_t save_vz0 = data_[D_VZ0];
+        const uint32_t src_vxy = (i == 0) ? D_VXY0 : (i == 1) ? D_VXY1 : D_VXY2;
+        const uint32_t src_vz = (i == 0) ? D_VZ0 : (i == 1) ? D_VZ1 : D_VZ2;
+        data_[D_VXY0] = data_[src_vxy];
+        data_[D_VZ0] = data_[src_vz];
+        cmd_nccs(cmd);
+        data_[D_VXY0] = save_vxy0;
+        data_[D_VZ0] = save_vz0;
+    }
+}
+
+void Gte::cmd_cc(uint32_t)
+{
+    int32_t r, g, b;
+    uint8_t code = 0;
+    unpack_rgbc(data_[D_RGBC], r, g, b, code);
+
+    const int32_t i1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t i2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t i3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    const int32_t out_r = fixed_mul8(r, i1);
+    const int32_t out_g = fixed_mul8(g, i2);
+    const int32_t out_b = fixed_mul8(b, i3);
+
+    shift_rgb_pipeline(data_);
+    data_[D_RGB2] = pack_rgbc(u8_clamp(out_r), u8_clamp(out_g), u8_clamp(out_b), code);
+}
+
+void Gte::cmd_ncds(uint32_t cmd)
+{
+    cmd_ncs(cmd);
+    cmd_dpcs(cmd);
+}
+
+void Gte::cmd_ncdt(uint32_t cmd)
+{
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        const uint32_t save_vxy0 = data_[D_VXY0];
+        const uint32_t save_vz0 = data_[D_VZ0];
+        const uint32_t src_vxy = (i == 0) ? D_VXY0 : (i == 1) ? D_VXY1 : D_VXY2;
+        const uint32_t src_vz = (i == 0) ? D_VZ0 : (i == 1) ? D_VZ1 : D_VZ2;
+        data_[D_VXY0] = data_[src_vxy];
+        data_[D_VZ0] = data_[src_vz];
+        cmd_ncds(cmd);
+        data_[D_VXY0] = save_vxy0;
+        data_[D_VZ0] = save_vz0;
+    }
+}
+
+void Gte::cmd_cdp(uint32_t cmd)
+{
+    cmd_cc(cmd);
+    cmd_dpcs(cmd);
+}
+
+void Gte::cmd_dcpl(uint32_t cmd)
+{
+    const uint32_t save = data_[D_RGBC];
+    data_[D_RGBC] = data_[D_RGB2];
+    cmd_dpcs(cmd);
+    data_[D_RGBC] = save;
+}
+
+void Gte::cmd_dpct(uint32_t cmd)
+{
+    const uint32_t save = data_[D_RGBC];
+    for (int i = 0; i < 3; ++i)
+    {
+        data_[D_RGBC] = data_[D_RGB0 + (uint32_t)i];
+        cmd_dpcs(cmd);
+    }
+    data_[D_RGBC] = save;
+}
+
 int Gte::execute(uint32_t cop2_instruction)
 {
     // On extrait le champ "function" sur 6 bits (commande).
@@ -365,8 +644,38 @@ int Gte::execute(uint32_t cop2_instruction)
         case 0x06: // NCLIP
             cmd_nclip(cmd);
             return 1;
+        case 0x0C: // OP
+            cmd_op(cmd);
+            return 1;
+        case 0x10: // DPCS
+            cmd_dpcs(cmd);
+            return 1;
+        case 0x11: // INTPL
+            cmd_intpl(cmd);
+            return 1;
         case 0x12: // MVMVA
             cmd_mvmva(cmd);
+            return 1;
+        case 0x13: // NCDS
+            cmd_ncds(cmd);
+            return 1;
+        case 0x14: // CDP
+            cmd_cdp(cmd);
+            return 1;
+        case 0x16: // NCDT
+            cmd_ncdt(cmd);
+            return 1;
+        case 0x1B: // NCCS
+            cmd_nccs(cmd);
+            return 1;
+        case 0x1C: // CC
+            cmd_cc(cmd);
+            return 1;
+        case 0x1E: // NCS
+            cmd_ncs(cmd);
+            return 1;
+        case 0x20: // NCT
+            cmd_nct(cmd);
             return 1;
         case 0x01: // RTPS
             cmd_rtps(cmd);
@@ -383,11 +692,20 @@ int Gte::execute(uint32_t cop2_instruction)
         case 0x28: // SQR
             cmd_sqr(cmd);
             return 1;
+        case 0x29: // DCPL
+            cmd_dcpl(cmd);
+            return 1;
+        case 0x2A: // DPCT
+            cmd_dpct(cmd);
+            return 1;
         case 0x3D: // GPF
             cmd_gpf(cmd);
             return 1;
         case 0x3E: // GPL
             cmd_gpl(cmd);
+            return 1;
+        case 0x3F: // NCCT
+            cmd_ncct(cmd);
             return 1;
         default:
             // Pour une base éducative, on ne “fake” pas: si non implémenté, on laisse MAC/IR

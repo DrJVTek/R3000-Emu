@@ -28,6 +28,11 @@ class Gte
     uint32_t read_ctrl(uint32_t idx) const;
     void write_ctrl(uint32_t idx, uint32_t v);
 
+    // LWC2/SWC2 utilisent le même espace de registres que MTC2/MFC2 (data regs).
+    // On garde une API explicite pour rendre l'intention claire dans le CPU.
+    void lwc2(uint32_t gte_reg, uint32_t word);
+    uint32_t swc2(uint32_t gte_reg) const;
+
     // Exécute une instruction COP2 "CO" (commande GTE).
     // On attend typiquement le mot d'instruction complet (opcode 0x12 inclus), car les bits
     // de contrôle (sf/lm/mx/v/tx) sont dedans.
@@ -140,6 +145,19 @@ class Gte
     void cmd_sqr(uint32_t cmd);
     void cmd_gpf(uint32_t cmd);
     void cmd_gpl(uint32_t cmd);
+    void cmd_op(uint32_t cmd);
+    void cmd_dpcs(uint32_t cmd);
+    void cmd_intpl(uint32_t cmd);
+    void cmd_ncds(uint32_t cmd);
+    void cmd_cdp(uint32_t cmd);
+    void cmd_ncdt(uint32_t cmd);
+    void cmd_nccs(uint32_t cmd);
+    void cmd_cc(uint32_t cmd);
+    void cmd_ncs(uint32_t cmd);
+    void cmd_nct(uint32_t cmd);
+    void cmd_dcpl(uint32_t cmd);
+    void cmd_dpct(uint32_t cmd);
+    void cmd_ncct(uint32_t cmd);
 
     uint32_t data_[32]{};
     uint32_t ctrl_[32]{};

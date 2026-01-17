@@ -1429,15 +1429,56 @@ Cpu::StepResult Cpu::step()
             }
         case 0x30: // LWC0
         case 0x31: // LWC1
-        case 0x32: // LWC2 (GTE load)
         case 0x33: // LWC3
         case 0x38: // SWC0
         case 0x39: // SWC1
-        case 0x3A: // SWC2 (GTE store)
         case 0x3B: // SWC3
             {
                 // Les transferts coprocessor seront implémentés quand le GTE sera ajouté.
                 raise_exception(EXC_RI, 0, r.pc);
+                break;
+            }
+        case 0x32:
+            { // LWC2 (GTE load)
+                // LWC2 rt, off(rs)
+                // Equivalent à LW, mais la destination est un registre "data" du GTE (COP2).
+                const uint32_t s = rs(instr);
+                const uint32_t t = rt(instr); // numéro de registre GTE (0..31)
+                const int32_t off = (int16_t)imm_s(instr);
+                const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
+                uint32_t v = 0;
+                if (!load_u32(addr, v))
+                {
+                    break;
+                }
+                mem_valid = 1;
+                mem_op = "LWC2";
+                mem_addr = addr;
+                mem_val = v;
+
+                // Pour l'instant: écriture immédiate dans le GTE (pédago).
+                // Si on veut coller plus finement au timing hardware, on pourra ajouter une
+                // latence.
+                gte_.lwc2(t, v);
+                break;
+            }
+        case 0x3A:
+            { // SWC2 (GTE store)
+                // SWC2 rt, off(rs)
+                // Equivalent à SW, mais la source est un registre "data" du GTE (COP2).
+                const uint32_t s = rs(instr);
+                const uint32_t t = rt(instr); // numéro de registre GTE (0..31)
+                const int32_t off = (int16_t)imm_s(instr);
+                const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
+                const uint32_t v = gte_.swc2(t);
+                if (!store_u32(addr, v))
+                {
+                    break;
+                }
+                mem_valid = 1;
+                mem_op = "SWC2";
+                mem_addr = addr;
+                mem_val = v;
                 break;
             }
         case 0x2F:
