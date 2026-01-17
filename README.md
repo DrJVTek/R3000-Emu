@@ -2,6 +2,11 @@
 
 Émulateur **R3000 (MIPS I / PS1)** en **ligne de commande**, orienté **pédagogie live** (logs, trace, code commenté).
 
+## BMAD / b-mad (pour le live)
+
+Le repo embarque aussi l’outillage **BMAD** (dossiers `/_bmad/`, `/.cursor/commands/`, `/.claude/commands/`) afin de montrer en live
+comment on s’organise / exécute des workflows.
+
 ## Build (Windows / Visual Studio)
 
 ```powershell
