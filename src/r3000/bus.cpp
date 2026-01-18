@@ -113,7 +113,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     if (addr == kMmioPrintU32)
     {
         // Démo live: on "printf" côté hôte.
-        std::printf("[MMIO] print_u32: %u (0x%08X)\n", v, v);
+        // stderr pour rester visible même si stdout est spam par --pretty/logs.
+        std::fprintf(stderr, "[GUEST:MMIO] %u (0x%08X)\n", v, v);
+        std::fflush(stderr);
         log_mem("WMMIO", addr, v);
         return true;
     }

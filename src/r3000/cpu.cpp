@@ -463,13 +463,16 @@ Cpu::StepResult Cpu::step()
                             if (svc == 0xFF00u)
                             {
                                 const uint32_t v = gpr_[4];
-                                std::printf("[SYSCALL] %u (0x%08X)\n", v, v);
+                                // On imprime sur stderr pour éviter d'être "noyé" par le --pretty/logs
+                                // (stdout). Ça rend le printf guest beaucoup plus visible en live.
+                                std::fprintf(stderr, "[GUEST] %u (0x%08X)\n", v, v);
+                                std::fflush(stderr);
                             }
                             else if (svc == 0xFF02u)
                             {
                                 const uint8_t ch = (uint8_t)(gpr_[4] & 0xFFu);
-                                std::printf("%c", (char)ch);
-                                std::fflush(stdout);
+                                std::fputc((int)ch, stderr);
+                                std::fflush(stderr);
                             }
                             else if (svc == 0xFF03u)
                             {
@@ -484,10 +487,10 @@ Cpu::StepResult Cpu::step()
                                         break;
                                     if (b == 0)
                                         break;
-                                    std::printf("%c", (char)b);
+                                    std::fputc((int)b, stderr);
                                     addr++;
                                 }
-                                std::fflush(stdout);
+                                std::fflush(stderr);
                             }
                             else
                             {
