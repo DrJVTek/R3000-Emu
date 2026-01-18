@@ -16,3 +16,6 @@ compile_commands.json
 
 # example build outputs
 examples/**/build/
+
+# local captures / artifacts
+guest.txt

@@ -93,3 +93,9 @@ cd ..\..
 Le `hello` utilise les **host syscalls** (SYSCALL) pour imprimer dans la console:
 `print_u32 / putc / print_cstr`.
 
+
+## Slides (PowerPoint)
+
+Le PowerPoint de la partie 1 (spec) du live **PSXVR** est dans le repo :
+- [psxvr 1.pptx](psxvr%201.pptx)
+
