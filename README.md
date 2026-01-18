@@ -45,6 +45,37 @@ cmake --build build -j
 
 Sur ce PC, `mipsel-none-elf-gcc` est déjà présent (toolchain MIPS little-endian).
 
+### Installer `mipsel-none-elf-gcc` (si pas déjà installé)
+
+#### Option A (recommandée) : MSYS2
+
+- Installer MSYS2 : `https://www.msys2.org/`
+- Ouvrir **“MSYS2 UCRT64”** puis exécuter :
+
+```bash
+pacman -Syu --noconfirm
+pacman -S --noconfirm mingw-w64-ucrt-x86_64-mips-elf-gcc
+```
+
+- Vérifier :
+
+```bash
+mipsel-none-elf-gcc --version
+```
+
+- Si la commande n’est pas trouvée dans PowerShell/Windows Terminal, ajouter au `PATH` :
+  - `C:\msys64\ucrt64\bin`
+
+#### Option B : toolchain “standalone” (ZIP)
+
+- Télécharger une toolchain précompilée qui fournit `mipsel-none-elf-gcc.exe`
+- Dézipper, puis ajouter au `PATH` le dossier `bin` (celui qui contient `mipsel-none-elf-gcc.exe`)
+- Vérifier :
+
+```powershell
+mipsel-none-elf-gcc --version
+```
+
 - **Vérifier**:
 
 ```powershell
