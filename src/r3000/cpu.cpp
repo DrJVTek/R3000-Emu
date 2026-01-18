@@ -442,9 +442,58 @@ Cpu::StepResult Cpu::step()
                         }
                     case 0x0C:
                         { // SYSCALL
-                            // SYSCALL: déclenche une exception. (Dans une vraie PS1, c'est géré par
-                            // BIOS/OS.)
-                            raise_exception(EXC_SYS, 0, r.pc);
+                            // SYSCALL
+                            //
+                            // Sur PS1, beaucoup d'outils/devcalls passent par des appels BIOS
+                            // (tables A0/B0/C0) ou des mécanismes de debug.
+                            //
+                            // Pour notre émulateur "pédago live", on implémente aussi quelques
+                            // "host syscalls" *optionnels* pour faire du printf/debug facilement,
+                            // sans GPU/BIOS:
+                            // - v0 = 0xFF00 : print_u32(a0)
+                            // - v0 = 0xFF02 : putc(a0 & 0xFF)
+                            // - v0 = 0xFF03 : print_cstr(a0)  (a0 = adresse virtuelle)
+                            //
+                            // Convention registres MIPS:
+                            // - v0 = r2, a0 = r4
+                            // Note: certains loaders utilisent ADDIU pour charger des constantes
+                            // > 0x7FFF, ce qui sign-extend en 0xFFFFxxxx.
+                            // Pour être tolérant (et pédagogique), on compare sur 16 bits.
+                            const uint32_t svc = gpr_[2] & 0xFFFFu;
+                            if (svc == 0xFF00u)
+                            {
+                                const uint32_t v = gpr_[4];
+                                std::printf("[SYSCALL] %u (0x%08X)\n", v, v);
+                            }
+                            else if (svc == 0xFF02u)
+                            {
+                                const uint8_t ch = (uint8_t)(gpr_[4] & 0xFFu);
+                                std::printf("%c", (char)ch);
+                                std::fflush(stdout);
+                            }
+                            else if (svc == 0xFF03u)
+                            {
+                                // Lecture d'une C-string depuis la mémoire émulée.
+                                // On cappe pour éviter les boucles infinies.
+                                const uint32_t addr0 = gpr_[4];
+                                uint32_t addr = addr0;
+                                for (uint32_t i = 0; i < 1024; ++i)
+                                {
+                                    uint8_t b = 0;
+                                    if (!load_u8(addr, b))
+                                        break;
+                                    if (b == 0)
+                                        break;
+                                    std::printf("%c", (char)b);
+                                    addr++;
+                                }
+                                std::fflush(stdout);
+                            }
+                            else
+                            {
+                                // Sinon, comportement "réaliste": exception SYSCALL.
+                                raise_exception(EXC_SYS, 0, r.pc);
+                            }
                             break;
                         }
                     case 0x0D:

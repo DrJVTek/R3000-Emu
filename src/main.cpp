@@ -190,6 +190,75 @@ static void build_gte_demo_rom(uint8_t* mem, uint32_t base_addr)
     pc += 4;
 }
 
+// Mini programme "printf" via SYSCALL (host syscalls):
+// - v0=0xFF03, a0=addr : print_cstr
+// - v0=0xFF00, a0=val  : print_u32
+// - v0=0xFF02, a0=ch   : putc
+static void build_syscall_demo_rom(uint8_t* mem, uint32_t base_addr)
+{
+    // Ecrire la string dans la RAM (hors du code) :
+    // On choisit une adresse simple dans la RAM (0x00000100).
+    const uint32_t str_addr = 0x00000100u;
+    const char* msg = "Hello from SYSCALL printf!\\n";
+    for (uint32_t i = 0; msg[i] != '\0'; ++i)
+    {
+        mem[str_addr + i] = (uint8_t)msg[i];
+    }
+    mem[str_addr + (uint32_t)std::strlen(msg)] = 0;
+
+    uint32_t pc = base_addr;
+
+    // a0 = str_addr
+    write_u32_le(mem, pc, enc_i(0x09, 0, 4, (uint16_t)str_addr));
+    pc += 4;
+    // v0 = 0xFF03 (print_cstr) : utiliser ORI pour éviter le sign-extend de ADDIU.
+    write_u32_le(mem, pc, enc_i(0x0D, 0, 2, 0xFF03));
+    pc += 4;
+    // syscall
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0x0C));
+    pc += 4;
+
+    // Compteur: t1 = 1..5, print_u32 à chaque tour
+    write_u32_le(mem, pc, enc_i(0x09, 0, 9, 1));
+    pc += 4;
+    write_u32_le(mem, pc, enc_i(0x09, 0, 10, 6));
+    pc += 4;
+    const uint32_t loop_pc = pc;
+
+    // a0 = t1
+    write_u32_le(mem, pc, enc_r(9, 0, 4, 0, 0x21)); // addu a0,t1,r0
+    pc += 4;
+    // v0 = 0xFF00 (print_u32)
+    write_u32_le(mem, pc, enc_i(0x0D, 0, 2, 0xFF00));
+    pc += 4;
+    // syscall
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0x0C));
+    pc += 4;
+
+    // a0 = '\n' ; v0=0xFF02 ; syscall
+    write_u32_le(mem, pc, enc_i(0x09, 0, 4, (uint16_t)'\n'));
+    pc += 4;
+    write_u32_le(mem, pc, enc_i(0x0D, 0, 2, 0xFF02));
+    pc += 4;
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0x0C));
+    pc += 4;
+
+    // t1++
+    write_u32_le(mem, pc, enc_i(0x09, 9, 9, 1));
+    pc += 4;
+    // bne t1, t2, loop
+    const int32_t off_words = (int32_t)(loop_pc - (pc + 4)) / 4;
+    write_u32_le(mem, pc, enc_i(0x05, 9, 10, (uint16_t)off_words));
+    pc += 4;
+    // nop (delay slot)
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0));
+    pc += 4;
+
+    // break
+    write_u32_le(mem, pc, enc_r(0, 0, 0, 0, 0x0D));
+    pc += 4;
+}
+
 static const char* arg_value(int argc, char** argv, const char* key_prefix)
 {
     const size_t n = std::strlen(key_prefix);
@@ -241,6 +310,8 @@ int main(int argc, char** argv)
     const char* demo = arg_value(argc, argv, "--demo=");
     if (demo && std::strcmp(demo, "gte") == 0)
         build_gte_demo_rom(ram, reset_pc);
+    else if (demo && std::strcmp(demo, "syscall") == 0)
+        build_syscall_demo_rom(ram, reset_pc);
     else
         build_demo_rom(ram, reset_pc);
 
