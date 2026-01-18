@@ -47,6 +47,18 @@ class Cpu
         pretty_ = enabled ? 1 : 0;
     }
 
+    // Petites APIs "outillage" (loader) pour initialiser un programme chargé depuis un fichier.
+    // On reste minimal: pas d'OS/BIOS, donc le loader doit pouvoir positionner PC/GP/SP.
+    void set_pc(uint32_t pc)
+    {
+        pc_ = pc;
+    }
+
+    void set_gpr(uint32_t idx, uint32_t v)
+    {
+        set_reg(idx, v);
+    }
+
     StepResult step();
 
   private:

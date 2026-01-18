@@ -12,6 +12,7 @@ add_executable(r3000_emu
   src/main.cpp
   src/log/logger.cpp
   src/gte/gte.cpp
+  src/loader/loader.cpp
   src/r3000/bus.cpp
   src/r3000/cpu.cpp
 )

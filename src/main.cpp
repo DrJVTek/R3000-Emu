@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "loader/loader.h"
 #include "log/logger.h"
 #include "r3000/bus.h"
 #include "r3000/cpu.h"
@@ -305,20 +306,69 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // ROM chargée à 0x00000000 (démo).
-    const uint32_t reset_pc = 0x00000000u;
-    const char* demo = arg_value(argc, argv, "--demo=");
-    if (demo && std::strcmp(demo, "gte") == 0)
-        build_gte_demo_rom(ram, reset_pc);
-    else if (demo && std::strcmp(demo, "syscall") == 0)
-        build_syscall_demo_rom(ram, reset_pc);
+    // Mode "fichier": charge un binaire PS1 (PS-X EXE ou ELF) dans la RAM et exécute.
+    // Sinon, on retombe sur les démos hardcodées (pratique pour tester vite en live).
+    const char* load_path = arg_value(argc, argv, "--load=");
+    const char* fmt_s = arg_value(argc, argv, "--format=");
+
+    loader::Format fmt = loader::Format::auto_detect;
+    if (fmt_s)
+    {
+        if (std::strcmp(fmt_s, "auto") == 0)
+            fmt = loader::Format::auto_detect;
+        else if (std::strcmp(fmt_s, "psxexe") == 0)
+            fmt = loader::Format::psxexe;
+        else if (std::strcmp(fmt_s, "elf") == 0)
+            fmt = loader::Format::elf;
+        else
+        {
+            std::fprintf(stderr, "Unknown --format=%s (use auto|psxexe|elf)\n", fmt_s);
+            return 1;
+        }
+    }
+
+    // PC par défaut (si pas de loader).
+    uint32_t reset_pc = 0x00000000u;
+    loader::LoadedImage img{};
+    int have_img = 0;
+    if (load_path)
+    {
+        char err[256];
+        err[0] = '\0';
+        if (!loader::load_file_into_ram(load_path, fmt, ram, kRamSize, &img, err, sizeof(err)))
+        {
+            std::fprintf(stderr, "Load failed: %s\n", err[0] ? err : "unknown error");
+            return 1;
+        }
+        have_img = 1;
+        reset_pc = img.entry_pc;
+    }
     else
-        build_demo_rom(ram, reset_pc);
+    {
+        const char* demo = arg_value(argc, argv, "--demo=");
+        if (demo && std::strcmp(demo, "gte") == 0)
+            build_gte_demo_rom(ram, reset_pc);
+        else if (demo && std::strcmp(demo, "syscall") == 0)
+            build_syscall_demo_rom(ram, reset_pc);
+        else
+            build_demo_rom(ram, reset_pc);
+    }
 
     r3000::Bus bus(ram, kRamSize, &logger);
     r3000::Cpu cpu(bus, &logger);
     cpu.reset(reset_pc);
     cpu.set_pretty(has_flag(argc, argv, "--pretty"));
+
+    if (have_img)
+    {
+        // Initialisation minimale des registres utiles.
+        // - gp = r28, sp = r29
+        if (img.has_gp)
+            cpu.set_gpr(28, img.gp);
+        if (img.has_sp)
+            cpu.set_gpr(29, img.sp);
+        cpu.set_pc(img.entry_pc);
+    }
 
     rlog::logger_logf(
         &logger, rlog::Level::info, rlog::Category::exec, "R3000 demo start (PC=0x%08X)", cpu.pc()
