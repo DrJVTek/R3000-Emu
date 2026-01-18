@@ -16,13 +16,7 @@ cmake --build build -j
 
 ## Run
 
-### Démo (mini-ROM intégrée)
-
-```powershell
-.\build\Debug\r3000_emu.exe --pretty
-```
-
-- **Binaire externe (ELF / PS-X EXE)**:
+### Charger un binaire externe (ELF / PS-X EXE)
 
 ```powershell
 .\build\Debug\r3000_emu.exe --pretty --load=path\to\hello.elf --format=elf
@@ -31,7 +25,7 @@ cmake --build build -j
 - `--pretty` : trace lisible (1 ligne par instruction).
 - `--log-level=trace|debug|info|warn|error`
 - `--log-cats=fetch,decode,exec,mem,exc,all`
-- `--load=...` : charge un binaire externe dans la RAM et exécute.
+- `--load=...` : charge un binaire dans la RAM et exécute.
 - `--format=auto|elf|psxexe`
 
 ## Structure
