@@ -4,14 +4,45 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(_WIN32)
+#include <codecvt>
+#include <locale>
+#include <string>
+#endif
+
 namespace loader
 {
+static std::FILE* fopen_utf8(const char* path, const char* mode)
+{
+    if (!path || !mode)
+        return nullptr;
+#if defined(_WIN32)
+    // Allow non-ASCII paths on Windows (UTF-8 -> wide -> _wfopen).
+    // Note: uses std::codecvt for compatibility with clangd setups where std::filesystem isn't available.
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
+    const std::wstring wpath = conv.from_bytes(path);
+    const std::wstring wmode = conv.from_bytes(mode);
+    return _wfopen(wpath.c_str(), wmode.c_str());
+#else
+    return std::fopen(path, mode);
+#endif
+}
 
 static void set_err(char* err, size_t cap, const char* msg)
 {
     if (!err || cap == 0)
         return;
     std::snprintf(err, cap, "%s", msg ? msg : "error");
+}
+
+static void set_errf(char* err, size_t cap, const char* fmt, const char* a, const char* b = nullptr)
+{
+    if (!err || cap == 0 || !fmt)
+        return;
+    if (b)
+        std::snprintf(err, cap, fmt, a ? a : "", b ? b : "");
+    else
+        std::snprintf(err, cap, fmt, a ? a : "");
 }
 
 static uint32_t read_u32_le(const uint8_t* p)
@@ -85,10 +116,12 @@ static int load_psx_exe(
     if (b_size != 0)
     {
         const uint32_t b_paddr = virt_to_phys_ps1(b_addr);
-        if ((size_t)b_paddr + (size_t)b_size <= ram_size)
+        if ((size_t)b_paddr + (size_t)b_size > ram_size)
         {
-            std::memset(ram + b_paddr, 0, b_size);
+            set_err(err, err_cap, "PS-X EXE BSS out of RAM bounds");
+            return 0;
         }
+        std::memset(ram + b_paddr, 0, b_size);
     }
 
     out->entry_pc = pc0;
@@ -218,10 +251,10 @@ int load_file_into_ram(
         return 0;
     }
 
-    std::FILE* f = std::fopen(path, "rb");
+    std::FILE* f = fopen_utf8(path, "rb");
     if (!f)
     {
-        set_err(err, err_cap, "could not open file");
+        set_errf(err, err_cap, "could not open '%s'", path);
         return 0;
     }
 
@@ -269,7 +302,7 @@ int load_file_into_ram(
             ok = load_elf32(buf, (size_t)n, ram, ram_size, &img, err, err_cap);
         else
         {
-            set_err(err, err_cap, "unknown file format (use --format=psxexe|elf)");
+            set_err(err, err_cap, "unknown file format (use --format=auto|psxexe|elf)");
             ok = 0;
         }
     }

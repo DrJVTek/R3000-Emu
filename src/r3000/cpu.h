@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
+#include <array>
 
+#include "../log/filelog.h"
 #include "../gte/gte.h"
 #include "../log/logger.h"
 #include "bus.h"
@@ -47,6 +50,73 @@ class Cpu
         pretty_ = enabled ? 1 : 0;
     }
 
+    void set_stop_on_high_ram(int enabled)
+    {
+        stop_on_high_ram_ = enabled ? 1 : 0;
+    }
+
+    void set_stop_on_bios_to_ram_nop(int enabled)
+    {
+        stop_on_bios_to_ram_nop_ = enabled ? 1 : 0;
+    }
+
+    // Debug: stop dès qu'on ENTRE dans une zone de NOPs en RAM (transition depuis une instr non-NOP).
+    // C'est utile quand le BIOS part exécuter du vide vers 0x801FFxxx, mais qu'on veut voir
+    // l'instruction qui a provoqué le saut (avant d'avoir 1000 lignes de 0x00000000).
+    void set_stop_on_ram_nop(int enabled)
+    {
+        stop_on_ram_nop_ = enabled ? 1 : 0;
+    }
+
+    // Debug: stop when PC reaches an exact value (virtual address).
+    void set_stop_on_pc(uint32_t pc, int enabled)
+    {
+        stop_on_pc_ = enabled ? 1 : 0;
+        stop_pc_ = pc;
+        stopped_on_pc_ = 0;
+    }
+
+    // Debug: log verbeux des accès MMIO (I/O PS1) avec nom de registre si connu.
+    void set_trace_io(int enabled)
+    {
+        trace_io_ = enabled ? 1 : 0;
+    }
+
+    // Debug/HLE: active des trampolines sécurisés (vecteurs A0/B0/C0 et exception vector RAM).
+    void set_hle_vectors(int enabled);
+
+    // Debug: fichier de sortie texte (BIOS putc / syscalls "write-like" / etc).
+    // Objectif: avoir un "console.log" séparé et facile à relire pendant le live.
+    void set_text_out(std::FILE* f)
+    {
+        text_out_ = f;
+    }
+
+    // Duplique le texte (BIOS putc / write-like) vers un log combiné (ex: logs/io.log).
+    // On bufferise par ligne pour éviter le spam par caractère.
+    void set_text_io_sink(const flog::Sink& s, const flog::Clock& c)
+    {
+        text_io_ = s;
+        text_clock_ = c;
+        text_has_clock_ = 1;
+    }
+
+    // Logs "système" pour événements CPU à fort signal (ex: boucle d'exception).
+    // Objectif: pas de trace CPU/GTE complète ici, seulement quelques lignes clés.
+    void set_sys_log_sinks(const flog::Sink& sys, const flog::Sink& combined, const flog::Clock& c)
+    {
+        sys_log_ = sys;
+        sys_io_ = combined;
+        sys_clock_ = c;
+        sys_has_clock_ = 1;
+    }
+
+    // Compare-with-DuckStation: write parseable key=0x... blocks at debug-loop PCs.
+    void set_compare_file(std::FILE* f)
+    {
+        compare_file_ = f;
+    }
+
     // Petites APIs "outillage" (loader) pour initialiser un programme chargé depuis un fichier.
     // On reste minimal: pas d'OS/BIOS, donc le loader doit pouvoir positionner PC/GP/SP.
     void set_pc(uint32_t pc)
@@ -63,7 +133,8 @@ class Cpu
 
   private:
     // COP0 minimal (suffisant pour exceptions et quelques move).
-    // On reste volontairement simple pour une démo: pas de TLB, pas de timing, pas d'irq.
+    // On reste volontairement simple pour une démo: pas de TLB, pas de timing cycle-accurate.
+    // NOTE: on supporte néanmoins un minimum d'IRQ (EXC_INT) pour permettre au BIOS d'avancer.
     enum Cop0Reg : uint32_t
     {
         COP0_INDEX = 0,
@@ -163,6 +234,85 @@ class Cpu
     uint32_t cop0_[32]{};
 
     PendingLoad pending_load_{};
+
+    // R3000A I-cache (4KB) - utilisé comme "data store" quand COP0.Status.Isc=1 (cache isolated).
+    // Pour le bring-up BIOS, l'essentiel est que les boucles d'init cache n'écrasent pas la RAM.
+    std::array<uint8_t, 4u * 1024u> icache_data_{};
+
+    // Trace ring-buffer (dernieres instructions fetchées) pour debug BIOS.
+    // Utile quand on veut comprendre un IFETCH fault sans activer --pretty.
+    uint32_t recent_pc_[256]{};
+    uint32_t recent_instr_[256]{};
+    uint32_t recent_pos_{0};
+    int stop_on_high_ram_{0};
+    int stopped_on_high_ram_{0};
+    int stop_on_bios_to_ram_nop_{0};
+    int stop_on_ram_nop_{0};
+    int stop_on_pc_{0};
+    int stopped_on_pc_{0};
+    uint32_t stop_pc_{0};
+    int trace_io_{0};
+    int hle_vectors_{0};
+    std::FILE* text_out_{nullptr};
+    flog::Sink text_io_{};
+    flog::Clock text_clock_{};
+    int text_has_clock_{0};
+    char text_line_[512]{};
+    uint32_t text_pos_{0};
+
+    flog::Sink sys_log_{};
+    flog::Sink sys_io_{};
+    flog::Clock sys_clock_{};
+    int sys_has_clock_{0};
+
+    std::FILE* compare_file_{nullptr};
+
+    uint64_t exc_vec_hits_{0};
+
+    // HLE BIOS vectors (bring-up): petit état pour quelques services kernel.
+    // NOTE: ce n'est pas "PS1-accurate"; objectif = permettre au BIOS d'avancer,
+    // tout en gardant le code lisible pour le live.
+    uint32_t kalloc_ptr_{0};
+    uint32_t kalloc_end_{0};
+    uint32_t entryint_struct_addr_{0};
+    uint32_t entryint_hook_addr_{0};
+
+    struct HleEvent
+    {
+        uint32_t cls;
+        uint32_t spec;
+        uint32_t mode;
+        uint32_t func;
+        uint32_t status;
+    };
+
+    HleEvent hle_events_[32]{};
+    uint32_t hle_vblank_div_{0};
+    int hle_pseudo_vblank_{0};
+
+    // HLE BIOS File I/O (cdrom:) - minimal pour permettre le boot CD.
+    struct HleFile
+    {
+        int used;
+        uint32_t lba;   // LBA ISO9660 (secteurs 2048)
+        uint32_t size;  // taille fichier en bytes
+        uint32_t pos;   // position courante en bytes
+    };
+
+    HleFile hle_files_[16]{};
+    uint32_t hle_last_error_{0};
+    uint64_t hle_wait_event_calls_{0};
+    uint64_t hle_mark_ready_calls_{0};
+    uint32_t dbg_loop_dumped_{0};
+    uint32_t dbg_loop_patched_{0};
+    uint32_t dbg_ef30_dumped_{0};
+    uint32_t dbg_de24_dumped_{0};
+    uint32_t dbg_e520_dumped_{0};
+    uint32_t dbg_6797c_dumped_{0};
+    uint32_t dbg_67938_dumped_{0};
+    uint32_t spin_pc_{0};
+    uint32_t spin_count_{0};
+    // NOTE: pas de "skip loop" ici: on préfère corriger l'émulation plutôt que patcher le flow du BIOS.
 
     // COP2 = GTE (PS1). Séparé du CPU pour garder le code propre.
     gte::Gte gte_;

@@ -1,9 +1,22 @@
+#include <cinttypes>
+#include <chrono>
 #include <cstdint>
+#include <cstddef>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
+#if defined(_WIN32)
+#include <direct.h>
+#include <codecvt>
+#include <locale>
+#include <string>
+#endif
+
+#include "emu/core.h"
 #include "loader/loader.h"
+#include "log/filelog.h"
 #include "log/logger.h"
 #include "r3000/bus.h"
 #include "r3000/cpu.h"
@@ -34,9 +47,115 @@ static void print_usage(void)
     std::fprintf(
         stderr,
         "Usage:\n"
-        "  r3000_emu --load=<file> [--format=auto|elf|psxexe] [--pretty] [--log-level=..] "
-        "[--log-cats=..]\n"
+        "  r3000_emu [--bios=<bios.bin>] [--cd=<image>] [--gpu-dump=<file>] [--wav-output=<file.wav>]\n"
+        "            [--max-steps=N] [--pretty] [--log-level=..] [--log-cats=..]\n"
+        "  r3000_emu --load=<file> [--format=auto|elf|psxexe] [--pretty] [--max-steps=N]\n"
+        "\n"
+        "Options:\n"
+        "  --bios=<file>       Load BIOS ROM (default: bios/ps1_bios.bin)\n"
+        "  --cd=<image>        Insert CD image (CUE/BIN)\n"
+        "  --gpu-dump=<file>   Dump GPU commands to file\n"
+        "  --wav-output=<file> Save SPU audio to WAV file\n"
+        "  --max-steps=N       Stop after N instructions\n"
+        "  --load=<file>       Load ELF or PS-X EXE directly (skips BIOS)\n"
+        "  --pretty            Pretty print instructions\n"
+        "  --trace-io          Verbose MMIO logging\n"
+        "  --pc-sample=N       Print PC every N steps\n"
     );
+}
+
+static int read_file_malloc(const char* path, uint8_t** out_buf, uint32_t* out_size, char* err, size_t err_cap)
+{
+    if (err && err_cap)
+        err[0] = '\0';
+    if (!path || !out_buf || !out_size)
+        return 0;
+
+    auto fopen_utf8 = [](const char* p, const char* mode) -> std::FILE* {
+        if (!p || !mode)
+            return nullptr;
+#if defined(_WIN32)
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
+        const std::wstring wpath = conv.from_bytes(p);
+        const std::wstring wmode = conv.from_bytes(mode);
+        return _wfopen(wpath.c_str(), wmode.c_str());
+#else
+        return std::fopen(p, mode);
+#endif
+    };
+
+    std::FILE* f = fopen_utf8(path, "rb");
+    if (!f)
+    {
+        if (err && err_cap)
+            std::snprintf(err, err_cap, "could not open '%s'", path);
+        return 0;
+    }
+
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n <= 0)
+    {
+        std::fclose(f);
+        if (err && err_cap)
+            std::snprintf(err, err_cap, "empty file '%s'", path);
+        return 0;
+    }
+
+    uint8_t* buf = (uint8_t*)std::malloc((size_t)n);
+    if (!buf)
+    {
+        std::fclose(f);
+        if (err && err_cap)
+            std::snprintf(err, err_cap, "out of memory");
+        return 0;
+    }
+
+    const size_t got = std::fread(buf, 1, (size_t)n, f);
+    std::fclose(f);
+    if (got != (size_t)n)
+    {
+        std::free(buf);
+        if (err && err_cap)
+            std::snprintf(err, err_cap, "failed to read '%s'", path);
+        return 0;
+    }
+
+    *out_buf = buf;
+    *out_size = (uint32_t)n;
+    return 1;
+}
+
+static uint64_t parse_u64_or_zero(const char* s)
+{
+    if (!s || !*s)
+        return 0;
+    return std::strtoull(s, nullptr, 0);
+}
+
+static void ensure_dir_logs(void)
+{
+#if defined(_WIN32)
+    _mkdir("logs");
+#endif
+}
+
+static flog::Level parse_flog_level_or(const char* s, flog::Level fallback)
+{
+    if (!s || !*s)
+        return fallback;
+    if (std::strcmp(s, "error") == 0)
+        return flog::Level::error;
+    if (std::strcmp(s, "warn") == 0)
+        return flog::Level::warn;
+    if (std::strcmp(s, "info") == 0)
+        return flog::Level::info;
+    if (std::strcmp(s, "debug") == 0)
+        return flog::Level::debug;
+    if (std::strcmp(s, "trace") == 0)
+        return flog::Level::trace;
+    return fallback;
 }
 
 int main(int argc, char** argv)
@@ -56,12 +175,12 @@ int main(int argc, char** argv)
         rlog::logger_set_cats(&logger, rlog::parse_categories_csv(cats));
     }
 
+    const char* bios_path = arg_value(argc, argv, "--bios=");
     const char* load_path = arg_value(argc, argv, "--load=");
-    if (!load_path)
-    {
-        print_usage();
-        return 1;
-    }
+    const char* cd_path = arg_value(argc, argv, "--cd=");
+    const char* gpu_dump = arg_value(argc, argv, "--gpu-dump=");
+    const char* wav_output = arg_value(argc, argv, "--wav-output=");
+    const int trace_io = has_flag(argc, argv, "--trace-io");
 
     const char* fmt_s = arg_value(argc, argv, "--format=");
     loader::Format fmt = loader::Format::auto_detect;
@@ -80,62 +199,211 @@ int main(int argc, char** argv)
         }
     }
 
-    const uint32_t kRamSize = 2u * 1024u * 1024u;
-    uint8_t* ram = (uint8_t*)std::calloc(1, kRamSize);
-    if (!ram)
-    {
-        std::fprintf(stderr, "Out of memory\n");
-        return 1;
-    }
+    const uint64_t max_steps = parse_u64_or_zero(arg_value(argc, argv, "--max-steps="));
+    const uint64_t pc_sample = parse_u64_or_zero(arg_value(argc, argv, "--pc-sample="));
 
-    loader::LoadedImage img{};
+    const flog::Level hw_lvl = parse_flog_level_or(arg_value(argc, argv, "--hw-log-level="), flog::Level::info);
+    const flog::Level cd_lvl = parse_flog_level_or(arg_value(argc, argv, "--cd-log-level="), hw_lvl);
+    const flog::Level gpu_lvl = parse_flog_level_or(arg_value(argc, argv, "--gpu-log-level="), hw_lvl);
+    const flog::Level io_lvl = parse_flog_level_or(arg_value(argc, argv, "--io-log-level="), hw_lvl);
+    const flog::Level sys_lvl = parse_flog_level_or(arg_value(argc, argv, "--system-log-level="), hw_lvl);
+
+    const uint32_t kRamSize = 2u * 1024u * 1024u;
+    emu::Core core(&logger);
     {
         char err[256];
         err[0] = '\0';
-        if (!loader::load_file_into_ram(load_path, fmt, ram, kRamSize, &img, err, sizeof(err)))
+        if (!core.alloc_ram(kRamSize, err, sizeof(err)))
         {
-            std::fprintf(stderr, "Load failed: %s\n", err[0] ? err : "unknown error");
-            std::free(ram);
+            std::fprintf(stderr, "RAM alloc failed: %s\n", err[0] ? err : "unknown error");
             return 1;
         }
     }
 
-    r3000::Bus bus(ram, kRamSize, &logger);
-    r3000::Cpu cpu(bus, &logger);
-    cpu.reset(img.entry_pc);
-    cpu.set_pretty(has_flag(argc, argv, "--pretty"));
+    // Setup log files
+    ensure_dir_logs();
+    const flog::Clock clock = flog::clock_start();
+    std::FILE* outtext = std::fopen("logs/outtext.log", "wb");
+    std::FILE* cdlog_f = std::fopen("logs/cdrom.log", "wb");
+    std::FILE* gpulog_f = std::fopen("logs/gpu.log", "wb");
+    std::FILE* syslog_f = std::fopen("logs/system.log", "wb");
+    std::FILE* iolog_f = std::fopen("logs/io.log", "wb");
 
-    // Initialisation minimale des registres utiles.
-    // - gp = r28, sp = r29
-    if (img.has_gp)
-        cpu.set_gpr(28, img.gp);
-    if (img.has_sp)
-        cpu.set_gpr(29, img.sp);
-    cpu.set_pc(img.entry_pc);
+    const flog::Sink cdlog{cdlog_f, cd_lvl};
+    const flog::Sink gpulog{gpulog_f, gpu_lvl};
+    const flog::Sink syslog{syslog_f, sys_lvl};
+    const flog::Sink iolog{iolog_f, io_lvl};
+
+    uint8_t* bios = nullptr;
+    uint32_t bios_size = 0;
+
+    loader::LoadedImage img{};
+    bool boot_bios = false;
+
+    if (!load_path)
+    {
+        boot_bios = true;
+        if (!bios_path)
+        {
+            // Default: try to find BIOS in bios/ directory
+            const char* candidates[] = {
+                "bios/ps1_bios.bin",
+                "bios/bios.bin",
+                "bios/scph1001.bin",
+            };
+            char err[256];
+            bool ok = false;
+            for (size_t i = 0; i < (sizeof(candidates) / sizeof(candidates[0])); ++i)
+            {
+                bios_path = candidates[i];
+                if (read_file_malloc(bios_path, &bios, &bios_size, err, sizeof(err)))
+                {
+                    std::fprintf(stderr, "[INFO] BIOS loaded: %s (%u bytes)\n", bios_path, bios_size);
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok)
+            {
+                std::fprintf(stderr, "No BIOS found. Put a BIOS in 'bios/ps1_bios.bin' or use --bios=...\n");
+                print_usage();
+                return 1;
+            }
+        }
+        else
+        {
+            char err[256];
+            if (!read_file_malloc(bios_path, &bios, &bios_size, err, sizeof(err)))
+            {
+                std::fprintf(stderr, "BIOS load failed: %s\n", err[0] ? err : "unknown error");
+                return 1;
+            }
+            std::fprintf(stderr, "[INFO] BIOS loaded: %s (%u bytes)\n", bios_path, bios_size);
+        }
+    }
+    else
+    {
+        char err[256];
+        err[0] = '\0';
+        if (!loader::load_file_into_ram(load_path, fmt, core.ram(), core.ram_size(), &img, err, sizeof(err)))
+        {
+            std::fprintf(stderr, "Load failed: %s\n", err[0] ? err : "unknown error");
+            return 1;
+        }
+    }
+
+    if (boot_bios)
+    {
+        img.entry_pc = 0xBFC0'0000u;  // BIOS reset vector
+        img.has_gp = 0;
+        img.has_sp = 1;
+        img.sp = 0x801F'FFF0u;
+    }
+
+    core.set_log_sinks(cdlog, gpulog, syslog, iolog, clock);
+
+    if (gpu_dump)
+    {
+        core.set_gpu_dump_file(gpu_dump);
+    }
+
+    if (cd_path)
+    {
+        char err[256];
+        err[0] = '\0';
+        if (!core.insert_disc(cd_path, err, sizeof(err)))
+        {
+            std::fprintf(stderr, "CD image load failed: %s\n", err[0] ? err : "unknown error");
+        }
+        else
+        {
+            std::fprintf(stderr, "[INFO] CD inserted: %s\n", cd_path);
+        }
+    }
+
+    if (bios)
+    {
+        char err[256];
+        err[0] = '\0';
+        if (!core.set_bios_copy(bios, bios_size, err, sizeof(err)))
+        {
+            std::fprintf(stderr, "BIOS setup failed: %s\n", err[0] ? err : "unknown error");
+            return 1;
+        }
+        std::free(bios);
+        bios = nullptr;
+    }
+
+    core.set_text_out(outtext);
+    core.set_text_io_sink(iolog, clock);
+
+    emu::Core::InitOptions core_opt{};
+    core_opt.pretty = has_flag(argc, argv, "--pretty") ? 1 : 0;
+    core_opt.trace_io = trace_io ? 1 : 0;
+
+    {
+        char err[256];
+        err[0] = '\0';
+        if (!core.init_from_image(img, core_opt, err, sizeof(err)))
+        {
+            std::fprintf(stderr, "Core init failed: %s\n", err[0] ? err : "unknown error");
+            return 1;
+        }
+    }
+
+    // Enable WAV audio output if requested
+    if (wav_output && core.bus())
+    {
+        core.bus()->enable_wav_output(wav_output);
+        std::fprintf(stderr, "[INFO] WAV output: %s\n", wav_output);
+    }
+
+    std::fprintf(stderr, "[INFO] Run start PC=0x%08X\n", core.pc());
 
     rlog::logger_logf(
-        &logger, rlog::Level::info, rlog::Category::exec, "R3000 run start (PC=0x%08X)", cpu.pc()
+        &logger, rlog::Level::info, rlog::Category::exec, "R3000 run start (PC=0x%08X)", core.pc()
     );
 
+    uint64_t steps = 0;
     for (;;)
     {
-        const auto res = cpu.step();
+        const auto res = core.step();
         if (res.kind == r3000::Cpu::StepResult::Kind::ok)
         {
+            ++steps;
+            if (pc_sample != 0 && (steps % pc_sample) == 0)
+            {
+                std::fprintf(
+                    stderr,
+                    "SAMPLE step=%" PRIu64 " PC=0x%08X INSTR=0x%08X\n",
+                    steps,
+                    res.pc,
+                    res.instr
+                );
+            }
+            if (max_steps != 0 && steps >= max_steps)
+            {
+                std::fprintf(stderr, "Stop: reached --max-steps=%" PRIu64 "\n", max_steps);
+                break;
+            }
             continue;
         }
 
         if (res.kind == r3000::Cpu::StepResult::Kind::halted)
         {
-            rlog::logger_logf(
-                &logger, rlog::Level::info, rlog::Category::exec, "HALT at PC=0x%08X", res.pc
-            );
+            std::fprintf(stderr, "HALT at PC=0x%08X\n", res.pc);
             break;
         }
 
         if (res.kind == r3000::Cpu::StepResult::Kind::illegal_instr)
         {
-            std::fprintf(stderr, "Illegal instruction at PC=0x%08X: 0x%08X\n", res.pc, res.instr);
+            std::fprintf(
+                stderr,
+                "Illegal instruction at PC=0x%08X: 0x%08X (steps=%" PRIu64 ")\n",
+                res.pc,
+                res.instr,
+                steps
+            );
             break;
         }
 
@@ -143,15 +411,26 @@ int main(int argc, char** argv)
         {
             std::fprintf(
                 stderr,
-                "Mem fault at PC=0x%08X addr=0x%08X kind=%d\n",
+                "Mem fault at PC=0x%08X addr=0x%08X kind=%d (steps=%" PRIu64 ")\n",
                 res.pc,
                 res.mem_fault.addr,
-                (int)res.mem_fault.kind
+                (int)res.mem_fault.kind,
+                steps
             );
             break;
         }
     }
 
-    std::free(ram);
+    if (outtext)
+        std::fclose(outtext);
+    if (cdlog_f)
+        std::fclose(cdlog_f);
+    if (gpulog_f)
+        std::fclose(gpulog_f);
+    if (syslog_f)
+        std::fclose(syslog_f);
+    if (iolog_f)
+        std::fclose(iolog_f);
+
     return 0;
 }
