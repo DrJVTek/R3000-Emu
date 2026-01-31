@@ -11,35 +11,84 @@
 namespace gpu
 {
 
-// GPU PS1 (modèle minimal, orienté "boot BIOS" + pont Unreal)
-//
-// Objectifs immédiats:
-// - Fournir des registres MMIO GP0/GP1 compatibles (write) + lecture status (read)
-// - Ne pas faire crasher le BIOS quand il sonde le GPU
-// - Capturer les paquets GP0 (optionnel) pour pouvoir les rejouer côté rendu (Unreal)
+// Draw environment state (GP0 E1h-E6h)
+struct DrawEnv
+{
+    uint32_t texpage_raw{0};     // E1h raw value
+    uint32_t tex_window{0};      // E2h
+    uint16_t clip_x1{0}, clip_y1{0}; // E3h
+    uint16_t clip_x2{0}, clip_y2{0}; // E4h
+    int16_t  offset_x{0}, offset_y{0}; // E5h
+    uint16_t mask_bits{0};       // E6h
+};
+
+// Per-frame GPU statistics
+struct FrameStats
+{
+    uint32_t triangles{0};
+    uint32_t quads{0};
+    uint32_t rects{0};
+    uint32_t lines{0};
+    uint32_t fills{0};
+    uint32_t vram_to_vram{0};
+    uint32_t cpu_to_vram{0};
+    uint32_t vram_to_cpu{0};
+    uint32_t env_cmds{0};
+    uint32_t total_words{0};
+
+    void reset()
+    {
+        triangles = quads = rects = lines = fills = 0;
+        vram_to_vram = cpu_to_vram = vram_to_cpu = 0;
+        env_cmds = 0;
+        total_words = 0;
+    }
+};
+
+// GPU PS1 - Full GP0 command parser with structured logging
 class Gpu
 {
   public:
     explicit Gpu(rlog::Logger* logger = nullptr);
 
-    // Logs dédiés (optionnels).
-    // - gpu_only: logs GPU uniquement
-    // - combined: logs "IO" (CD + GPU + system)
     void set_log_sinks(const flog::Sink& gpu_only, const flog::Sink& combined, const flog::Clock& clock);
 
-    // MMIO 32-bit (adresses absolues)
+    // MMIO 32-bit (absolute addresses)
     uint32_t mmio_read32(uint32_t addr);
     void mmio_write32(uint32_t addr, uint32_t v);
 
     void set_dump_file(const char* path);
 
     // VBlank generator (approximate; used to raise IRQ0/I_STAT.bit0).
-    // This is not cycle-accurate; it exists to model the presence of GPU-driven VBlank
-    // without adding a full video timing pipeline yet.
     int tick_vblank(uint32_t cycles);
+
+    // Access for UE5 bridge
+    const DrawEnv& draw_env() const { return draw_env_; }
+    const FrameStats& frame_stats() const { return frame_stats_; }
+    const uint16_t* vram() const { return vram_.get(); }
 
   private:
     void dump_u32(uint32_t port, uint32_t v);
+
+    // GP0 command processing
+    void gp0_write(uint32_t v);
+    void gp0_start_command(uint32_t cmd_word);
+    void gp0_execute();
+    static int gp0_param_count(uint8_t cmd);
+
+    // GP0 command handlers
+    void gp0_fill_rect();
+    void gp0_polygon();
+    void gp0_line();
+    void gp0_rect();
+    void gp0_vram_to_vram();
+    void gp0_cpu_to_vram_start();
+    void gp0_cpu_to_vram_data(uint32_t v);
+    void gp0_vram_to_cpu_start();
+    void gp0_env_command();
+
+    // GP1 command processing
+    void gp1_write(uint32_t v);
 
     static constexpr uint32_t kVramWidth = 1024u;
     static constexpr uint32_t kVramHeight = 512u;
@@ -54,38 +103,56 @@ class Gpu
 
     // GPU status register (0x1F801814)
     uint32_t status_{0};
-    uint32_t dma_dir_{0}; // GP1(04h) 0..3, reflected in GPUSTAT.29-30 and GPUSTAT.25
+    uint32_t dma_dir_{0};
 
-    // Minimal VRAM backing store (15-bit pixels, stored as u16).
-    // Used for VRAM->CPU transfers (GP0(C0h) + GPUREAD).
-    // Heap-allocated to avoid stack overflow (~1MB).
+    // VRAM backing store (15-bit pixels as u16)
     std::unique_ptr<uint16_t[]> vram_;
 
-    enum class Gp0Pending : uint8_t
+    // GP0 command FIFO state machine
+    enum class Gp0State : uint8_t
     {
-        none = 0,
-        vram_to_cpu = 0xC0
+        idle,
+        collecting_params,
+        receiving_vram_data,
+        polyline
     };
-    Gp0Pending gp0_pending_{Gp0Pending::none};
-    uint8_t gp0_params_left_{0};
+    Gp0State gp0_state_{Gp0State::idle};
+    uint32_t cmd_buf_[16]{};     // Max 12 words + margin
+    int cmd_buf_pos_{0};
+    int cmd_words_needed_{0};
 
-    // VRAM->CPU transfer state (GP0(C0h) ... then read GPUREAD).
+    // CPU→VRAM transfer state (GP0 A0h)
+    uint16_t cpu_vram_x_{0}, cpu_vram_y_{0};
+    uint16_t cpu_vram_w_{0}, cpu_vram_h_{0};
+    uint16_t cpu_vram_col_{0}, cpu_vram_row_{0};
+    uint32_t cpu_vram_words_remaining_{0};
+
+    // VRAM→CPU transfer state (GP0 C0h + GPUREAD)
     bool vram_to_cpu_active_{false};
-    uint16_t vram_x_{0};
-    uint16_t vram_y_{0};
-    uint16_t vram_w_{0};
-    uint16_t vram_h_{0};
-    uint16_t vram_col_{0};
-    uint16_t vram_row_{0};
+    uint16_t read_vram_x_{0}, read_vram_y_{0};
+    uint16_t read_vram_w_{0}, read_vram_h_{0};
+    uint16_t read_vram_col_{0}, read_vram_row_{0};
+
+    // Polyline state
+    uint32_t polyline_color_{0};
+    bool polyline_gouraud_{false};
+    bool polyline_semi_{false};
+
+    // Draw environment
+    DrawEnv draw_env_{};
+
+    // Frame statistics
+    FrameStats frame_stats_{};
+    uint32_t frame_count_{0};
 
     uint32_t vblank_div_{0};
-    // Approximate VBlank period for bring-up.
-    // Faster than real hardware (100k vs ~565k) to make the boot sequence run quicker.
-    static constexpr uint32_t kVblankPeriodCycles = 100000u;
+    bool in_vblank_{false};
 
-    // Simple GP0 packet capture
+    static constexpr uint32_t kVblankPeriodCycles = 100000u;
+    static constexpr uint32_t kVblankDuration = 10000u;
+
+    // Binary GP0 packet capture
     std::FILE* dump_{nullptr};
 };
 
 } // namespace gpu
-

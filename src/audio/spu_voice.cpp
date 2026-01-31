@@ -1,6 +1,7 @@
 #include "spu_voice.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 namespace audio
 {
@@ -37,6 +38,48 @@ uint16_t SpuVoice::read_reg(uint32_t offset) const
     }
 }
 
+// Convert a 7-bit ADSR rate to step and counter_increment.
+// Based on DuckStation's VolumeEnvelope::Reset().
+//
+// ADSR1 layout: [15] AttackExp | [14:8] AttackRate(7b) | [7:4] DecayRate>>2(4b) | [3:0] SustainLevel(4b)
+// ADSR2 layout: [15] SustainExp | [14] SustainDir | [12:6] SustainRate(7b) | [5] ReleaseExp | [4:0] ReleaseRate>>2(5b)
+//
+static void setup_envelope(int rate, bool decreasing, bool exponential,
+                           int32_t& out_step, uint16_t& out_counter_inc)
+{
+    int base_step = 7 - (rate & 3);
+
+    // Step sign: negative for decrease, positive for increase
+    // DuckStation: step = decreasing ? ~base_step : base_step
+    // ~base_step = -(base_step + 1) = -(8 - (rate & 3))
+    if (decreasing)
+        out_step = -(base_step + 1);  // e.g. base_step=7 -> step=-8
+    else
+        out_step = base_step;
+
+    out_counter_inc = 0x8000;
+
+    if (rate < 44)
+    {
+        // Shift step up for faster rates
+        out_step <<= (11 - (rate >> 2));
+    }
+    else if (rate >= 48)
+    {
+        // Shift counter down for slower rates
+        int shift = (rate >> 2) - 11;
+        if (shift < 16)
+            out_counter_inc >>= shift;
+        else
+            out_counter_inc = 0;
+
+        // DuckStation: only clamp to 1 if rate doesn't exactly fill the mask
+        // For rate 127 with 7-bit mask (0x7F): 127 & 0x7F = 0x7F, no clamp -> stays 0
+        // This means rate=127 never ticks (hold forever)
+    }
+    // rate 44-47: step stays as-is (small), counter_inc stays 0x8000
+}
+
 void SpuVoice::key_on()
 {
     // Reset to start of sample
@@ -50,26 +93,18 @@ void SpuVoice::key_on()
     // Start attack phase
     env_phase_ = ENV_ATTACK;
     env_level_ = 0;
+    env_counter_ = 0;
 
     // Parse ADSR1 for attack parameters
-    // ADSR1: [15:10]=Sustain Level, [9:8]=Decay Shift, [7]=Attack Mode, [6:2]=Attack Shift, [1:0]=Attack Step
-    int attack_shift = (adsr1_ >> 2) & 0x1F;
-    int attack_step = adsr1_ & 0x03;
-    int attack_mode = (adsr1_ >> 7) & 1;
+    // ADSR1: [15]=AttackExp [14:8]=AttackRate(7b) [7:4]=DecayRate>>2 [3:0]=SustainLevel
+    int attack_rate = (adsr1_ >> 8) & 0x7F;
+    bool attack_exp = (adsr1_ >> 15) & 1;
 
-    if (attack_mode == 0)
-    {
-        // Linear attack
-        env_step_ = (7 - attack_step) << (11 - attack_shift);
-        if (env_step_ <= 0) env_step_ = 1;
-    }
-    else
-    {
-        // Exponential attack (simplified as linear for now)
-        env_step_ = (7 - attack_step) << (11 - attack_shift);
-        if (env_step_ <= 0) env_step_ = 1;
-    }
+    setup_envelope(attack_rate, false, attack_exp, env_step_, env_counter_inc_);
+    env_exponential_ = attack_exp;
+    env_decreasing_ = false;
     env_target_ = 0x7FFF;
+    env_rate_ = static_cast<uint8_t>(attack_rate);
 }
 
 void SpuVoice::key_off()
@@ -77,25 +112,18 @@ void SpuVoice::key_off()
     if (env_phase_ != ENV_OFF)
     {
         env_phase_ = ENV_RELEASE;
+        env_counter_ = 0;
 
         // Parse ADSR2 for release parameters
-        // ADSR2: [15]=Release Mode, [14:9]=Release Shift, [8:6]=Sustain Step, [5]=Sustain Mode, [4:0]=Sustain Shift
-        int release_shift = (adsr2_ >> 9) & 0x1F;
-        int release_mode = (adsr2_ >> 15) & 1;
+        // ADSR2: [5]=ReleaseExp [4:0]=ReleaseRate>>2
+        int release_rate = (adsr2_ & 0x1F) << 2;  // 5 bits, actual rate = val * 4
+        bool release_exp = (adsr2_ >> 5) & 1;
 
-        if (release_mode == 0)
-        {
-            // Linear release
-            env_step_ = -((env_level_ >> release_shift) + 1);
-            if (env_step_ >= 0) env_step_ = -1;
-        }
-        else
-        {
-            // Exponential release
-            env_step_ = -((env_level_ >> (release_shift + 2)) + 1);
-            if (env_step_ >= 0) env_step_ = -1;
-        }
+        setup_envelope(release_rate, true, release_exp, env_step_, env_counter_inc_);
+        env_exponential_ = release_exp;
+        env_decreasing_ = true;
         env_target_ = 0;
+        env_rate_ = static_cast<uint8_t>(release_rate);
     }
 }
 
@@ -126,6 +154,13 @@ int16_t SpuVoice::tick(const uint8_t* spu_ram, uint32_t ram_mask)
             uint8_t flags = block[1];
             bool loop_end = (flags & 0x01) != 0;
             bool loop_repeat = (flags & 0x02) != 0;
+            bool loop_start = (flags & 0x04) != 0;
+
+            // If loop_start flag, update repeat address
+            if (loop_start)
+            {
+                repeat_addr_ = static_cast<uint16_t>(current_addr_ >> 3);
+            }
 
             // Advance to next block
             current_addr_ += 16;
@@ -150,8 +185,11 @@ int16_t SpuVoice::tick(const uint8_t* spu_ram, uint32_t ram_mask)
         }
     }
 
-    // Get current sample (nearest neighbor - could upgrade to Gaussian)
-    int32_t sample = decoded_[decode_idx_];
+    // Linear interpolation between current and next sample
+    int16_t s0 = decoded_[decode_idx_];
+    int16_t s1 = (decode_idx_ < 27) ? decoded_[decode_idx_ + 1] : decoded_[decode_idx_];
+    int32_t frac = counter_ & 0xFFF;  // 12-bit fraction (0..4095)
+    int32_t sample = s0 + ((s1 - s0) * frac >> 12);
 
     // Apply envelope
     tick_envelope();
@@ -173,6 +211,9 @@ void SpuVoice::decode_block(const uint8_t* block)
     // Bytes 2-15: 4-bit samples (2 per byte, low nibble first)
 
     int shift = block[0] & 0x0F;
+    // Per psx-spx: shift values 13-15 act as shift=9
+    if (shift > 12) shift = 9;
+
     int filter = (block[0] >> 4) & 0x07;
     if (filter > 4) filter = 4;  // Only 5 filters defined
 
@@ -214,69 +255,113 @@ void SpuVoice::decode_block(const uint8_t* block)
 
 void SpuVoice::tick_envelope()
 {
+    if (env_phase_ == ENV_OFF)
+        return;
+
+    // Counter-based timing (DuckStation approach):
+    // Compute adjusted step/increment first, THEN check counter overflow.
+    int32_t this_step = env_step_;
+    uint32_t this_increment = env_counter_inc_;
+
+    // Exponential mode adjustments (per DuckStation VolumeEnvelope::Tick)
+    if (env_exponential_)
+    {
+        if (env_decreasing_)
+        {
+            // Exponential decrease: step is proportional to current level
+            // step is already negative, multiply by level/32768
+            this_step = (this_step * env_level_) >> 15;
+        }
+        else
+        {
+            // Exponential increase: slow down above 0x6000
+            if (env_level_ >= 0x6000)
+            {
+                if (env_rate_ < 40)
+                {
+                    this_step >>= 2;
+                }
+                else if (env_rate_ >= 44)
+                {
+                    this_increment >>= 2;
+                }
+                else
+                {
+                    this_step >>= 1;
+                    this_increment >>= 1;
+                }
+            }
+        }
+    }
+
+    // Advance counter
+    env_counter_ += static_cast<uint16_t>(this_increment);
+    if (!(env_counter_ & 0x8000))
+        return;  // Not time to apply step yet
+
+    env_counter_ = 0;  // Reset counter on overflow
+
+    // Apply step
+    int32_t new_level = env_level_ + this_step;
+
     switch (env_phase_)
     {
         case ENV_ATTACK:
-            env_level_ += env_step_;
+            env_level_ = std::clamp(new_level, (int32_t)0, (int32_t)0x7FFF);
             if (env_level_ >= 0x7FFF)
             {
                 env_level_ = 0x7FFF;
                 env_phase_ = ENV_DECAY;
+                env_counter_ = 0;
 
-                // Setup decay
-                int decay_shift = (adsr1_ >> 8) & 0x0F;
-                env_step_ = -((env_level_ >> decay_shift) + 1);
-                if (env_step_ >= 0) env_step_ = -1;
+                // Setup decay: always exponential decrease
+                // ADSR1: [7:4] = DecayRate >> 2 (4 bits), actual rate = val * 4
+                int decay_rate = ((adsr1_ >> 4) & 0x0F) << 2;
+                setup_envelope(decay_rate, true, true, env_step_, env_counter_inc_);
+                env_exponential_ = true;
+                env_decreasing_ = true;
+                env_rate_ = static_cast<uint8_t>(decay_rate);
 
-                // Sustain level target
-                int sustain_level = (adsr1_ >> 10) & 0x3F;
-                env_target_ = (sustain_level + 1) << 9;  // 0..0x7FFF
+                // Sustain level target: ADSR1 [3:0] = 4 bits
+                // Per DuckStation: (sustain_level + 1) * 0x800
+                int sustain_level = adsr1_ & 0x0F;
+                env_target_ = std::min((sustain_level + 1) * 0x800, 0x7FFF);
             }
             break;
 
         case ENV_DECAY:
-            env_level_ += env_step_;
+            env_level_ = std::max(new_level, (int32_t)0);
             if (env_level_ <= env_target_)
             {
                 env_level_ = env_target_;
                 env_phase_ = ENV_SUSTAIN;
+                env_counter_ = 0;
 
-                // Setup sustain
-                int sustain_shift = adsr2_ & 0x1F;
-                int sustain_step = (adsr2_ >> 6) & 0x03;
-                int sustain_mode = (adsr2_ >> 5) & 1;
-                int sustain_dir = (adsr2_ >> 14) & 1;
+                // Setup sustain from ADSR2
+                // ADSR2: [15]=SustainExp [14]=SustainDir [12:6]=SustainRate(7b)
+                int sustain_rate = (adsr2_ >> 6) & 0x7F;
+                bool sustain_dir_decrease = (adsr2_ >> 14) & 1;
+                bool sustain_exp = (adsr2_ >> 15) & 1;
 
-                if (sustain_dir == 0)
-                {
-                    // Increase
-                    env_step_ = (7 - sustain_step) << (11 - sustain_shift);
-                    if (env_step_ <= 0) env_step_ = 1;
-                    env_target_ = 0x7FFF;
-                }
-                else
-                {
-                    // Decrease
-                    if (sustain_mode == 0)
-                        env_step_ = -((7 - sustain_step) << (11 - sustain_shift));
-                    else
-                        env_step_ = -((env_level_ >> sustain_shift) + 1);
-                    if (env_step_ >= 0) env_step_ = -1;
-                    env_target_ = 0;
-                }
+                setup_envelope(sustain_rate, sustain_dir_decrease, sustain_exp,
+                               env_step_, env_counter_inc_);
+                env_exponential_ = sustain_exp;
+                env_decreasing_ = sustain_dir_decrease;
+                env_rate_ = static_cast<uint8_t>(sustain_rate);
+                env_target_ = sustain_dir_decrease ? 0 : 0x7FFF;
             }
             break;
 
         case ENV_SUSTAIN:
-            env_level_ += env_step_;
-            if (env_step_ > 0 && env_level_ >= env_target_)
-                env_level_ = env_target_;
-            else if (env_step_ < 0 && env_level_ <= env_target_)
-                env_level_ = env_target_;
+            // Sustain continues indefinitely (no phase transition)
+            if (env_decreasing_)
+                env_level_ = std::max(new_level, (int32_t)0);
+            else
+                env_level_ = std::min(new_level, (int32_t)0x7FFF);
             break;
 
         case ENV_RELEASE:
-            env_level_ += env_step_;
+            env_level_ = std::max(new_level, (int32_t)0);
             if (env_level_ <= 0)
             {
                 env_level_ = 0;
@@ -288,10 +373,6 @@ void SpuVoice::tick_envelope()
         default:
             break;
     }
-
-    // Clamp envelope
-    if (env_level_ < 0) env_level_ = 0;
-    if (env_level_ > 0x7FFF) env_level_ = 0x7FFF;
 }
 
 } // namespace audio

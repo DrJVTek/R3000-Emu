@@ -137,6 +137,9 @@ class Spu
     // Output buffer for callback
     int16_t output_buffer_[2048]{};
     int output_buffer_pos_{0};
+
+    // Debug: total samples generated
+    uint64_t total_samples_{0};
 };
 
 } // namespace audio

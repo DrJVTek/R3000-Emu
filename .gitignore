@@ -19,3 +19,8 @@ examples/**/build/
 
 # local captures / artifacts
 guest.txt
+logs/
+
+# BIOS (ne pas versionner par défaut)
+bios/*.bin
+bios/*.rom

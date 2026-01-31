@@ -85,6 +85,13 @@ void WavWriter::write_sample(int16_t left, int16_t right)
     int16_t samples[2] = {left, right};
     std::fwrite(samples, sizeof(int16_t), 2, file_);
     samples_written_++;
+
+    // Periodically update header so file is always valid even if process is killed
+    if ((samples_written_ % 44100) == 0)
+    {
+        finalize_header();
+        std::fflush(file_);
+    }
 }
 
 void WavWriter::close()

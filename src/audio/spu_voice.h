@@ -33,6 +33,9 @@ class SpuVoice
     bool hit_loop_end() const { return hit_loop_end_; }
     void clear_loop_end() { hit_loop_end_ = false; }
 
+    // Debug: get envelope phase
+    int env_phase() const { return static_cast<int>(env_phase_); }
+
   private:
     // ADPCM block decoding
     void decode_block(const uint8_t* block);
@@ -63,8 +66,13 @@ class SpuVoice
     enum EnvPhase { ENV_OFF, ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE };
     EnvPhase env_phase_{ENV_OFF};
     int32_t env_level_{0};           // Current envelope level (0..0x7FFF)
-    int32_t env_step_{0};            // Current envelope step
+    int32_t env_step_{0};            // Current envelope step (applied when counter overflows)
     int32_t env_target_{0};          // Current envelope target
+    uint16_t env_counter_{0};        // Envelope timing counter
+    uint16_t env_counter_inc_{0};    // Counter increment per tick
+    bool env_exponential_{false};    // Exponential mode flag
+    bool env_decreasing_{false};     // Direction flag
+    uint8_t env_rate_{0};            // Current rate (for exponential adjustments)
 
     // Flags
     bool hit_loop_end_{false};

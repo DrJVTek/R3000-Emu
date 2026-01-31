@@ -41,36 +41,6 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
         case 0x18A:
             kon_ = (kon_ & 0x0000FFFF) | (static_cast<uint32_t>(val & 0xFF) << 16);
             // Process key on
-            if (kon_ != 0)
-            {
-                static int kon_debug_count = 0;
-                if (++kon_debug_count <= 20)
-                {
-                    // Always show what's at 0x01000 to track if it gets cleared
-                    uint32_t data_01000 = (ram_[0x01000] | (ram_[0x01001]<<8) |
-                                          (ram_[0x01002]<<16) | (ram_[0x01003]<<24));
-                    std::fprintf(stderr, "[SPU] KON #%d: voices=0x%06X (data@0x01000=0x%08X)\n",
-                        kon_debug_count, kon_, data_01000);
-                    // Dump voice parameters for first few KONs
-                    for (int i = 0; i < kNumVoices && kon_debug_count <= 5; i++)
-                    {
-                        if (kon_ & (1u << i))
-                        {
-                            uint16_t start = voices_[i].read_reg(0x06);
-                            uint16_t pitch = voices_[i].read_reg(0x04);
-                            uint16_t vol_l = voices_[i].read_reg(0x00);
-                            uint16_t vol_r = voices_[i].read_reg(0x02);
-                            uint32_t addr = static_cast<uint32_t>(start) << 3;
-                            // Check if SPU RAM has data at this address
-                            uint32_t data0 = (addr < kRamSize - 4) ?
-                                (ram_[addr] | (ram_[addr+1]<<8) | (ram_[addr+2]<<16) | (ram_[addr+3]<<24)) : 0;
-                            std::fprintf(stderr, "  Voice %d: start=0x%04X (addr=0x%05X) pitch=0x%04X vol=%04X/%04X data@addr=0x%08X\n",
-                                i, start, addr, pitch, vol_l, vol_r, data0);
-                        }
-                    }
-                    std::fflush(stderr);
-                }
-            }
             for (int i = 0; i < kNumVoices; i++)
             {
                 if (kon_ & (1u << i))
@@ -94,7 +64,9 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
             for (int i = 0; i < kNumVoices; i++)
             {
                 if (koff_ & (1u << i))
+                {
                     voices_[i].key_off();
+                }
             }
             koff_ = 0;
             break;
@@ -143,13 +115,6 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
         // SPUCNT - Control register
         case 0x1AA:
         {
-            static int spucnt_debug_count = 0;
-            if (++spucnt_debug_count <= 10)
-            {
-                std::fprintf(stderr, "[SPU] SPUCNT #%d: 0x%04X (enable=%d mute=%d cd=%d)\n",
-                    spucnt_debug_count, val, (val >> 15) & 1, (val >> 14) & 1, val & 1);
-                std::fflush(stderr);
-            }
             ctrl_ = val;
             // Bit 15: SPU enable
             // Bit 14: Mute
@@ -327,16 +292,14 @@ void Spu::dma_read(uint16_t* data, uint32_t count)
 
 void Spu::tick(int16_t* out_l, int16_t* out_r)
 {
+    total_samples_++;
     int32_t mix_l = 0;
     int32_t mix_r = 0;
 
     // Check if SPU is enabled (SPUCNT bit 15)
     bool spu_enabled = (ctrl_ & 0x8000) != 0;
-    bool mute = (ctrl_ & 0x4000) != 0;
-    // Note: Many games keep mute=1 during loading, then unmute for gameplay.
-    // For debug, you can comment out the mute check to hear audio during loading.
 
-    if (spu_enabled && !mute)
+    if (spu_enabled)
     {
         // Mix all active voices
         for (int i = 0; i < kNumVoices; i++)
@@ -350,13 +313,11 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
                 voices_[i].clear_loop_end();
             }
 
-            // Get voice volumes
-            uint16_t vol_l = voices_[i].read_reg(0x00);
-            uint16_t vol_r = voices_[i].read_reg(0x02);
-
             // Apply voice volume (signed 15-bit)
-            int32_t sample_l = (sample * static_cast<int16_t>(vol_l)) >> 15;
-            int32_t sample_r = (sample * static_cast<int16_t>(vol_r)) >> 15;
+            int16_t vol_l = static_cast<int16_t>(voices_[i].read_reg(0x00));
+            int16_t vol_r = static_cast<int16_t>(voices_[i].read_reg(0x02));
+            int32_t sample_l = (sample * vol_l) >> 15;
+            int32_t sample_r = (sample * vol_r) >> 15;
 
             mix_l += sample_l;
             mix_r += sample_r;
@@ -429,8 +390,7 @@ void Spu::tick_cycles(uint32_t cycles)
         // Write to WAV writer if present
         if (wav_writer_)
         {
-            int16_t stereo[2] = {l, r};
-            // External code will call wav_writer directly
+            wav_writer_->write_sample(l, r);
         }
     }
 }

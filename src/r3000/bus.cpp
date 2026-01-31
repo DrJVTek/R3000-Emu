@@ -446,42 +446,11 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
     {
         const uint32_t offset = phys - 0x1F801C00u;
 
-        // Also maintain legacy spu_ram_ for FIFO writes
+        // Track transfer address for DMA4 (which uses bus's position)
         if (offset == 0x1A6) // SPU transfer address
         {
             spu_xfer_addr_reg_ = v;
             spu_xfer_addr_cur_ = (uint32_t)v * 8;
-        }
-        else if (offset == 0x1A8) // SPU FIFO data
-        {
-            // Write to FIFO buffer
-            if (spu_fifo_count_ < 32)
-            {
-                spu_fifo_[spu_fifo_count_++] = v;
-            }
-
-            // Auto-commit when full
-            if (spu_fifo_count_ >= 32)
-            {
-                // Commit to both SPU RAM arrays
-                for (int i = 0; i < 32; ++i)
-                {
-                    if (spu_xfer_addr_cur_ + 1 < kSpuRamSize)
-                    {
-                        spu_ram_[spu_xfer_addr_cur_] = (uint8_t)(spu_fifo_[i] & 0xFF);
-                        spu_ram_[spu_xfer_addr_cur_ + 1] = (uint8_t)((spu_fifo_[i] >> 8) & 0xFF);
-                    }
-                    spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
-                }
-                spu_fifo_count_ = 0;
-
-                // Also write to new SPU
-                if (spu_)
-                {
-                    // Sync both RAM arrays
-                    std::memcpy(spu_->ram(), spu_ram_, kSpuRamSize);
-                }
-            }
         }
         else if (offset == 0x1AA) // SPUCNT
         {
@@ -491,30 +460,11 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         else if (offset == 0x1AC) // SPU transfer control
         {
             spu_xfer_ctrl_ = v;
-
-            // Mode 2 (manual write) - flush FIFO on mode change
-            if ((v & 0x0030) == 0x0010 && spu_fifo_count_ > 0)
-            {
-                for (int i = 0; i < spu_fifo_count_; ++i)
-                {
-                    if (spu_xfer_addr_cur_ + 1 < kSpuRamSize)
-                    {
-                        spu_ram_[spu_xfer_addr_cur_] = (uint8_t)(spu_fifo_[i] & 0xFF);
-                        spu_ram_[spu_xfer_addr_cur_ + 1] = (uint8_t)((spu_fifo_[i] >> 8) & 0xFF);
-                    }
-                    spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
-                }
-                spu_fifo_count_ = 0;
-
-                // Sync to new SPU
-                if (spu_)
-                {
-                    std::memcpy(spu_->ram(), spu_ram_, kSpuRamSize);
-                }
-            }
         }
+        // NOTE: FIFO writes (offset 0x1A8) are handled entirely by SPU now
+        // No bus-side buffering needed - SPU writes directly to its RAM
 
-        // Also forward to new SPU object
+        // Forward all SPU register writes to SPU object
         if (spu_)
             spu_->write_reg(offset, v);
 
@@ -628,11 +578,11 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
 
                         if (dir == 1) // To GPU
                         {
-                            if (mode == 1) // Block
+                            if (mode == 0 || mode == 1) // Burst or Block
                             {
                                 const uint32_t bs = dma_[ch].bcr & 0xFFFF;
                                 const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
-                                const uint32_t words = bs * bc;
+                                const uint32_t words = (mode == 0) ? bs : bs * bc;
                                 uint32_t ma = dma_[ch].madr & 0x1FFFFF;
                                 for (uint32_t i = 0; i < words; ++i)
                                 {
@@ -675,6 +625,12 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                     // DMA4 (SPU)
                     if (ch == 4)
                     {
+                        static int dma4_debug = 0;
+                        if (++dma4_debug <= 10)
+                        {
+                            std::fprintf(stderr, "[DMA4] Transfer #%d: madr=0x%08X bcr=0x%08X chcr=0x%08X\n",
+                                dma4_debug, dma_[ch].madr, dma_[ch].bcr, v);
+                        }
                         const int dir = (v >> 0) & 1;
                         const uint32_t bs = dma_[ch].bcr & 0xFFFF;
                         const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
@@ -716,28 +672,36 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 uint16_t lo = (uint16_t)(w & 0xFFFF);
                                 uint16_t hi = (uint16_t)((w >> 16) & 0xFFFF);
 
-                                if (spu_xfer_addr_cur_ + 1 < kSpuRamSize)
+                                // Write directly to SPU's RAM (not bus's copy)
+                                // This preserves any FIFO-written data
+                                if (spu_)
                                 {
-                                    spu_ram_[spu_xfer_addr_cur_] = (uint8_t)(lo & 0xFF);
-                                    spu_ram_[spu_xfer_addr_cur_ + 1] = (uint8_t)((lo >> 8) & 0xFF);
+                                    spu_->write_ram(spu_xfer_addr_cur_, lo);
+                                    spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
+                                    spu_->write_ram(spu_xfer_addr_cur_, hi);
+                                    spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
                                 }
-                                spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
+                                else
+                                {
+                                    // Fallback to bus's copy if no SPU (shouldn't happen)
+                                    if (spu_xfer_addr_cur_ + 1 < kSpuRamSize)
+                                    {
+                                        spu_ram_[spu_xfer_addr_cur_] = (uint8_t)(lo & 0xFF);
+                                        spu_ram_[spu_xfer_addr_cur_ + 1] = (uint8_t)((lo >> 8) & 0xFF);
+                                    }
+                                    spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
 
-                                if (spu_xfer_addr_cur_ + 1 < kSpuRamSize)
-                                {
-                                    spu_ram_[spu_xfer_addr_cur_] = (uint8_t)(hi & 0xFF);
-                                    spu_ram_[spu_xfer_addr_cur_ + 1] = (uint8_t)((hi >> 8) & 0xFF);
+                                    if (spu_xfer_addr_cur_ + 1 < kSpuRamSize)
+                                    {
+                                        spu_ram_[spu_xfer_addr_cur_] = (uint8_t)(hi & 0xFF);
+                                        spu_ram_[spu_xfer_addr_cur_ + 1] = (uint8_t)((hi >> 8) & 0xFF);
+                                    }
+                                    spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
                                 }
-                                spu_xfer_addr_cur_ = (spu_xfer_addr_cur_ + 2) & (kSpuRamSize - 1);
 
                                 ma = (ma + 4) & 0x1FFFFF;
                             }
-
-                            // Sync to new SPU
-                            if (spu_)
-                            {
-                                std::memcpy(spu_->ram(), spu_ram_, kSpuRamSize);
-                            }
+                            // NOTE: No memcpy - DMA writes go directly to SPU's RAM now
                         }
 
                         dma_[ch].chcr &= ~0x01000000u;
@@ -951,6 +915,15 @@ void Bus::tick(uint32_t cycles)
     if (spu_)
     {
         spu_->tick_cycles(cycles);
+    }
+
+    // Tick GPU VBlank
+    if (gpu_)
+    {
+        if (gpu_->tick_vblank(cycles))
+        {
+            i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
+        }
     }
 
     // Tick CDROM
