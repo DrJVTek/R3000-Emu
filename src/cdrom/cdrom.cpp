@@ -1724,37 +1724,36 @@ void Cdrom::exec_command(uint8_t cmd)
                 has_data_track = 1;
             }
 
-            // First response: INT3
+            // First response: INT3 (acknowledge)
             push_resp(status_);
             queue_cmd_irq(0x03);
 
-            // For simplicity, we immediately provide the second response.
-            // Real hardware would delay this, but games just poll for it.
-            //
-            // Second response data (will be sent as additional bytes):
-            // We push all 8 bytes into the response FIFO.
-            // Note: This is a simplification - real hardware sends INT2 separately.
+            // Second response: INT2 (result) delivered async after delay.
+            // 8 bytes: stat, flags, type, atip, region[4]
+            pending_irq_type_ = 0x02;  // INT2
+            pending_irq_resp_ = status_;
+            pending_irq_reason_ = 0;
+            pending_irq_delay_ = 50000; // ~1.5ms
+            pending_irq_extra_len_ = 0;
             if (has_data_track)
             {
-                // Licensed data disc (Mode2/XA)
-                push_resp(0x02);  // [1] flags: licensed data disc
-                push_resp(0x00);  // [2] disc type: 0x00 (PS1 uses 0x00 for game discs)
-                push_resp(0x00);  // [3] ATIP
-                push_resp('S');   // [4] Region: "SCEE" (Europe - default)
-                push_resp('C');   // [5]
-                push_resp('E');   // [6]
-                push_resp('E');   // [7]
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x02;  // flags: licensed data
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // disc type
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // ATIP
+                pending_irq_extra_[pending_irq_extra_len_++] = 'S';   // Region "SCEE"
+                pending_irq_extra_[pending_irq_extra_len_++] = 'C';
+                pending_irq_extra_[pending_irq_extra_len_++] = 'E';
+                pending_irq_extra_[pending_irq_extra_len_++] = 'E';
             }
             else
             {
-                // Audio CD or unlicensed - return appropriate response
-                push_resp(0x90);  // [1] flags: unlicensed/audio
-                push_resp(0x00);  // [2] disc type
-                push_resp(0x00);  // [3] ATIP
-                push_resp(0x00);  // [4..7] No region string
-                push_resp(0x00);
-                push_resp(0x00);
-                push_resp(0x00);
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x90;  // flags: unlicensed
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
             }
             break;
         }
@@ -2257,6 +2256,9 @@ void Cdrom::tick(uint32_t cycles)
             push_resp(pending_irq_resp_);
             if (pending_irq_reason_ != 0)
                 push_resp(pending_irq_reason_);
+            for (uint8_t i = 0; i < pending_irq_extra_len_; ++i)
+                push_resp(pending_irq_extra_[i]);
+            pending_irq_extra_len_ = 0;
             set_irq(pending_irq_type_);
             emu::logf(emu::LogLevel::info, "CD", "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
                 (unsigned)pending_irq_type_, (unsigned)pending_irq_resp_, (unsigned)pending_irq_reason_);

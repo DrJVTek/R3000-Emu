@@ -160,6 +160,8 @@ class Cdrom
     uint8_t pending_irq_type_{0};    // IRQ type to deliver (1-5), 0=none
     uint8_t pending_irq_resp_{0};    // response byte 0 (stat)
     uint8_t pending_irq_reason_{0};  // response byte 1 (reason code, 0=none)
+    uint8_t pending_irq_extra_[16]{};// extra response bytes (for GetID etc.)
+    uint8_t pending_irq_extra_len_{0};
 
     // Command response delay: irq_flags set after this delay elapses.
     // Response data is already in the FIFO (BIOS can poll), but the IRQ
