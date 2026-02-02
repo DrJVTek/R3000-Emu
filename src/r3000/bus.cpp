@@ -1148,23 +1148,15 @@ void Bus::tick(uint32_t cycles)
     {
         cdrom_->tick(cycles);
 
-        // CDROM IRQ: level-sensitive with edge latch.
+        // CDROM IRQ: edge-triggered latch.
         // Rising edge (0→1): set I_STAT bit 2.
-        // While low: keep I_STAT bit 2 clear (handles the case where
-        // acknowledge + queued-command fire within one mmio_write8,
-        // making the intermediate low state invisible to edge detection).
+        // I_STAT bit 2 stays set until software clears it by writing to I_STAT.
+        // We do NOT auto-clear on falling edge — that's how real PS1 works.
         uint8_t cdirq = cdrom_->irq_line();
         if (cdirq && !cdrom_irq_prev_)
         {
             // Rising edge: latch I_STAT bit 2.
             i_stat_ |= (1u << 2);
-            cdrom_irq_edge_ = false;
-        }
-        else if (!cdirq)
-        {
-            // IRQ line low: ensure I_STAT bit 2 is clear.
-            i_stat_ &= ~(1u << 2);
-            cdrom_irq_edge_ = false;
         }
         cdrom_irq_prev_ = cdirq;
     }
