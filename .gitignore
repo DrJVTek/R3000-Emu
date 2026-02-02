@@ -1,7 +1,11 @@
 build/
+build_*/
+build2/
 out/
 .vs/
 .vscode/
+.cursor/
+.specify/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -13,6 +17,7 @@ compile_commands.json
 *.pdb
 *.obj
 *.ilk
+*.sln
 
 # example build outputs
 examples/**/build/
@@ -20,7 +25,14 @@ examples/**/build/
 # local captures / artifacts
 guest.txt
 logs/
+workbench/
 
-# BIOS (ne pas versionner par défaut)
+# BIOS / ROM images (ne pas versionner)
 bios/*.bin
 bios/*.rom
+*.bin
+*.cue
+
+# temp debug files
+nul
+*.wav
