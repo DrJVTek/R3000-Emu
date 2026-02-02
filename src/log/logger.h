@@ -39,11 +39,16 @@ static inline uint32_t cat_mask(Category c)
     return (uint32_t)c;
 }
 
+// Optional callback: if set, logger uses this instead of FILE*.
+using LoggerCallback = void (*)(Level level, Category cat, const char* msg, void* user);
+
 struct Logger
 {
     FILE* out;
     Level level;
     uint32_t cats_mask;
+    LoggerCallback cb{nullptr};
+    void* cb_user{nullptr};
 };
 
 static inline void logger_init(Logger* l, FILE* out)
@@ -51,6 +56,17 @@ static inline void logger_init(Logger* l, FILE* out)
     l->out = out ? out : stdout;
     l->level = Level::info;
     l->cats_mask = cat_mask(Category::all);
+    l->cb = nullptr;
+    l->cb_user = nullptr;
+}
+
+static inline void logger_init_cb(Logger* l, LoggerCallback cb, void* user)
+{
+    l->out = nullptr;
+    l->level = Level::info;
+    l->cats_mask = cat_mask(Category::all);
+    l->cb = cb;
+    l->cb_user = user;
 }
 
 static inline void logger_set_level(Logger* l, Level lvl)

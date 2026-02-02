@@ -1,0 +1,11 @@
+# DuckStation reference — same format as logs/compare_r3000.txt
+# Fill from DuckStation debugger: breakpoints at 0x8005EE80 0x8005EF30 0x8005DE24 0x8005E520 0x8006797C 0x80067938
+# Copy registers + MMIO (I_STAT, I_MASK, DPCR, DICR, GPUSTAT, DMA, TMR, etc.) per block.
+# One key=0xXXXXXXXX per line. Block delimiter: [PC=0xXXXXXXXX]
+#
+# Example (loop @ 0x8005EE80):
+# [PC=0x8005EE80]
+# pc=0x8005EE80
+# v0=0x80120998
+# a0=0x00000000
+# ...

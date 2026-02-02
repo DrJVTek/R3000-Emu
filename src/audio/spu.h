@@ -63,6 +63,10 @@ class Spu
     // Tick called from bus (cycle-based)
     void tick_cycles(uint32_t cycles);
 
+    // Flush any buffered audio samples to the callback.
+    // Call at end of each frame to avoid latency at high framerates.
+    void flush_audio();
+
   private:
     // Voice registers: 0x1F801C00 + voice*0x10 (voices 0-23)
     // Global registers: 0x1F801D80+

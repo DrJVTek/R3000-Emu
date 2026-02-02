@@ -20,6 +20,7 @@ add_library(r3000_core
   src/cdrom/cdrom.cpp
   src/emu/core.cpp
   src/gpu/gpu.cpp
+  src/log/emu_log.cpp
   src/log/filelog.cpp
   src/log/logger.cpp
   src/gte/gte.cpp
@@ -28,6 +29,7 @@ add_library(r3000_core
   src/r3000/cpu.cpp
 )
 
+target_compile_definitions(r3000_core PUBLIC R3000_DBG_LOOP_DETECTORS=1)
 target_include_directories(r3000_core PUBLIC src)
 target_include_directories(r3000_emu PRIVATE src)
 target_link_libraries(r3000_emu PRIVATE r3000_core)

@@ -37,6 +37,9 @@ class Core
         int trace_vectors{0};
         int watch_u32_enabled{0};
         uint32_t watch_u32_phys{0};
+
+        int loop_detectors{1}; // enable one-shot loop debug dumps (default: on)
+        uint32_t bus_tick_batch{1}; // bus tick batching (1=accurate, 32=fast)
     };
 
     Core(rlog::Logger* logger);
@@ -73,6 +76,9 @@ class Core
 
     // Finalize: create bus/cpu and reset from a LoadedImage description.
     bool init_from_image(const loader::LoadedImage& img, const InitOptions& opt, char* err, size_t err_cap);
+
+    // Fast boot: read SYSTEM.CNF from CD, load the EXE, set PC/GP/SP. Requires init_from_image() first.
+    bool fast_boot_from_cd(char* err, size_t err_cap);
 
     // Step execution (1 instruction). Valid after init_from_image().
     r3000::Cpu::StepResult step();

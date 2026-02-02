@@ -84,6 +84,17 @@ class Cpu
 
     // Debug/HLE: active des trampolines sécurisés (vecteurs A0/B0/C0 et exception vector RAM).
     void set_hle_vectors(int enabled);
+    void set_hle_tcb_addr(uint32_t phys) { hle_tcb_addr_ = phys; }
+
+#ifdef R3000_DBG_LOOP_DETECTORS
+    void set_loop_detectors(int enabled) { loop_detectors_ = enabled; }
+#else
+    void set_loop_detectors(int) {}
+#endif
+
+    // Batch bus ticking: tick every N steps instead of every step.
+    // Higher values = faster but less accurate. 1 = cycle-accurate (default CLI). 32 = good for UE5.
+    void set_bus_tick_batch(uint32_t n) { bus_tick_batch_ = (n < 1) ? 1 : n; }
 
     // Debug: fichier de sortie texte (BIOS putc / syscalls "write-like" / etc).
     // Objectif: avoir un "console.log" séparé et facile à relire pendant le live.
@@ -128,6 +139,10 @@ class Cpu
     {
         set_reg(idx, v);
     }
+
+    uint32_t gpr(uint32_t idx) const { return (idx < 32) ? gpr_[idx] : 0; }
+
+    void set_cop0(uint32_t idx, uint32_t v) { if (idx < 32) cop0_[idx] = v; }
 
     StepResult step();
 
@@ -206,6 +221,7 @@ class Cpu
     void set_reg(uint32_t idx, uint32_t v);
     void schedule_branch(uint32_t target_after_delay_slot);
 
+
     // Traduction virtuelle->physique (simplifiée PS1): KSEG0/KSEG1 = alias sur
     // 0x0000_0000..0x1FFF_FFFF.
     uint32_t virt_to_phys(uint32_t vaddr) const;
@@ -265,6 +281,9 @@ class Cpu
     flog::Clock sys_clock_{};
     int sys_has_clock_{0};
 
+    uint32_t bus_tick_accum_{0};
+    uint32_t bus_tick_batch_{1}; // tick bus every N steps (1 = every step, 32 = batched)
+
     std::FILE* compare_file_{nullptr};
 
     uint64_t exc_vec_hits_{0};
@@ -276,6 +295,9 @@ class Cpu
     uint32_t kalloc_end_{0};
     uint32_t entryint_struct_addr_{0};
     uint32_t entryint_hook_addr_{0};
+    uint32_t hle_custom_exit_handler_{0}; // B(0x19) SetCustomExitFromException
+    uint32_t hle_tcb_addr_{0};            // TCB base address (physical)
+    uint32_t hle_event_table_addr_{0};    // Event table base in RAM (physical)
 
     struct HleEvent
     {
@@ -288,7 +310,9 @@ class Cpu
 
     HleEvent hle_events_[32]{};
     uint32_t hle_vblank_div_{0};
+    uint32_t hle_vblank_counter_{0}; // Software VBlank frame counter (root counter 3)
     int hle_pseudo_vblank_{0};
+    uint32_t hle_rand_seed_{0};
 
     // HLE BIOS File I/O (cdrom:) - minimal pour permettre le boot CD.
     struct HleFile
@@ -303,6 +327,8 @@ class Cpu
     uint32_t hle_last_error_{0};
     uint64_t hle_wait_event_calls_{0};
     uint64_t hle_mark_ready_calls_{0};
+#ifdef R3000_DBG_LOOP_DETECTORS
+    int loop_detectors_{1};
     uint32_t dbg_loop_dumped_{0};
     uint32_t dbg_loop_patched_{0};
     uint32_t dbg_ef30_dumped_{0};
@@ -310,8 +336,10 @@ class Cpu
     uint32_t dbg_e520_dumped_{0};
     uint32_t dbg_6797c_dumped_{0};
     uint32_t dbg_67938_dumped_{0};
+#endif
     uint32_t spin_pc_{0};
     uint32_t spin_count_{0};
+    uint32_t pc_sample_counter_{0};
     // NOTE: pas de "skip loop" ici: on préfère corriger l'émulation plutôt que patcher le flow du BIOS.
 
     // COP2 = GTE (PS1). Séparé du CPU pour garder le code propre.

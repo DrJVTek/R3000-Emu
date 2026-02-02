@@ -45,6 +45,12 @@ class Cdrom
 
     // Niveau IRQ CDROM (utilisé par le bus pour latch IRQ2 dans I_STAT sur front montant).
     int irq_line() const;
+    uint8_t irq_flags_raw() const { return irq_flags_; }
+    uint8_t irq_enable_raw() const { return irq_enable_; }
+    void clear_irq_flags() { irq_flags_ = 0; }
+
+    // Tick (called from bus). Handles async IRQ delivery (INT5, INT1 for reads).
+    void tick(uint32_t cycles);
 
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).
     // Retourne false si pas de disque ou secteur illisible.
@@ -80,6 +86,7 @@ class Cdrom
     uint8_t cmd_expected_params(uint8_t cmd) const;
 
     void set_irq(uint8_t flags);
+    void queue_cmd_irq(uint8_t flags);
     uint8_t status_reg() const;
     void try_fill_data_fifo();
 
@@ -98,7 +105,7 @@ class Cdrom
     // Registres CDROM (modèle minimal, mais avec sémantique réelle).
     uint8_t index_{0};   // écrit via 0x1F801800
     uint8_t status_{0};  // lu via 0x1F801800
-    uint8_t irq_enable_{0};
+    uint8_t irq_enable_{0x1Fu}; // PSX-SPX: defaults to 1Fh (all INT1-INT5 enabled)
     uint8_t irq_flags_{0};
     uint8_t request_{0}; // 1F801803.Index0 (SMEN/BFRD)
     uint8_t busy_{0};
@@ -122,6 +129,7 @@ class Cdrom
     uint8_t read_pending_irq1_{0};   // second response INT1 pending (ReadN/ReadS)
     uint8_t data_ready_pending_{0};  // data can be loaded when want_data=1
     uint8_t async_stat_pending_{0};  // async status INT1 pending after certain commands
+    uint8_t reading_active_{0};      // ReadN/ReadS continuous reading in progress
 
     // Command queue (quand IRQ flags non ack ou Busy=1).
     uint8_t queued_cmd_{0};
@@ -143,6 +151,24 @@ class Cdrom
     // Shell close interrupt tracking.
     // INT5 is sent when the BIOS enables it and a disc is present.
     uint8_t shell_close_sent_{0};
+
+    // Async IRQ delivery delays (in CPU cycles).
+    // On real hardware, IRQs are delivered asynchronously by the drive.
+    // We queue them and deliver after a short delay so the CPU has time
+    // to return to its polling loop with interrupts enabled.
+    uint32_t pending_irq_delay_{0};  // cycles until pending IRQ fires
+    uint8_t pending_irq_type_{0};    // IRQ type to deliver (1-5), 0=none
+    uint8_t pending_irq_resp_{0};    // response byte 0 (stat)
+    uint8_t pending_irq_reason_{0};  // response byte 1 (reason code, 0=none)
+
+    // Command response delay: irq_flags set after this delay elapses.
+    // Response data is already in the FIFO (BIOS can poll), but the IRQ
+    // line isn't raised until the delay expires, preventing VBlank handler
+    // from seeing CDROM irq_flags during the probing phase.
+    uint32_t cmd_irq_delay_{0};      // cycles until irq_flags are set
+    uint8_t cmd_irq_pending_{0};     // IRQ type to set when delay expires
+
+    uint8_t last_cmd_{0};             // last command executed (for debug)
 };
 
 } // namespace cdrom

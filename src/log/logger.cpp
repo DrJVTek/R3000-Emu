@@ -31,10 +31,20 @@ void logger_vlogf(Logger* l, Level lvl, Category cat, const char* fmt, va_list a
     if (!logger_enabled(l, lvl, cat))
         return;
 
-    std::fprintf(l->out, "[%s] ", level_name(lvl));
-    std::vfprintf(l->out, fmt, args);
-    std::fputc('\n', l->out);
-    std::fflush(l->out);
+    if (l->cb)
+    {
+        // Callback path: format into buffer, call callback.
+        char buf[1024];
+        std::vsnprintf(buf, sizeof(buf), fmt, args);
+        l->cb(lvl, cat, buf, l->cb_user);
+    }
+    else if (l->out)
+    {
+        std::fprintf(l->out, "[%s] ", level_name(lvl));
+        std::vfprintf(l->out, fmt, args);
+        std::fputc('\n', l->out);
+        std::fflush(l->out);
+    }
 }
 
 void logger_logf(Logger* l, Level lvl, Category cat, const char* fmt, ...)

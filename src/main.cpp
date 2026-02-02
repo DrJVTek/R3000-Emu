@@ -16,6 +16,7 @@
 
 #include "emu/core.h"
 #include "loader/loader.h"
+#include "log/emu_log.h"
 #include "log/filelog.h"
 #include "log/logger.h"
 #include "r3000/bus.h"
@@ -48,20 +49,31 @@ static void print_usage(void)
         stderr,
         "Usage:\n"
         "  r3000_emu [--bios=<bios.bin>] [--cd=<image>] [--gpu-dump=<file>] [--wav-output=<file.wav>]\n"
-        "            [--max-steps=N] [--pretty] [--log-level=..] [--log-cats=..]\n"
+        "            [--max-steps=N] [--pretty] [--log-level=..] [--log-cats=..] [--emu-log-level=..]\n"
         "  r3000_emu --load=<file> [--format=auto|elf|psxexe] [--pretty] [--max-steps=N]\n"
         "\n"
         "Options:\n"
-        "  --bios=<file>       Load BIOS ROM (default: bios/ps1_bios.bin)\n"
-        "  --cd=<image>        Insert CD image (CUE/BIN)\n"
-        "  --gpu-dump=<file>   Dump GPU commands to file\n"
-        "  --wav-output=<file> Save SPU audio to WAV file\n"
-        "  --max-steps=N       Stop after N instructions\n"
-        "  --load=<file>       Load ELF or PS-X EXE directly (skips BIOS)\n"
-        "  --pretty            Pretty print instructions\n"
-        "  --trace-io          Verbose MMIO logging\n"
-        "  --pc-sample=N       Print PC every N steps\n"
+        "  --bios=<file>         Load BIOS ROM (default: bios/ps1_bios.bin)\n"
+        "  --cd=<image>          Insert CD image (CUE/BIN)\n"
+        "  --gpu-dump=<file>     Dump GPU commands to file\n"
+        "  --wav-output=<file>   Save SPU audio to WAV file\n"
+        "  --max-steps=N         Stop after N instructions\n"
+        "  --load=<file>         Load ELF or PS-X EXE directly (skips BIOS)\n"
+        "  --pretty              Pretty print instructions\n"
+        "  --trace-io            Verbose MMIO logging\n"
+        "  --pc-sample=N         Print PC every N steps\n"
+        "  --emu-log-level=LVL   Set emu log level (error|warn|info|debug|trace)\n"
     );
+}
+
+// CLI callback for emu::Log - writes to stderr
+static void cli_log_callback(emu::LogLevel level, const char* tag, const char* msg, void* /*user*/)
+{
+    static const char* lvl_names[] = {"ERROR", "WARN", "INFO", "DEBUG", "TRACE"};
+    const int idx = (int)level;
+    const char* lvl_str = (idx >= 0 && idx <= 4) ? lvl_names[idx] : "???";
+    std::fprintf(stderr, "[%s] [%s] %s\n", lvl_str, tag, msg);
+    std::fflush(stderr);
 }
 
 static int read_file_malloc(const char* path, uint8_t** out_buf, uint32_t* out_size, char* err, size_t err_cap)
@@ -175,6 +187,13 @@ int main(int argc, char** argv)
         rlog::logger_set_cats(&logger, rlog::parse_categories_csv(cats));
     }
 
+    // Initialize emu::Log (callback-based, UE5-ready)
+    const char* emu_lvl = arg_value(argc, argv, "--emu-log-level=");
+    emu::Log emu_log{};
+    emu_log.cb = cli_log_callback;
+    emu_log.max_level = emu::log_parse_level(emu_lvl); // defaults to info
+    emu::log_init(&emu_log);
+
     const char* bios_path = arg_value(argc, argv, "--bios=");
     const char* load_path = arg_value(argc, argv, "--load=");
     const char* cd_path = arg_value(argc, argv, "--cd=");
@@ -194,7 +213,7 @@ int main(int argc, char** argv)
             fmt = loader::Format::elf;
         else
         {
-            std::fprintf(stderr, "Unknown --format=%s (use auto|psxexe|elf)\n", fmt_s);
+            emu::logf(emu::LogLevel::error, "MAIN", "Unknown --format=%s (use auto|psxexe|elf)", fmt_s);
             return 1;
         }
     }
@@ -215,7 +234,7 @@ int main(int argc, char** argv)
         err[0] = '\0';
         if (!core.alloc_ram(kRamSize, err, sizeof(err)))
         {
-            std::fprintf(stderr, "RAM alloc failed: %s\n", err[0] ? err : "unknown error");
+            emu::logf(emu::LogLevel::error, "MAIN", "RAM alloc failed: %s", err[0] ? err : "unknown error");
             return 1;
         }
     }
@@ -258,14 +277,14 @@ int main(int argc, char** argv)
                 bios_path = candidates[i];
                 if (read_file_malloc(bios_path, &bios, &bios_size, err, sizeof(err)))
                 {
-                    std::fprintf(stderr, "[INFO] BIOS loaded: %s (%u bytes)\n", bios_path, bios_size);
+                    emu::logf(emu::LogLevel::info, "MAIN", "BIOS loaded: %s (%u bytes)", bios_path, bios_size);
                     ok = true;
                     break;
                 }
             }
             if (!ok)
             {
-                std::fprintf(stderr, "No BIOS found. Put a BIOS in 'bios/ps1_bios.bin' or use --bios=...\n");
+                emu::logf(emu::LogLevel::error, "MAIN", "No BIOS found. Put a BIOS in 'bios/ps1_bios.bin' or use --bios=...");
                 print_usage();
                 return 1;
             }
@@ -275,10 +294,10 @@ int main(int argc, char** argv)
             char err[256];
             if (!read_file_malloc(bios_path, &bios, &bios_size, err, sizeof(err)))
             {
-                std::fprintf(stderr, "BIOS load failed: %s\n", err[0] ? err : "unknown error");
+                emu::logf(emu::LogLevel::error, "MAIN", "BIOS load failed: %s", err[0] ? err : "unknown error");
                 return 1;
             }
-            std::fprintf(stderr, "[INFO] BIOS loaded: %s (%u bytes)\n", bios_path, bios_size);
+            emu::logf(emu::LogLevel::info, "MAIN", "BIOS loaded: %s (%u bytes)", bios_path, bios_size);
         }
     }
     else
@@ -287,7 +306,7 @@ int main(int argc, char** argv)
         err[0] = '\0';
         if (!loader::load_file_into_ram(load_path, fmt, core.ram(), core.ram_size(), &img, err, sizeof(err)))
         {
-            std::fprintf(stderr, "Load failed: %s\n", err[0] ? err : "unknown error");
+            emu::logf(emu::LogLevel::error, "MAIN", "Load failed: %s", err[0] ? err : "unknown error");
             return 1;
         }
     }
@@ -313,11 +332,11 @@ int main(int argc, char** argv)
         err[0] = '\0';
         if (!core.insert_disc(cd_path, err, sizeof(err)))
         {
-            std::fprintf(stderr, "CD image load failed: %s\n", err[0] ? err : "unknown error");
+            emu::logf(emu::LogLevel::error, "MAIN", "CD image load failed: %s", err[0] ? err : "unknown error");
         }
         else
         {
-            std::fprintf(stderr, "[INFO] CD inserted: %s\n", cd_path);
+            emu::logf(emu::LogLevel::info, "MAIN", "CD inserted: %s", cd_path);
         }
     }
 
@@ -327,7 +346,7 @@ int main(int argc, char** argv)
         err[0] = '\0';
         if (!core.set_bios_copy(bios, bios_size, err, sizeof(err)))
         {
-            std::fprintf(stderr, "BIOS setup failed: %s\n", err[0] ? err : "unknown error");
+            emu::logf(emu::LogLevel::error, "MAIN", "BIOS setup failed: %s", err[0] ? err : "unknown error");
             return 1;
         }
         std::free(bios);
@@ -340,13 +359,14 @@ int main(int argc, char** argv)
     emu::Core::InitOptions core_opt{};
     core_opt.pretty = has_flag(argc, argv, "--pretty") ? 1 : 0;
     core_opt.trace_io = trace_io ? 1 : 0;
+    core_opt.hle_vectors = has_flag(argc, argv, "--hle") ? 1 : 0;
 
     {
         char err[256];
         err[0] = '\0';
         if (!core.init_from_image(img, core_opt, err, sizeof(err)))
         {
-            std::fprintf(stderr, "Core init failed: %s\n", err[0] ? err : "unknown error");
+            emu::logf(emu::LogLevel::error, "MAIN", "Core init failed: %s", err[0] ? err : "unknown error");
             return 1;
         }
     }
@@ -355,10 +375,21 @@ int main(int argc, char** argv)
     if (wav_output && core.bus())
     {
         core.bus()->enable_wav_output(wav_output);
-        std::fprintf(stderr, "[INFO] WAV output: %s\n", wav_output);
+        emu::logf(emu::LogLevel::info, "MAIN", "WAV output: %s", wav_output);
     }
 
-    std::fprintf(stderr, "[INFO] Run start PC=0x%08X\n", core.pc());
+    // Fast boot: skip BIOS, load game EXE directly from CD
+    if (has_flag(argc, argv, "--fast-boot") && cd_path)
+    {
+        char err[256]{};
+        if (!core.fast_boot_from_cd(err, sizeof(err)))
+        {
+            emu::logf(emu::LogLevel::error, "MAIN", "Fast boot failed: %s", err[0] ? err : "unknown");
+            return 1;
+        }
+    }
+
+    emu::logf(emu::LogLevel::info, "MAIN", "Run start PC=0x%08X", core.pc());
 
     rlog::logger_logf(
         &logger, rlog::Level::info, rlog::Category::exec, "R3000 run start (PC=0x%08X)", core.pc()
@@ -373,17 +404,12 @@ int main(int argc, char** argv)
             ++steps;
             if (pc_sample != 0 && (steps % pc_sample) == 0)
             {
-                std::fprintf(
-                    stderr,
-                    "SAMPLE step=%" PRIu64 " PC=0x%08X INSTR=0x%08X\n",
-                    steps,
-                    res.pc,
-                    res.instr
-                );
+                emu::logf(emu::LogLevel::info, "MAIN", "SAMPLE step=%" PRIu64 " PC=0x%08X INSTR=0x%08X",
+                    steps, res.pc, res.instr);
             }
             if (max_steps != 0 && steps >= max_steps)
             {
-                std::fprintf(stderr, "Stop: reached --max-steps=%" PRIu64 "\n", max_steps);
+                emu::logf(emu::LogLevel::info, "MAIN", "Stop: reached --max-steps=%" PRIu64, max_steps);
                 break;
             }
             continue;
@@ -391,32 +417,21 @@ int main(int argc, char** argv)
 
         if (res.kind == r3000::Cpu::StepResult::Kind::halted)
         {
-            std::fprintf(stderr, "HALT at PC=0x%08X\n", res.pc);
+            emu::logf(emu::LogLevel::info, "MAIN", "HALT at PC=0x%08X", res.pc);
             break;
         }
 
         if (res.kind == r3000::Cpu::StepResult::Kind::illegal_instr)
         {
-            std::fprintf(
-                stderr,
-                "Illegal instruction at PC=0x%08X: 0x%08X (steps=%" PRIu64 ")\n",
-                res.pc,
-                res.instr,
-                steps
-            );
+            emu::logf(emu::LogLevel::error, "MAIN", "Illegal instruction at PC=0x%08X: 0x%08X (steps=%" PRIu64 ")",
+                res.pc, res.instr, steps);
             break;
         }
 
         if (res.kind == r3000::Cpu::StepResult::Kind::mem_fault)
         {
-            std::fprintf(
-                stderr,
-                "Mem fault at PC=0x%08X addr=0x%08X kind=%d (steps=%" PRIu64 ")\n",
-                res.pc,
-                res.mem_fault.addr,
-                (int)res.mem_fault.kind,
-                steps
-            );
+            emu::logf(emu::LogLevel::error, "MAIN", "Mem fault at PC=0x%08X addr=0x%08X kind=%d (steps=%" PRIu64 ")",
+                res.pc, res.mem_fault.addr, (int)res.mem_fault.kind, steps);
             break;
         }
     }

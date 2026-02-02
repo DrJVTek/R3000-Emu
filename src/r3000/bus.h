@@ -54,6 +54,7 @@ class Bus
     ~Bus();
 
     uint32_t ram_size() const;
+    uint8_t* ram_ptr() { return ram_; }
 
     // Lecture/écriture RAM/MMIO. Retourne false en cas de fault (et remplit fault).
     bool read_u8(uint32_t addr, uint8_t& out, MemFault& fault);
@@ -85,6 +86,10 @@ class Bus
         trace_has_clock_ = 1;
     }
 
+    // CPU PC tracking for debug (set by CPU before store instructions)
+    void set_cpu_pc(uint32_t pc) { cpu_pc_ = pc; }
+    uint32_t cpu_pc() const { return cpu_pc_; }
+
     // Debug: watch d'une adresse RAM (physique) - log les writes byte qui la touchent.
     // Exemple: pour watcher 0x8009A204 (KSEG0), donner phys=0x0009A204.
     void set_watch_ram_u32(uint32_t phys_addr, int enabled)
@@ -103,6 +108,13 @@ class Bus
     uint32_t irq_stat_raw() const { return i_stat_; }
     uint32_t irq_mask_raw() const { return i_mask_; }
 
+    // Set a specific I_STAT bit (used by HLE VBlank delivery).
+    void set_i_stat_bit(uint32_t bit) { i_stat_ |= (1u << bit); }
+
+    // CDROM IRQ edge flag (set by tick, cleared by CPU after delivering HLE events)
+    bool cdrom_irq_edge() const { return cdrom_irq_edge_; }
+    void clear_cdrom_irq_edge() { cdrom_irq_edge_ = false; }
+
     // Accès device (pour HLE BIOS côté CPU).
     cdrom::Cdrom* cdrom() const { return cdrom_; }
 
@@ -113,6 +125,7 @@ class Bus
     void enable_wav_output(const char* path);
 
   private:
+    void dma_finish(int ch);
     bool is_in_ram(uint32_t addr, uint32_t size) const;
     bool is_in_range(uint32_t addr, uint32_t base, uint32_t size, uint32_t access_size) const;
     void log_mem(const char* op, uint32_t addr, uint32_t v) const;
@@ -184,7 +197,7 @@ class Bus
     uint32_t i_stat_{0};
     uint32_t i_mask_{0};
     Timer timers_[3]{};
-    uint8_t timer_div_accum_[3]{}; // simple prescaler accumulator per timer
+    uint32_t timer_prescale_accum_[3]{}; // prescaler accumulator (dotclock/hblank)
 
     // DMA controller (PS1) - minimal (suffisant pour BIOS init).
     // On implémente surtout DMA2 (GPU) linked-list pour déverrouiller les boucles BIOS qui attendent CHCR.
@@ -200,6 +213,8 @@ class Bus
     uint32_t dicr_{0};
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
+    bool cdrom_irq_edge_{false};
+    uint32_t vblank_no_mask_count_{0}; // VBlank frames with I_MASK=0 (for auto-enable workaround)
 
     // ----------------------------
     // SPU (minimal, spec-aligned)
@@ -232,6 +247,7 @@ class Bus
     flog::Sink trace_sink_{};
     flog::Clock trace_clock_{};
     int trace_has_clock_{0};
+    uint32_t cpu_pc_{0};
     uint32_t watch_ram_u32_phys_{0};
     int watch_ram_u32_enabled_{0};
     uint32_t watch_ram_u32_last_{0};

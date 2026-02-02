@@ -148,8 +148,18 @@ class Gpu
     uint32_t vblank_div_{0};
     bool in_vblank_{false};
 
-    static constexpr uint32_t kVblankPeriodCycles = 100000u;
-    static constexpr uint32_t kVblankDuration = 10000u;
+    // PAL: 33868800 Hz / 49.76 Hz ≈ 680688 CPU cycles per frame
+    // NTSC: 33868800 Hz / 59.29 Hz ≈ 571088 CPU cycles per frame
+    // TODO: switch based on video mode; default to PAL (SCPH-7502)
+    //
+    // Note: our interpreter is 1-CPI (1 instruction = 1 cycle tick) while the
+    // real R3000A averages ~3 CPI. We use the REAL cycle counts here so that
+    // VBlanks are spaced correctly relative to instruction count — the kernel
+    // exception handler takes a fixed number of instructions regardless of CPI,
+    // and must complete before the next VBlank arrives.
+    static constexpr uint32_t kVblankPeriodCycles = 680688u;
+    // VBlank lasts ~20 scanlines out of 314 total (PAL) ≈ 43370 CPU cycles
+    static constexpr uint32_t kVblankDuration = 43370u;
 
     // Binary GP0 packet capture
     std::FILE* dump_{nullptr};

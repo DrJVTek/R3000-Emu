@@ -1,5 +1,6 @@
 #include "spu.h"
 #include "wav_writer.h"
+#include "../log/emu_log.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -28,8 +29,14 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
     // Global registers: 0x180+
     switch (offset)
     {
-        case 0x180: main_vol_l_ = static_cast<int16_t>(val); break;
-        case 0x182: main_vol_r_ = static_cast<int16_t>(val); break;
+        case 0x180:
+            main_vol_l_ = static_cast<int16_t>(val);
+            emu::logf(emu::LogLevel::trace, "SPU", "MAIN_VOL_L=0x%04X (%d)", val, (int16_t)val);
+            break;
+        case 0x182:
+            main_vol_r_ = static_cast<int16_t>(val);
+            emu::logf(emu::LogLevel::trace, "SPU", "MAIN_VOL_R=0x%04X (%d)", val, (int16_t)val);
+            break;
         case 0x184: reverb_vol_l_ = static_cast<int16_t>(val); break;
         case 0x186: reverb_vol_r_ = static_cast<int16_t>(val); break;
 
@@ -46,7 +53,9 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
                 if (kon_ & (1u << i))
                 {
                     voices_[i].key_on();
-                    endx_ &= ~(1u << i);  // Clear ENDX flag
+                    endx_ &= ~(1u << i);
+                    emu::logf(emu::LogLevel::debug, "SPU", "KEY_ON voice %d addr=0x%05X",
+                        i, (uint32_t)voices_[i].read_reg(0x06) << 3);
                 }
             }
             kon_shadow_ = kon_;
@@ -66,6 +75,7 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
                 if (koff_ & (1u << i))
                 {
                     voices_[i].key_off();
+                    emu::logf(emu::LogLevel::debug, "SPU", "KEY_OFF voice %d", i);
                 }
             }
             koff_ = 0;
@@ -98,7 +108,8 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
         // Transfer address
         case 0x1A6:
             xfer_addr_reg_ = val;
-            xfer_addr_cur_ = static_cast<uint32_t>(val) << 3;  // 8-byte units -> bytes
+            xfer_addr_cur_ = static_cast<uint32_t>(val) << 3;
+            emu::logf(emu::LogLevel::trace, "SPU", "XFER_ADDR=0x%05X (reg=0x%04X)", xfer_addr_cur_, val);
             break;
 
         // Transfer FIFO (manual write to SPU RAM)
@@ -115,15 +126,11 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
         // SPUCNT - Control register
         case 0x1AA:
         {
+            const uint16_t old = ctrl_;
             ctrl_ = val;
-            // Bit 15: SPU enable
-            // Bit 14: Mute
-            // Bit 13: Noise frequency shift
-            // Bit 12-8: Noise frequency step
-            // Bit 5: Reverb master enable
-            // Bit 4: IRQ enable
-            // Bit 3-1: Transfer mode
-            // Bit 0: CD audio enable
+            if (val != old)
+                emu::logf(emu::LogLevel::debug, "SPU", "SPUCNT 0x%04X->0x%04X en=%d mute=%d cd=%d xfer=%d",
+                    old, val, (val>>15)&1, (val>>14)&1, val&1, (val>>1)&7);
             break;
         }
 
@@ -233,21 +240,26 @@ uint16_t Spu::read_voice_reg(int voice, uint32_t offset) const
 
 uint16_t Spu::stat() const
 {
-    // SPUSTAT:
-    // Bit 15-12: Current mode (from SPUCNT bits 5-0)
-    // Bit 11: Write to second half of capture buffers
-    // Bit 10: Data transfer busy
-    // Bit 9: DMA read request
-    // Bit 8: DMA write request
-    // Bit 7: DMA ready (r/w)
-    // Bit 6: IRQ flag
-    // Bit 5-0: Current mode (mirror of SPUCNT bits 5-0)
+    // SPUSTAT (PSX-SPX):
+    // Bit 0-5:  Current mode (mirror of SPUCNT bits 0-5)
+    // Bit 6:    IRQ9 flag (0=No, 1=IRQ9 set)
+    // Bit 7-8:  Data transfer DMA read/write request (from SPUCNT bits 4-5)
+    // Bit 9:    Data transfer DMA write request
+    // Bit 10:   Data transfer busy flag (0=Ready, 1=Busy)
+    // Bit 11:   Writing to capture buffers (0=First, 1=Second)
 
-    uint16_t s = ctrl_ & 0x3F;  // Current mode from ctrl
-    s |= (ctrl_ & 0x3F) << 10;  // Upper bits
+    uint16_t s = ctrl_ & 0x3F;  // Bits 0-5: current mode from SPUCNT
 
-    // DMA ready flag (bit 7)
-    s |= 0x80;
+    // Bit 7-8: DMA request flags (reflect transfer mode from SPUCNT bits 4-5)
+    // Only set when SPU is enabled (SPUCNT bit 15)
+    if (ctrl_ & (1u << 15))
+    {
+        const uint16_t xfer_mode = (ctrl_ >> 4) & 3u;
+        if (xfer_mode == 2)      // DMA write
+            s |= (1u << 8);
+        else if (xfer_mode == 3) // DMA read
+            s |= (1u << 9);
+    }
 
     return s;
 }
@@ -272,6 +284,7 @@ uint16_t Spu::read_ram(uint32_t addr) const
 
 void Spu::dma_write(const uint16_t* data, uint32_t count)
 {
+    emu::logf(emu::LogLevel::debug, "SPU", "DMA_WRITE %u words -> RAM 0x%05X", count, xfer_addr_cur_);
     for (uint32_t i = 0; i < count; i++)
     {
         write_ram(xfer_addr_cur_, data[i]);
@@ -282,6 +295,7 @@ void Spu::dma_write(const uint16_t* data, uint32_t count)
 
 void Spu::dma_read(uint16_t* data, uint32_t count)
 {
+    emu::logf(emu::LogLevel::debug, "SPU", "DMA_READ %u words <- RAM 0x%05X", count, xfer_addr_cur_);
     for (uint32_t i = 0; i < count; i++)
     {
         data[i] = read_ram(xfer_addr_cur_);
@@ -361,6 +375,15 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
         // Will be written via external call
     }
 
+    // Periodic stats (every ~1 second of audio)
+    if ((total_samples_ & 0xFFFF) == 0 && total_samples_ > 0)
+    {
+        emu::logf(emu::LogLevel::debug, "SPU", "samples=%llu en=%d mainvol=%d/%d ctrl=0x%04X cb=%s",
+            (unsigned long long)total_samples_, (ctrl_ >> 15) & 1,
+            (int)main_vol_l_, (int)main_vol_r_, ctrl_,
+            audio_callback_ ? "yes" : "no");
+    }
+
     // Buffer for callback
     if (audio_callback_)
     {
@@ -373,6 +396,15 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
             audio_callback_(output_buffer_, output_buffer_pos_ / 2);
             output_buffer_pos_ = 0;
         }
+    }
+}
+
+void Spu::flush_audio()
+{
+    if (audio_callback_ && output_buffer_pos_ > 0)
+    {
+        audio_callback_(output_buffer_, output_buffer_pos_ / 2);
+        output_buffer_pos_ = 0;
     }
 }
 

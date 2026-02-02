@@ -1,4 +1,5 @@
 #include "gpu.h"
+#include "../log/emu_log.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -151,7 +152,7 @@ Gpu::Gpu(rlog::Logger* logger)
     : logger_(logger)
     , vram_(std::make_unique<uint16_t[]>(kVramPixels))
 {
-    status_ = 0x1480'2000u;
+    status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
     vblank_div_ = 0;
     std::memset(vram_.get(), 0, kVramPixels * sizeof(uint16_t));
@@ -177,8 +178,8 @@ int Gpu::tick_vblank(uint32_t cycles)
         const auto& s = frame_stats_;
         if (s.total_words > 0)
         {
-            std::fprintf(stderr, "[GPU] FRAME #%u: %u tri, %u quad, %u rect, %u line, %u fill, "
-                "%u v2v, %u c2v, %u v2c, %u env | %u words\n",
+            emu::logf(emu::LogLevel::debug, "GPU", "FRAME #%u: %u tri, %u quad, %u rect, %u line, %u fill, "
+                "%u v2v, %u c2v, %u v2c, %u env | %u words",
                 frame_count_, s.triangles, s.quads, s.rects, s.lines, s.fills,
                 s.vram_to_vram, s.cpu_to_vram, s.vram_to_cpu, s.env_cmds, s.total_words);
         }
@@ -393,7 +394,7 @@ void Gpu::gp0_start_command(uint32_t cmd_word)
         polyline_color_ = cmd_word & 0x00FFFFFFu;
         frame_stats_.lines++;
 
-        std::fprintf(stderr, "[GPU] GP0 POLYLINE%s%s color=%06X\n",
+        emu::logf(emu::LogLevel::trace, "GPU", "GP0 POLYLINE%s%s color=%06X",
             polyline_gouraud_ ? "_GOURAUD" : "_FLAT",
             polyline_semi_ ? "_SEMI" : "",
             cmd_word & 0x00FFFFFFu);
@@ -425,9 +426,9 @@ void Gpu::gp0_execute()
     {
         if (cmd == 0x02) gp0_fill_rect();
         else if (cmd == 0x01)
-            std::fprintf(stderr, "[GPU] GP0 CLEAR_CACHE\n");
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 CLEAR_CACHE");
         else if (cmd == 0x1F)
-            std::fprintf(stderr, "[GPU] GP0 IRQ_REQUEST\n");
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 IRQ_REQUEST");
         // Others are NOP
         return;
     }
@@ -516,7 +517,7 @@ void Gpu::gp0_fill_rect()
     }
 
     frame_stats_.fills++;
-    std::fprintf(stderr, "[GPU] GP0 FILL (%u,%u) %ux%u color=%06X\n", x, y, w, h, color);
+    emu::logf(emu::LogLevel::trace, "GPU", "GP0 FILL (%u,%u) %ux%u color=%06X", x, y, w, h, color);
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +541,7 @@ void Gpu::gp0_polygon()
 
     // Build log string
     char buf[256];
-    int pos = std::snprintf(buf, sizeof(buf), "[GPU] GP0 %s%s%s%s c=%06X",
+    int pos = std::snprintf(buf, sizeof(buf), "GP0 %s%s%s%s c=%06X",
         quad ? "QUAD" : "TRI",
         gouraud ? "_GOURAUD" : "_FLAT",
         textured ? "_TEX" : "",
@@ -566,7 +567,7 @@ void Gpu::gp0_polygon()
             idx++; // Skip UV word
     }
 
-    std::fprintf(stderr, "%s\n", buf);
+    emu::logf(emu::LogLevel::trace, "GPU", "%s", buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +588,7 @@ void Gpu::gp0_line()
     int16_t x1 = (idx < cmd_buf_pos_) ? (int16_t)(cmd_buf_[idx] & 0xFFFF) : 0;
     int16_t y1 = (idx < cmd_buf_pos_) ? (int16_t)(cmd_buf_[idx] >> 16) : 0;
 
-    std::fprintf(stderr, "[GPU] GP0 LINE%s%s (%d,%d)-(%d,%d) c=%06X\n",
+    emu::logf(emu::LogLevel::trace, "GPU", "GP0 LINE%s%s (%d,%d)-(%d,%d) c=%06X",
         gouraud ? "_GOURAUD" : "_FLAT", semi ? "_SEMI" : "",
         x0, y0, x1, y1, color);
 }
@@ -628,7 +629,7 @@ void Gpu::gp0_rect()
         case 3: w = 16; h = 16; size_name = "16x16"; break;
     }
 
-    std::fprintf(stderr, "[GPU] GP0 RECT_%s%s%s (%d,%d) %dx%d c=%06X\n",
+    emu::logf(emu::LogLevel::trace, "GPU", "GP0 RECT_%s%s%s (%d,%d) %dx%d c=%06X",
         size_name, textured ? "_TEX" : "", semi ? "_SEMI" : "",
         x, y, w, h, color);
 }
@@ -665,7 +666,7 @@ void Gpu::gp0_vram_to_vram()
     }
 
     frame_stats_.vram_to_vram++;
-    std::fprintf(stderr, "[GPU] GP0 VRAM->VRAM (%u,%u)->(%u,%u) %ux%u\n",
+    emu::logf(emu::LogLevel::debug, "GPU", "GP0 VRAM->VRAM (%u,%u)->(%u,%u) %ux%u",
         sx, sy, dx, dy, w, h);
 }
 
@@ -692,7 +693,7 @@ void Gpu::gp0_cpu_to_vram_start()
     gp0_state_ = Gp0State::receiving_vram_data;
     frame_stats_.cpu_to_vram++;
 
-    std::fprintf(stderr, "[GPU] GP0 CPU->VRAM (%u,%u) %ux%u [%u pixels, %u words]\n",
+    emu::logf(emu::LogLevel::debug, "GPU", "GP0 CPU->VRAM (%u,%u) %ux%u [%u pixels, %u words]",
         cpu_vram_x_, cpu_vram_y_, cpu_vram_w_, cpu_vram_h_,
         total_pixels, cpu_vram_words_remaining_);
 }
@@ -747,7 +748,7 @@ void Gpu::gp0_vram_to_cpu_start()
     vram_to_cpu_active_ = true;
 
     frame_stats_.vram_to_cpu++;
-    std::fprintf(stderr, "[GPU] GP0 VRAM->CPU (%u,%u) %ux%u\n",
+    emu::logf(emu::LogLevel::debug, "GPU", "GP0 VRAM->CPU (%u,%u) %ux%u",
         read_vram_x_, read_vram_y_, read_vram_w_, read_vram_h_);
 }
 
@@ -774,28 +775,28 @@ void Gpu::gp0_env_command()
             else
                 status_ &= ~(1u << 15);
 
-            std::fprintf(stderr, "[GPU] GP0 ENV TEXPAGE raw=0x%06X tpx=%u tpy=%u semi=%u depth=%u dither=%u texdis=%u\n",
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 ENV TEXPAGE raw=0x%06X tpx=%u tpy=%u semi=%u depth=%u dither=%u texdis=%u",
                 val, val & 0xF, (val >> 4) & 1, (val >> 5) & 3, (val >> 7) & 3,
                 (val >> 9) & 1, (val >> 11) & 1);
             break;
         }
         case 0xE2: // Texture window
             draw_env_.tex_window = val;
-            std::fprintf(stderr, "[GPU] GP0 ENV TEX_WINDOW mask=(%u,%u) off=(%u,%u)\n",
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 ENV TEX_WINDOW mask=(%u,%u) off=(%u,%u)",
                 val & 0x1F, (val >> 5) & 0x1F, (val >> 10) & 0x1F, (val >> 15) & 0x1F);
             break;
 
         case 0xE3: // Drawing area top-left
             draw_env_.clip_x1 = (uint16_t)(val & 0x3FF);
             draw_env_.clip_y1 = (uint16_t)((val >> 10) & 0x1FF);
-            std::fprintf(stderr, "[GPU] GP0 ENV CLIP_TL (%u,%u)\n",
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 ENV CLIP_TL (%u,%u)",
                 draw_env_.clip_x1, draw_env_.clip_y1);
             break;
 
         case 0xE4: // Drawing area bottom-right
             draw_env_.clip_x2 = (uint16_t)(val & 0x3FF);
             draw_env_.clip_y2 = (uint16_t)((val >> 10) & 0x1FF);
-            std::fprintf(stderr, "[GPU] GP0 ENV CLIP_BR (%u,%u)\n",
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 ENV CLIP_BR (%u,%u)",
                 draw_env_.clip_x2, draw_env_.clip_y2);
             break;
 
@@ -808,7 +809,7 @@ void Gpu::gp0_env_command()
             if (oy & 0x400) oy |= ~0x7FF;
             draw_env_.offset_x = (int16_t)ox;
             draw_env_.offset_y = (int16_t)oy;
-            std::fprintf(stderr, "[GPU] GP0 ENV DRAW_OFFSET (%d,%d)\n", ox, oy);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 ENV DRAW_OFFSET (%d,%d)", ox, oy);
             break;
         }
 
@@ -816,7 +817,7 @@ void Gpu::gp0_env_command()
             draw_env_.mask_bits = (uint16_t)(val & 3);
             // Update GPUSTAT bits 11-12
             status_ = (status_ & ~(3u << 11)) | ((val & 3u) << 11);
-            std::fprintf(stderr, "[GPU] GP0 ENV MASK set=%u check=%u\n",
+            emu::logf(emu::LogLevel::trace, "GPU", "GP0 ENV MASK set=%u check=%u",
                 val & 1, (val >> 1) & 1);
             break;
     }
@@ -832,7 +833,7 @@ void Gpu::gp1_write(uint32_t v)
     switch (cmd)
     {
         case 0x00: // Reset GPU
-            status_ = 0x1480'2000u;
+            status_ = 0x1490'2000u; // PAL default (bit 20 = 1)
             dma_dir_ = 0;
             gp0_state_ = Gp0State::idle;
             cmd_buf_pos_ = 0;
@@ -843,14 +844,14 @@ void Gpu::gp1_write(uint32_t v)
             read_vram_col_ = read_vram_row_ = 0;
             cpu_vram_words_remaining_ = 0;
             draw_env_ = DrawEnv{};
-            std::fprintf(stderr, "[GPU] GP1 RESET\n");
+            emu::logf(emu::LogLevel::info, "GPU", "GP1 RESET");
             break;
 
         case 0x01: // Clear FIFO
             gp0_state_ = Gp0State::idle;
             cmd_buf_pos_ = 0;
             cpu_vram_words_remaining_ = 0;
-            std::fprintf(stderr, "[GPU] GP1 CLEAR_FIFO\n");
+            emu::logf(emu::LogLevel::debug, "GPU", "GP1 CLEAR_FIFO");
             break;
 
         case 0x02: // Ack IRQ1
@@ -862,20 +863,20 @@ void Gpu::gp1_write(uint32_t v)
             const uint32_t off = v & 1u;
             if (off) status_ |= (1u << 23);
             else     status_ &= ~(1u << 23);
-            std::fprintf(stderr, "[GPU] GP1 DISPLAY %s\n", off ? "OFF" : "ON");
+            emu::logf(emu::LogLevel::info, "GPU", "GP1 DISPLAY %s", off ? "OFF" : "ON");
             break;
         }
 
         case 0x04: // DMA direction
             dma_dir_ = v & 3u;
-            std::fprintf(stderr, "[GPU] GP1 DMA_DIR %u\n", dma_dir_);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP1 DMA_DIR %u", dma_dir_);
             break;
 
         case 0x05: // Start of display area
         {
             uint32_t dx = v & 0x3FF;
             uint32_t dy = (v >> 10) & 0x1FF;
-            std::fprintf(stderr, "[GPU] GP1 DISPLAY_START (%u,%u)\n", dx, dy);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP1 DISPLAY_START (%u,%u)", dx, dy);
             break;
         }
 
@@ -883,7 +884,7 @@ void Gpu::gp1_write(uint32_t v)
         {
             uint32_t x1 = v & 0xFFF;
             uint32_t x2 = (v >> 12) & 0xFFF;
-            std::fprintf(stderr, "[GPU] GP1 H_RANGE %u-%u\n", x1, x2);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP1 H_RANGE %u-%u", x1, x2);
             break;
         }
 
@@ -891,7 +892,7 @@ void Gpu::gp1_write(uint32_t v)
         {
             uint32_t y1 = v & 0x3FF;
             uint32_t y2 = (v >> 10) & 0x3FF;
-            std::fprintf(stderr, "[GPU] GP1 V_RANGE %u-%u\n", y1, y2);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP1 V_RANGE %u-%u", y1, y2);
             break;
         }
 
@@ -899,7 +900,7 @@ void Gpu::gp1_write(uint32_t v)
         {
             // Bits: 0-1=H.res, 2=V.res, 3=video mode, 4=color depth, 5=interlace, 6=H.res2
             status_ = (status_ & ~0x7F4000u) | ((v & 0x3F) << 17) | ((v & 0x40) << 10);
-            std::fprintf(stderr, "[GPU] GP1 DISPLAY_MODE hres=%u vres=%u video=%s depth=%u interlace=%u\n",
+            emu::logf(emu::LogLevel::info, "GPU", "GP1 DISPLAY_MODE hres=%u vres=%u video=%s depth=%u interlace=%u",
                 v & 3, (v >> 2) & 1, (v & 8) ? "PAL" : "NTSC",
                 (v >> 4) & 1, (v >> 5) & 1);
             break;
@@ -910,7 +911,7 @@ void Gpu::gp1_write(uint32_t v)
             break;
 
         default:
-            std::fprintf(stderr, "[GPU] GP1 cmd=0x%02X val=0x%06X\n", cmd, v & 0x00FFFFFFu);
+            emu::logf(emu::LogLevel::debug, "GPU", "GP1 cmd=0x%02X val=0x%06X", cmd, v & 0x00FFFFFFu);
             break;
     }
 }

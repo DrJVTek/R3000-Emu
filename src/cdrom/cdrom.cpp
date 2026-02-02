@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "../log/emu_log.h"
+
 #if defined(_WIN32)
 #include <codecvt>
 #include <locale>
@@ -319,8 +321,7 @@ struct Cdrom::Disc
 
     int add_file(const char* path, char* err, size_t err_cap)
     {
-        std::fprintf(stderr, "[CDROM] add_file: path=\"%s\"\n", path ? path : "(null)");
-        std::fflush(stderr);
+        emu::logf(emu::LogLevel::debug, "CD", "add_file: path=\"%s\"", path ? path : "(null)");
         if (file_count >= (uint32_t)(sizeof(files) / sizeof(files[0])))
         {
             set_err(err, err_cap, "too many files in cue");
@@ -329,8 +330,7 @@ struct Cdrom::Disc
         std::FILE* f = fopen_utf8(path, "rb");
         if (!f)
         {
-            std::fprintf(stderr, "[CDROM] add_file: fopen FAILED for \"%s\"\n", path);
-            std::fflush(stderr);
+            emu::logf(emu::LogLevel::error, "CD", "add_file: fopen FAILED for \"%s\"", path);
             set_err(err, err_cap, "could not open track file");
             return 0;
         }
@@ -403,8 +403,7 @@ struct Cdrom::Disc
 
         char cue_dir[512];
         path_dirname(cue_path, cue_dir, sizeof(cue_dir));
-        std::fprintf(stderr, "[CDROM] open_cue: cue_path=\"%s\" cue_dir=\"%s\"\n", cue_path, cue_dir);
-        std::fflush(stderr);
+        emu::logf(emu::LogLevel::debug, "CD", "open_cue: cue_path=\"%s\" cue_dir=\"%s\"", cue_path, cue_dir);
 
         uint32_t current_file = 0xFFFF'FFFFu;
         uint8_t current_track = 0;
@@ -521,6 +520,7 @@ struct Cdrom::Disc
             return false;
 
         // Trouver le file qui contient ce LBA
+        bool found_file = false;
         for (uint32_t i = 0; i < file_count; ++i)
         {
             const File& fi = files[i];
@@ -528,7 +528,13 @@ struct Cdrom::Disc
                 continue;
             const uint32_t rel = lba - fi.start_lba;
             if (rel >= fi.num_sectors)
+            {
+                emu::logf(emu::LogLevel::debug, "CD",
+                    "read_sector_raw: LBA=%u file[%u] start=%u num_sectors=%u rel=%u OUT OF RANGE (ss=%u cap=%u)",
+                    lba, i, fi.start_lba, fi.num_sectors, rel, fi.sector_size, out_cap);
                 continue;
+            }
+            found_file = true;
 
             const uint32_t ss = fi.sector_size;
             if (ss == 0 || out_cap < ss)
@@ -552,7 +558,7 @@ Cdrom::Cdrom(rlog::Logger* logger) : logger_(logger)
 {
     // status_ très simplifié.
     status_ = 0x00;
-    irq_enable_ = 0;
+    irq_enable_ = 0x1Fu; // PSX-SPX: defaults to 1Fh (all INT1-INT5 enabled)
     irq_flags_ = 0;
     shell_close_sent_ = 0;
 }
@@ -625,8 +631,19 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
     // PSX-SPX: status bit 1 = motor on
     status_ = 0x02u; // Motor spinning
 
-    // Reset shell_close_sent_ so INT5 will be sent when BIOS enables it.
+    // Queue unsolicited INT5 (shell close) for delivery after a short delay.
+    // On real PS1, the CD controller sends INT5 automatically when the lid closes.
+    // The BIOS polls I_STAT for this interrupt before sending any CD commands.
     shell_close_sent_ = 0;
+    if (pending_irq_type_ == 0)
+    {
+        pending_irq_type_ = 0x05;
+        pending_irq_resp_ = status_;
+        pending_irq_reason_ = 0;
+        pending_irq_delay_ = 100000; // ~3ms, enough for BIOS to set up I_MASK
+        shell_close_sent_ = 1;
+        emu::logf(emu::LogLevel::info, "CD", "INT5 (shell close) queued on disc insert (delay=%u)", pending_irq_delay_);
+    }
 
     return true;
 }
@@ -697,13 +714,35 @@ void Cdrom::clear_params()
     param_count_ = 0;
 }
 
+void Cdrom::queue_cmd_irq(uint8_t flags)
+{
+    // Queue IRQ for delivery after a delay matching DuckStation's
+    // GetAckDelayForCommand(). Response data is already in the FIFO.
+    cmd_irq_pending_ = flags;
+
+    // Command response IRQ delay in CPU cycles.
+    // Real PS1: ~25000 cycles (DuckStation reference). Since our bus ticks
+    // once per instruction (not cycle-accurate), the effective delay must
+    // be large enough that the response doesn't arrive while the kernel
+    // exception handler is still dispatching the previous IRQ.
+    // Per-command delays (DuckStation: 25000 with disc, 15000 without, 80000 for Init).
+    uint32_t delay = disc_ ? 25000u : 15000u;
+    if (last_cmd_ == 0x0A) // Init
+        delay = 80000u;
+    cmd_irq_delay_ = delay;
+}
+
 void Cdrom::set_irq(uint8_t flags)
 {
     // no$psx / PSX-SPX:
     // 1F801803h.Index1 bits0-2 contain response IRQ type (INT1..INT7 as value 1..7).
     // Upper bits 5..7 read as 1.
+    const uint8_t old = irq_flags_;
     irq_flags_ &= ~0x07u;
     irq_flags_ |= (flags & 0x07u);
+    // Route to BUS tag so it appears in system.log
+    emu::logf(emu::LogLevel::info, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X",
+        (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_);
 }
 
 uint8_t Cdrom::status_reg() const
@@ -728,13 +767,10 @@ uint8_t Cdrom::status_reg() const
 
 int Cdrom::irq_line() const
 {
-    // IRQ line asserted when there is any IRQ flag set (bits0-4) and the corresponding
-    // interrupt enable bit is set (bits0-4).
-    const uint8_t reason = irq_flags_ & 0x07u;
-    if (reason == 0 || reason > 5)
-        return 0;
-    const uint8_t mask = (uint8_t)(1u << (reason - 1u));
-    return (irq_enable_ & mask) ? 1 : 0;
+    // PSX-SPX: The CDROM controller's /IRQ line is active when
+    // (IRQ_Flag AND IRQ_Enable) is non-zero. The line feeds into
+    // the interrupt controller's I_STAT bit 2 via edge detection.
+    return ((irq_flags_ & irq_enable_ & 0x1Fu) != 0) ? 1 : 0;
 }
 
 void Cdrom::try_fill_data_fifo()
@@ -752,10 +788,41 @@ void Cdrom::try_fill_data_fifo()
         return; // already loaded
 
     uint8_t data[2048];
+    emu::logf(emu::LogLevel::info, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
+        (unsigned)loc_lba_, (void*)disc_, (int)want_data_, (int)data_ready_pending_, data_r_, data_w_);
+
+    // Debug: dump first 64 bytes of sector data for directory reads
+    if (loc_lba_ <= 20)
+    {
+        uint8_t raw[2352];
+        uint32_t raw_ss = 0;
+        if (disc_->read_sector_raw(loc_lba_, raw, sizeof(raw), &raw_ss))
+        {
+            emu::logf(emu::LogLevel::info, "CD",
+                "RAW sector %u: ss=%u mode=%02X hdr=%02X%02X%02X%02X sub=%02X%02X%02X%02X%02X%02X%02X%02X",
+                loc_lba_, raw_ss, raw[15],
+                raw[12], raw[13], raw[14], raw[15],
+                raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23]);
+            // Dump first 32 bytes of user data (offset 24 for Mode2)
+            const uint8_t* ud = raw + 24;
+            emu::logf(emu::LogLevel::info, "CD",
+                "User[0..31]: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X "
+                "%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                ud[0],ud[1],ud[2],ud[3],ud[4],ud[5],ud[6],ud[7],
+                ud[8],ud[9],ud[10],ud[11],ud[12],ud[13],ud[14],ud[15],
+                ud[16],ud[17],ud[18],ud[19],ud[20],ud[21],ud[22],ud[23],
+                ud[24],ud[25],ud[26],ud[27],ud[28],ud[29],ud[30],ud[31]);
+        }
+    }
+
     if (read_user_data_2048(loc_lba_, data))
     {
         push_data(data, sizeof(data));
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info, "READ LBA=%u -> 2048 bytes", (unsigned)loc_lba_);
+        emu::logf(emu::LogLevel::info, "CD", "FIFO FILLED: LBA=%u 2048 bytes", (unsigned)loc_lba_);
+    }
+    else
+    {
+        emu::logf(emu::LogLevel::warn, "CD", "FIFO FILL FAILED: LBA=%u (disc=%p)", (unsigned)loc_lba_, (void*)disc_);
     }
 }
 
@@ -799,16 +866,18 @@ bool Cdrom::read_user_data_2048(uint32_t lba, uint8_t out[2048])
         }
         if (mode == 2)
         {
-            // CD-XA: sync+header+mode(16) + subhdr(8) + subhdr(8) => user data at 32.
-            // NOTE: Mode2 Form2 contient 2324 bytes; le BIOS (ISO9660) utilise en général Form1 (2048).
-            // Pour rester simple, on expose toujours 2048 bytes à partir de l’offset standard.
-            std::memcpy(out, sec2352 + 32, 2048);
+            // CD-XA Mode 2: user data at offset 24 (after sync+header+subheader*2)
+            std::memcpy(out, sec2352 + 24, 2048);
             return true;
         }
 
+        emu::logf(emu::LogLevel::warn, "CD",
+            "read_user_data_2048: LBA=%u unknown mode=%u (hdr: %02X%02X%02X%02X)",
+            lba, mode, sec2352[12], sec2352[13], sec2352[14], sec2352[15]);
         return false;
     }
 
+    emu::logf(emu::LogLevel::warn, "CD", "read_user_data_2048: LBA=%u read_sector_raw failed (ss=%u)", lba, ss);
     return false;
 }
 
@@ -823,7 +892,13 @@ static int iso_read_pvd(Cdrom* cd, uint32_t* out_root_lba, uint32_t* out_root_si
         return 0;
     uint8_t sec[2048];
     if (!cd->read_sector_2048(16, sec))
+    {
+        std::fprintf(stderr, "[WARN] [ISO] PVD: read_sector_2048(16) failed\n");
         return 0;
+    }
+
+    std::fprintf(stderr, "[INFO] [ISO] PVD sector 16: type=%02X magic='%c%c%c%c%c' ver=%02X\n",
+        sec[0], sec[1], sec[2], sec[3], sec[4], sec[5], sec[6]);
 
     // Primary Volume Descriptor:
     // 00 type=1, 01..05 "CD001", 06 version=1
@@ -1102,6 +1177,7 @@ uint8_t Cdrom::cmd_expected_params(uint8_t cmd) const
 
 void Cdrom::exec_command(uint8_t cmd)
 {
+    last_cmd_ = cmd;
     // Command execution (minimal, but aligned to PSX-SPX register semantics).
     //
     // IMPORTANT:
@@ -1137,13 +1213,7 @@ void Cdrom::exec_command(uint8_t cmd)
         (unsigned)param_count_
     );
 
-    // Debug: stderr trace for CDROM commands
-    static int cdrom_cmd_trace = 0;
-    if (++cdrom_cmd_trace <= 30)
-    {
-        std::fprintf(stderr, "[CDROM] CMD 0x%02X (%s) params=%u\n", cmd, cmd_name(cmd), (unsigned)param_count_);
-        std::fflush(stderr);
-    }
+    emu::logf(emu::LogLevel::info, "CD", "CMD 0x%02X (%s) params=%u", cmd, cmd_name(cmd), (unsigned)param_count_);
 
     const uint8_t expected = cmd_expected_params(cmd);
     if (expected != 0 && param_count_ < expected)
@@ -1152,7 +1222,7 @@ void Cdrom::exec_command(uint8_t cmd)
         // This is real hardware behavior - commands with insufficient parameters fail.
         push_resp(status_ | 0x01u); // Error flag in status
         push_resp(0x20);            // Error code: wrong number of parameters
-        set_irq(0x05);              // INT5: error
+        queue_cmd_irq(0x05);        // INT5: error
         cd_log(
             log_cd_,
             log_io_,
@@ -1173,13 +1243,33 @@ void Cdrom::exec_command(uint8_t cmd)
         case 0x00: // Sync
         {
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x01: // GetStat
         {
-            push_resp(status_);
-            set_irq(0x03);
+            // If shell_close not yet sent and disc is present, queue INT5
+            // AFTER this GetStat response. The BIOS expects INT5 to arrive
+            // after its CDROM event handlers are installed, which happens
+            // after the initial Test/GetStat probing sequence.
+            if (disc_ && !shell_close_sent_ && pending_irq_type_ == 0)
+            {
+                push_resp(status_);
+                queue_cmd_irq(0x03);
+                // Queue INT5 to fire after BIOS ACKs this GetStat INT3
+                pending_irq_type_ = 0x05;
+                pending_irq_resp_ = status_ | 0x01u; // stat with error bit
+                pending_irq_reason_ = 0x08;           // shell open reason
+                pending_irq_delay_ = 50000;            // ~1.5ms after ACK
+                shell_close_sent_ = 1;
+                emu::logf(emu::LogLevel::info, "BUS",
+                    "CD INT5 (shell close) queued after GetStat (delay=%u)", pending_irq_delay_);
+            }
+            else
+            {
+                push_resp(status_);
+                queue_cmd_irq(0x03);
+            }
             break;
         }
         case 0x02: // SetLoc (mm ss ff)
@@ -1188,21 +1278,23 @@ void Cdrom::exec_command(uint8_t cmd)
             loc_msf_[1] = param_fifo_[1];
             loc_msf_[2] = param_fifo_[2];
             loc_lba_ = msf_to_lba(loc_msf_[0], loc_msf_[1], loc_msf_[2]);
+            emu::logf(emu::LogLevel::info, "CD", "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
+                loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_);
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x03: // Play
         {
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x04: // Forward
         case 0x05: // Backward
         {
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x06: // ReadN
@@ -1211,41 +1303,75 @@ void Cdrom::exec_command(uint8_t cmd)
             // Read command:
             // - First response: INT3
             // - Second response: INT1 (data ready)
+            // - Continuous: after INT1 ack, auto-advance to next sector and send another INT1
             // - Data FIFO is loaded only after Want Data (Index0.Bit7).
             clear_data();
             want_data_ = 0;
             data_ready_pending_ = 0;
             read_pending_irq1_ = 1;
+            reading_active_ = 1;
 
+            // Set status: motor on (bit1) + reading (bit5)
+            status_ |= 0x22u;
             push_resp(status_);
-            set_irq(0x03); // INT3 (first response)
+            queue_cmd_irq(0x03); // INT3 (first response)
             break;
         }
         case 0x07: // MotorOn
         {
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x08: // Stop
+        {
+            reading_active_ = 0;
+            read_pending_irq1_ = 0;
+            status_ &= ~0x20u; // clear Reading
+            status_ &= ~0x02u; // clear Motor on
+            push_resp(status_);
+            queue_cmd_irq(0x03);
+            // Stop has INT2 second response
+            pending_irq_type_ = 0x02;
+            pending_irq_resp_ = status_;
+            pending_irq_reason_ = 0;
+            pending_irq_delay_ = 80000;
+            break;
+        }
         case 0x09: // Pause
         {
+            // First response uses status with Reading still set
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
+            // Clear reading and active flags
+            reading_active_ = 0;
+            read_pending_irq1_ = 0;
+            status_ &= ~0x20u;
+            // Pause has INT2 second response
+            pending_irq_type_ = 0x02;
+            pending_irq_resp_ = status_;
+            pending_irq_reason_ = 0;
+            pending_irq_delay_ = 50000;
             break;
         }
         case 0x0A: // Init
         {
-            status_ = 0x00;
+            status_ = 0x02u; // Motor on after init
+            mode_ = 0x20; // default mode: double speed
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
+            // Queue second response INT2 (Init complete) after first is acked
+            pending_irq_type_ = 0x02;
+            pending_irq_resp_ = status_;
+            pending_irq_reason_ = 0;
+            pending_irq_delay_ = 80000;
             break;
         }
         case 0x0B: // Mute
         case 0x0C: // Demute
         {
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x0D: // SetFilter (file, chan)
@@ -1253,14 +1379,19 @@ void Cdrom::exec_command(uint8_t cmd)
             filter_file_ = param_fifo_[0];
             filter_chan_ = param_fifo_[1];
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x0E: // SetMode
         {
             mode_ = param_fifo_[0];
+            emu::logf(emu::LogLevel::info, "CD", "SetMode: 0x%02X (ss=%s xa=%d speed=%s)",
+                mode_,
+                (mode_ & 0x20) ? "2340" : "2048",
+                (mode_ >> 3) & 1,
+                (mode_ & 0x80) ? "2x" : "1x");
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x0F: // GetParam
@@ -1269,7 +1400,7 @@ void Cdrom::exec_command(uint8_t cmd)
             push_resp(mode_);
             push_resp(filter_file_);
             push_resp(filter_chan_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x10: // GetLocL
@@ -1279,7 +1410,7 @@ void Cdrom::exec_command(uint8_t cmd)
             push_resp(loc_msf_[0]);
             push_resp(loc_msf_[1]);
             push_resp(loc_msf_[2]);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x11: // GetLocP
@@ -1336,7 +1467,7 @@ void Cdrom::exec_command(uint8_t cmd)
             push_resp(loc_msf_[0]); // Absolute MM
             push_resp(loc_msf_[1]); // Absolute SS
             push_resp(loc_msf_[2]); // Absolute FF
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x12: // SetSession
@@ -1352,7 +1483,7 @@ void Cdrom::exec_command(uint8_t cmd)
             {
                 // Session 1 is always valid
                 push_resp(status_);
-                set_irq(0x03); // INT3: command accepted
+                queue_cmd_irq(0x03); // INT3: command accepted
                 // Note: real hardware would send INT2 after seek completes.
                 // For simplicity, we treat it as instant.
             }
@@ -1361,7 +1492,7 @@ void Cdrom::exec_command(uint8_t cmd)
                 // Multi-session not supported - return explicit error
                 push_resp(status_ | 0x01u); // Error flag in status
                 push_resp(0x10);            // Error code: invalid parameter
-                set_irq(0x05);              // INT5: error
+                queue_cmd_irq(0x05);              // INT5: error
                 cd_log(
                     log_cd_,
                     log_io_,
@@ -1400,7 +1531,7 @@ void Cdrom::exec_command(uint8_t cmd)
             push_resp(status_);
             push_resp(u8_to_bcd(first));
             push_resp(u8_to_bcd(last));
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x14: // GetTD
@@ -1448,7 +1579,7 @@ void Cdrom::exec_command(uint8_t cmd)
             push_resp(u8_to_bcd((uint8_t)mm));
             push_resp(u8_to_bcd((uint8_t)ss));
             push_resp(u8_to_bcd((uint8_t)ff));
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x15: // SeekL
@@ -1470,7 +1601,7 @@ void Cdrom::exec_command(uint8_t cmd)
             //
             // The position was already set by SetLoc, so we just signal completion.
             push_resp(status_);
-            set_irq(0x02); // INT2: seek complete (not INT3)
+            queue_cmd_irq(0x02); // INT2: seek complete (not INT3)
             break;
         }
         case 0x17: // SetClock
@@ -1481,7 +1612,7 @@ void Cdrom::exec_command(uint8_t cmd)
             // We do not emulate the RTC - return explicit error.
             push_resp(status_ | 0x01u); // Error flag
             push_resp(0x40);            // Error code: command not available
-            set_irq(0x05);              // INT5: error
+            queue_cmd_irq(0x05);              // INT5: error
             cd_log(
                 log_cd_,
                 log_io_,
@@ -1500,7 +1631,7 @@ void Cdrom::exec_command(uint8_t cmd)
             // We do not emulate the RTC - return explicit error.
             push_resp(status_ | 0x01u); // Error flag
             push_resp(0x40);            // Error code: command not available
-            set_irq(0x05);              // INT5: error
+            queue_cmd_irq(0x05);              // INT5: error
             cd_log(
                 log_cd_,
                 log_io_,
@@ -1525,7 +1656,7 @@ void Cdrom::exec_command(uint8_t cmd)
             {
                 case 0x03: // Force Motor Off
                     push_resp(status_);
-                    set_irq(0x03);
+                    queue_cmd_irq(0x03);
                     break;
                 case 0x04: // Get SCEx counters
                 case 0x05:
@@ -1533,7 +1664,7 @@ void Cdrom::exec_command(uint8_t cmd)
                     push_resp(status_);
                     push_resp(0x00);
                     push_resp(0x00);
-                    set_irq(0x03);
+                    queue_cmd_irq(0x03);
                     break;
                 case 0x20: // Get CDROM BIOS date
                     // Return: yy, mm, dd, version (4 bytes, no stat)
@@ -1542,18 +1673,18 @@ void Cdrom::exec_command(uint8_t cmd)
                     push_resp(0x01);  // month (01 = January)
                     push_resp(0x10);  // day (10)
                     push_resp(0xC2);  // version C2 (PU-18)
-                    set_irq(0x03);
+                    queue_cmd_irq(0x03);
                     break;
                 case 0x22: // Get region char
                     // Return stat + region letter: 'I'=Japan, 'A'=America, 'E'=Europe
                     push_resp(status_);
                     push_resp('E'); // Europe
-                    set_irq(0x03);
+                    queue_cmd_irq(0x03);
                     break;
                 default:
                     // Unknown subcmd: return stat only
                     push_resp(status_);
-                    set_irq(0x03);
+                    queue_cmd_irq(0x03);
                     break;
             }
             // NOTE: Test command has no async second response.
@@ -1582,7 +1713,7 @@ void Cdrom::exec_command(uint8_t cmd)
                 // No disc - return error
                 push_resp(status_ | 0x01u); // Error flag
                 push_resp(0x80);            // Error: no disc
-                set_irq(0x05);              // INT5: error
+                queue_cmd_irq(0x05);              // INT5: error
                 break;
             }
 
@@ -1595,7 +1726,7 @@ void Cdrom::exec_command(uint8_t cmd)
 
             // First response: INT3
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
 
             // For simplicity, we immediately provide the second response.
             // Real hardware would delay this, but games just poll for it.
@@ -1636,7 +1767,7 @@ void Cdrom::exec_command(uint8_t cmd)
             clear_data();
             clear_resp();
             push_resp(status_);
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x1D: // GetQ
@@ -1712,7 +1843,7 @@ void Cdrom::exec_command(uint8_t cmd)
             push_resp(abs_mm);     // [7] Absolute MM
             push_resp(abs_ss);     // [8] Absolute SS
             push_resp(abs_ff);     // [9] Absolute FF
-            set_irq(0x03);
+            queue_cmd_irq(0x03);
             break;
         }
         case 0x1E: // ReadTOC
@@ -1736,14 +1867,14 @@ void Cdrom::exec_command(uint8_t cmd)
             {
                 push_resp(status_ | 0x01u); // Error flag
                 push_resp(0x80);            // Error: no disc
-                set_irq(0x05);              // INT5: error
+                queue_cmd_irq(0x05);              // INT5: error
                 break;
             }
 
             // TOC is already loaded - signal completion.
             // Real hardware sends INT3 then INT2; we simplify to just INT2.
             push_resp(status_);
-            set_irq(0x02); // INT2: command complete (not INT3)
+            queue_cmd_irq(0x02); // INT2: command complete (not INT3)
             cd_log(
                 log_cd_,
                 log_io_,
@@ -1760,7 +1891,7 @@ void Cdrom::exec_command(uint8_t cmd)
             push_resp(status_);
             // Unknown/unimplemented command: return error (INT5).
             // This avoids "pretending success" for missing hardware behavior.
-            set_irq(0x05);
+            queue_cmd_irq(0x05);
             break;
         }
     }
@@ -1792,36 +1923,23 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
     {
         case 0: // Status
             out = status_reg();
-            // Debug: log ALL status reads after Test command
-            {
-                static int stat_read_count = 0;
-                static int after_test = 0;
-                // Start counting after first command completes
-                if (irq_flags_ == 0 && after_test == 0 && stat_read_count > 0)
-                    after_test = 1;
-                if (++stat_read_count <= 30 || (after_test && stat_read_count <= 50))
-                {
-                    std::fprintf(stderr, "[CDROM] STATUS read #%d: 0x%02X (idx=%u irq=0x%02X busy=%d queued=%d resp_r=%u resp_w=%u)\n",
-                        stat_read_count, out, index_, irq_flags_, busy_, queued_cmd_valid_, resp_r_, resp_w_);
-                    std::fflush(stderr);
-                }
-            }
+            emu::logf(emu::LogLevel::trace, "CD", "STATUS read: 0x%02X (idx=%u irq=0x%02X busy=%d queued=%d resp_r=%u resp_w=%u)",
+                out, index_, irq_flags_, busy_, queued_cmd_valid_, resp_r_, resp_w_);
             break;
         case 1: // Response FIFO (R) (mirrors for Index0,2,3)
             out = pop_resp();
-            // Debug: log response reads
-            {
-                static int resp_read_count = 0;
-                if (++resp_read_count <= 20)
-                {
-                    std::fprintf(stderr, "[CDROM] RESP read #%d: 0x%02X (r=%u w=%u irq=0x%02X)\n",
-                        resp_read_count, out, resp_r_, resp_w_, irq_flags_);
-                    std::fflush(stderr);
-                }
-            }
+            emu::logf(emu::LogLevel::trace, "CD", "RESP read: 0x%02X (r=%u w=%u irq=0x%02X)",
+                out, resp_r_, resp_w_, irq_flags_);
             break;
         case 2: // Data FIFO (R) (Index0..3) 8-bit
             out = pop_data();
+            {
+                static uint32_t data_read_count = 0;
+                ++data_read_count;
+                if (data_read_count <= 5 || (data_read_count & 0x7FF) == 0)
+                    emu::logf(emu::LogLevel::info, "CD", "DATA_READ #%u = 0x%02X (fifo_r=%u fifo_w=%u)",
+                        data_read_count, out, data_r_, data_w_);
+            }
             break;
         case 3:
             // 1F801803h banked read:
@@ -1837,26 +1955,7 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
                 // bits5-7 read as 1, bit4 = Command Ready (1 when not busy)
                 const uint8_t cmd_ready = (busy_ || queued_cmd_valid_) ? 0u : (1u << 4);
                 out = (uint8_t)((irq_flags_ & 0x1Fu) | cmd_ready | 0xE0u);
-                // Debug: log IRQ flag reads with loop detection
-                static int irq_flag_reads = 0;
-                static int zero_irq_reads = 0;
-                ++irq_flag_reads;
-                if ((irq_flags_ & 0x1Fu) == 0)
-                    ++zero_irq_reads;
-                else
-                    zero_irq_reads = 0; // reset counter when we have an IRQ
-                // Log first 15 reads, plus when we detect a loop (many zero reads)
-                if (irq_flag_reads <= 15 || (zero_irq_reads > 0 && zero_irq_reads <= 5))
-                {
-                    std::fprintf(stderr, "[CDROM] IRQ_FLAG read #%d: 0x%02X (irq_flags=0x%02X zero_reads=%d)\n",
-                        irq_flag_reads, out, irq_flags_, zero_irq_reads);
-                    std::fflush(stderr);
-                }
-                if (zero_irq_reads == 100)
-                {
-                    std::fprintf(stderr, "[CDROM] WARNING: 100 consecutive zero-IRQ reads - BIOS appears stuck!\n");
-                    std::fflush(stderr);
-                }
+                emu::logf(emu::LogLevel::trace, "CD", "IRQ_FLAG read: 0x%02X (irq_flags=0x%02X)", out, irq_flags_);
             }
             break;
     }
@@ -1900,12 +1999,8 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
             // - Index1/2: unused/other
             if (index_ == 0)
             {
-                // Debug: log ALL command writes
-                static int cmd_write_count = 0;
-                ++cmd_write_count;
-                std::fprintf(stderr, "[CDROM] CMD_WRITE #%d: 0x%02X (%s) irq=0x%02X busy=%d queued=%d param_count=%d\n",
-                    cmd_write_count, v, cmd_name(v), irq_flags_, busy_, queued_cmd_valid_, param_count_);
-                std::fflush(stderr);
+                emu::logf(emu::LogLevel::info, "CD", "CMD_WRITE: 0x%02X (%s) irq=0x%02X busy=%d queued=%d param_count=%d",
+                    v, cmd_name(v), irq_flags_, busy_, queued_cmd_valid_, param_count_);
                 // If there are pending cdrom interrupts, they must be acknowledged before sending a command.
                 // Otherwise, BUSYSTS may stay set (PSX-SPX).
                 if ((irq_flags_ & 0x1Fu) != 0u || busy_)
@@ -1948,18 +2043,9 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
             {
                 const uint8_t old_enable = irq_enable_;
                 irq_enable_ = v & 0x1Fu;
-                // Debug: log irq_enable changes
-                static int irq_en_count = 0;
-                if (++irq_en_count <= 5)
-                {
-                    std::fprintf(stderr, "[CDROM] IRQ_ENABLE #%d: old=0x%02X new=0x%02X\n",
-                        irq_en_count, old_enable, irq_enable_);
-                    std::fflush(stderr);
-                }
-                // Debug: show condition values
-                std::fprintf(stderr, "[CDROM] IRQ check: disc=%p irq_en=0x%02X old_en=0x%02X irq_flags=0x%02X shell_close_sent=%d\n",
+                emu::logf(emu::LogLevel::info, "CD", "IRQ_ENABLE: old=0x%02X new=0x%02X", old_enable, irq_enable_);
+                emu::logf(emu::LogLevel::trace, "CD", "IRQ check: disc=%p irq_en=0x%02X old_en=0x%02X irq_flags=0x%02X shell_close_sent=%d",
                     (void*)disc_, irq_enable_, old_enable, irq_flags_, (int)shell_close_sent_);
-                std::fflush(stderr);
 
                 // INT5 (Shell Close / Disc Change):
                 // When BIOS enables INT5 (bit 4) and a disc is present, send INT5.
@@ -1967,14 +2053,12 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // The BIOS waits for this interrupt before proceeding with disc access.
                 const uint8_t int5_bit = (1u << 4); // INT5 enable is bit 4
                 const bool int5_newly_enabled = ((irq_enable_ & int5_bit) != 0) && ((old_enable & int5_bit) == 0);
-                if (int5_newly_enabled && disc_ && !shell_close_sent_)
-                {
-                    shell_close_sent_ = 1;
-                    push_resp(status_);
-                    set_irq(0x05); // INT5: shell close / disc change complete
-                    std::fprintf(stderr, "[CDROM] Sending INT5 (Shell Close) after irq_enable activated\n");
-                    std::fflush(stderr);
-                }
+                // INT5 (Shell Close): when BIOS first enables INT5 and disc is present,
+                // send it immediately. This is early in boot, before CDROM is in I_MASK,
+                // so the BIOS will poll it directly (no IRQ handler needed).
+                // INT5 is now queued from GetStat (cmd 0x01) instead of IRQ_ENABLE.
+                // The BIOS installs its CDROM event handlers between the Test probe
+                // and GetStat, so INT5 must arrive after GetStat to be dispatched.
             }
             else if (index_ == 2)
             {
@@ -1996,6 +2080,9 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // Want Data bit7:
                 const uint8_t new_want = (v & 0x80u) ? 1u : 0u;
                 want_data_ = new_want;
+                emu::logf(emu::LogLevel::info, "CD",
+                    "Request reg write=0x%02X want_data=%d data_ready_pending=%d fifo_r=%u fifo_w=%u",
+                    v, (int)want_data_, (int)data_ready_pending_, (unsigned)data_r_, (unsigned)data_w_);
                 if (!want_data_)
                 {
                     // Reset Data FIFO
@@ -2014,12 +2101,12 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 const uint8_t old_flags = irq_flags_ & 0x1Fu;
                 const uint8_t m = v & 0x1Fu;
                 irq_flags_ &= (uint8_t)~m;
-                // Debug: log ALL IRQ acknowledges
-                static int irq_ack_count = 0;
-                ++irq_ack_count;
-                std::fprintf(stderr, "[CDROM] IRQ_ACK #%d: write=0x%02X old=0x%02X new=0x%02X status=0x%02X\n",
-                    irq_ack_count, v, old_flags, (irq_flags_ & 0x1Fu), status_reg());
-                std::fflush(stderr);
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                    "IRQ_ACK: write=0x%02X old=0x%02X new=0x%02X status=0x%02X shell_sent=%d disc=%d",
+                    v, old_flags, (irq_flags_ & 0x1Fu), status_reg(), (int)shell_close_sent_, disc_ ? 1 : 0);
+                emu::logf(emu::LogLevel::info, "CD",
+                    "IRQ_ACK: write=0x%02X old=0x%02X new=0x%02X read_pend=%d queued=%d",
+                    v, old_flags, (irq_flags_ & 0x1Fu), (int)read_pending_irq1_, (int)queued_cmd_valid_);
 
                 // Special bits:
                 if (v & 0x40u)
@@ -2032,30 +2119,63 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // The response bytes must remain available for reading after ACK.
                 // Response FIFO is cleared only when a new command starts (in execute_cmd).
 
-                // If we just acknowledged the first response of a read command,
-                // deliver the second response (INT1) and allow data FIFO to be loaded.
+                // If we just acknowledged the first response (INT3) of a read command,
+                // defer INT1 (data ready) to a future tick so the IRQ line has a
+                // proper low→high edge that the bus can detect.
                 if (read_pending_irq1_ && ((old_flags & 0x07u) != 0u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     read_pending_irq1_ = 0;
                     data_ready_pending_ = 1;
-                    push_resp(status_);
-                    set_irq(0x01); // INT1 (second response / data ready)
+                    pending_irq_type_ = 0x01; // INT1 (data ready)
+                    pending_irq_resp_ = status_;
+                    pending_irq_reason_ = 0;
+                    pending_irq_delay_ = 5000; // small delay for edge detection
                     try_fill_data_fifo();
+                }
+                // ReadN/ReadS continuous: after INT1 is acked, queue next sector read.
+                // Don't advance loc_lba_ yet - the current sector data must remain
+                // available for DMA3. The advance happens when pending_irq fires in tick().
+                else if (reading_active_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
+                {
+                    // Queue next INT1 after read delay. loc_lba_ will be advanced
+                    // when this pending IRQ fires in tick().
+                    // Use reason=0xFF as a marker for "continuous read advance needed"
+                    pending_irq_type_ = 0x01; // INT1 (next sector ready)
+                    pending_irq_resp_ = status_;
+                    pending_irq_reason_ = 0xFFu; // marker: advance sector on delivery
+                    // Real PS1 read timing: ~6.7ms per sector (single speed) or ~3.3ms (double speed)
+                    // At ~33MHz CPU: single=~220000 cycles, double=~110000 cycles
+                    // mode_ bit 7 = double speed
+                    pending_irq_delay_ = (mode_ & 0x80u) ? 110000u : 220000u;
+                    emu::logf(emu::LogLevel::info, "CD",
+                        "ReadN continuous: queued next INT1, current LBA=%u delay=%u", loc_lba_, pending_irq_delay_);
                 }
 
                 // If async status is pending and INT3 was just acknowledged,
-                // deliver INT1 with status byte to indicate drive ready
+                // defer INT1 delivery for proper edge detection.
                 if (async_stat_pending_ && ((old_flags & 0x07u) != 0u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     async_stat_pending_ = 0;
-                    push_resp(status_);
-                    set_irq(0x01); // INT1 (status update)
-                    std::fprintf(stderr, "[CDROM] Delivered async INT1 (status=0x%02X)\n", status_);
-                    std::fflush(stderr);
+                    pending_irq_type_ = 0x01; // INT1 (status update)
+                    pending_irq_resp_ = status_;
+                    pending_irq_reason_ = 0;
+                    pending_irq_delay_ = 5000;
+                    emu::logf(emu::LogLevel::debug, "CD", "Deferred async INT1 (status=0x%02X)", status_);
                 }
 
-                // If there is a queued command and no pending IRQ flags, start it now.
-                if (queued_cmd_valid_ && ((irq_flags_ & 0x1Fu) == 0u))
+                // If IRQ flags are now clear and shell close INT5 hasn't been sent yet,
+                // queue it for async delivery. On real hardware the drive sends INT5
+                // asynchronously; we delay it so the CPU returns to its polling loop
+                // with interrupts enabled and can take the exception properly.
+                // INT5 shell close: do NOT send here (IRQ_ACK path).
+                // The BIOS enables CDROM in I_MASK later, and a late INT5 would crash
+                // because the BIOS event handler isn't installed for unsolicited IRQs.
+                // INT5 is sent on disc insert (via IRQ_ENABLE path) instead.
+
+                // If there is a queued command and no pending IRQ flags (and no
+                // deferred IRQ waiting), start it now. The queued command will
+                // produce its own IRQ via queue_cmd_irq, which has a delay.
+                if (queued_cmd_valid_ && ((irq_flags_ & 0x1Fu) == 0u) && pending_irq_type_ == 0)
                 {
                     // Restore queued params into the parameter fifo (as if they were written before cmd).
                     clear_params();
@@ -2083,6 +2203,73 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
             }
             break;
     }
+}
+
+void Cdrom::tick(uint32_t cycles)
+{
+    // Deliver command response IRQ after delay (like DuckStation MINIMUM_INTERRUPT_DELAY).
+    // Response data is already in the FIFO; this just sets irq_flags.
+    if (cmd_irq_pending_ != 0)
+    {
+        if (cmd_irq_delay_ > 0)
+        {
+            if (cycles >= cmd_irq_delay_)
+                cmd_irq_delay_ = 0;
+            else
+                cmd_irq_delay_ -= cycles;
+        }
+        if (cmd_irq_delay_ == 0)
+        {
+            set_irq(cmd_irq_pending_);
+            cmd_irq_pending_ = 0;
+        }
+    }
+
+    // Deliver pending async IRQs after delay expires.
+    if (pending_irq_type_ != 0)
+    {
+        // Count down delay (if any remaining).
+        if (pending_irq_delay_ > 0)
+        {
+            if (cycles >= pending_irq_delay_)
+                pending_irq_delay_ = 0;
+            else
+                pending_irq_delay_ -= cycles;
+        }
+
+        // Once delay has elapsed, deliver when irq_flags are clear.
+        if (pending_irq_delay_ == 0 && (irq_flags_ & 0x1Fu) == 0u)
+        {
+            // For continuous ReadN/ReadS: advance sector before delivering INT1
+            const uint8_t is_read_advance = (pending_irq_reason_ == 0xFFu) ? 1u : 0u;
+            if (is_read_advance)
+            {
+                loc_lba_++;
+                clear_data();
+                want_data_ = 0;
+                data_ready_pending_ = 1;
+                pending_irq_reason_ = 0; // clear marker before pushing resp
+                emu::logf(emu::LogLevel::info, "CD",
+                    "ReadN auto-advance: LBA now %u", loc_lba_);
+            }
+
+            clear_resp();
+            push_resp(pending_irq_resp_);
+            if (pending_irq_reason_ != 0)
+                push_resp(pending_irq_reason_);
+            set_irq(pending_irq_type_);
+            emu::logf(emu::LogLevel::info, "CD", "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
+                (unsigned)pending_irq_type_, (unsigned)pending_irq_resp_, (unsigned)pending_irq_reason_);
+            cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
+                (unsigned)pending_irq_type_, (unsigned)pending_irq_resp_, (unsigned)pending_irq_reason_);
+            pending_irq_type_ = 0;
+            pending_irq_reason_ = 0;
+        }
+    }
+
+    // Deliver pending read INT1 after delay.
+    // (ReadN/ReadS second response is also async on real hardware.)
 }
 
 } // namespace cdrom

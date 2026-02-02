@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1",
+  "FriendlyName": "R3000Emu",
+  "Description": "R3000-Emu core integration (UE5 runtime).",
+  "Category": "Runtime",
+  "CreatedBy": "R3000-Emu",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Modules": [
+    {
+      "Name": "R3000EmuRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
+
