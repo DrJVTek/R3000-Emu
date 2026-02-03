@@ -817,12 +817,43 @@ void Cdrom::try_fill_data_fifo()
 
     if (read_user_data_2048(loc_lba_, data))
     {
+        // Patch license sector to match any BIOS region.
+        // Disc may say "of America", "Europe", or "Inc." — normalize to "Inc."
+        // so that the BIOS license check always passes regardless of region.
+        if (loc_lba_ == 4)
+        {
+            // Expected: "Sony Computer Entertainment <region>" at offset ~36
+            // Replace region variant with "Inc." + spaces to match BIOS ROM copy.
+            static const char* variants[] = {"of America", "Europe", "Japan"};
+            for (int v = 0; v < 3; ++v)
+            {
+                const char* s = variants[v];
+                const size_t slen = std::strlen(s);
+                for (size_t i = 0; i + slen <= 2048; ++i)
+                {
+                    if (std::memcmp(data + i, s, slen) == 0)
+                    {
+                        // Replace with "Inc." + pad with spaces
+                        std::memcpy(data + i, "Inc.", 4);
+                        for (size_t j = i + 4; j < i + slen; ++j)
+                            data[j] = 0x20;
+                        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                            "License patch: '%s' -> 'Inc.' at offset %u", s, (unsigned)i);
+                        break;
+                    }
+                }
+            }
+        }
         push_data(data, sizeof(data));
-        emu::logf(emu::LogLevel::info, "CD", "FIFO FILLED: LBA=%u 2048 bytes", (unsigned)loc_lba_);
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+            "FIFO LBA=%u [%02X%02X%02X%02X %02X%02X%02X%02X]",
+            (unsigned)loc_lba_,
+            data[0],data[1],data[2],data[3],data[4],data[5],data[6],data[7]);
     }
     else
     {
-        emu::logf(emu::LogLevel::warn, "CD", "FIFO FILL FAILED: LBA=%u (disc=%p)", (unsigned)loc_lba_, (void*)disc_);
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+            "FIFO FILL FAILED LBA=%u", (unsigned)loc_lba_);
     }
 }
 
@@ -1278,7 +1309,8 @@ void Cdrom::exec_command(uint8_t cmd)
             loc_msf_[1] = param_fifo_[1];
             loc_msf_[2] = param_fifo_[2];
             loc_lba_ = msf_to_lba(loc_msf_[0], loc_msf_[1], loc_msf_[2]);
-            emu::logf(emu::LogLevel::info, "CD", "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
+            cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
                 loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_);
             push_resp(status_);
             queue_cmd_irq(0x03);
@@ -1738,7 +1770,7 @@ void Cdrom::exec_command(uint8_t cmd)
             if (has_data_track)
             {
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x02;  // flags: licensed data
-                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // disc type
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x20;  // disc type: CD-ROM (Mode1/Mode2/XA)
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // ATIP
                 pending_irq_extra_[pending_irq_extra_len_++] = 'S';   // Region "SCEE"
                 pending_irq_extra_[pending_irq_extra_len_++] = 'C';
@@ -1918,6 +1950,8 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
 {
     const uint32_t off = addr - 0x1F80'1800u;
     uint8_t out = 0;
+    // Trace: log all CDROM reads during active reading (limited)
+    const bool do_rd_trace = reading_active_ && (mmio_rd_trace_ < 500);
     switch (off & 3u)
     {
         case 0: // Status
@@ -1933,11 +1967,10 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
         case 2: // Data FIFO (R) (Index0..3) 8-bit
             out = pop_data();
             {
-                static uint32_t data_read_count = 0;
-                ++data_read_count;
-                if (data_read_count <= 5 || (data_read_count & 0x7FF) == 0)
+                ++data_read_count_;
+                if (data_read_count_ <= 5 || (data_read_count_ & 0x7FF) == 0)
                     emu::logf(emu::LogLevel::info, "CD", "DATA_READ #%u = 0x%02X (fifo_r=%u fifo_w=%u)",
-                        data_read_count, out, data_r_, data_w_);
+                        data_read_count_, out, data_r_, data_w_);
             }
             break;
         case 3:
@@ -1958,33 +1991,30 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
             }
             break;
     }
-    cd_log(
-        log_cd_,
-        log_io_,
-        clock_,
-        has_clock_,
-        flog::Level::trace,
-        "MMIO R8 addr=0x%08X -> 0x%02X (idx=%u)",
-        addr,
-        (unsigned)out,
-        (unsigned)index_
-    );
+    if (do_rd_trace)
+    {
+        ++mmio_rd_trace_;
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+            "RD 0x%X idx=%u -> 0x%02X (irq=0x%02X drp=%d want=%d busy=%d resp=%u/%u data=%u/%u)",
+            (unsigned)(off & 3u), (unsigned)index_, (unsigned)out,
+            (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_,
+            (int)busy_, (unsigned)resp_r_, (unsigned)resp_w_,
+            (unsigned)data_r_, (unsigned)data_w_);
+    }
     return out;
 }
 
 void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
 {
-    cd_log(
-        log_cd_,
-        log_io_,
-        clock_,
-        has_clock_,
-        flog::Level::trace,
-        "MMIO W8 addr=0x%08X val=0x%02X (idx=%u)",
-        addr,
-        (unsigned)v,
-        (unsigned)index_
-    );
+    if (reading_active_ && mmio_wr_trace_ < 500)
+    {
+        ++mmio_wr_trace_;
+        const uint32_t o = (addr - 0x1F80'1800u) & 3u;
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+            "WR 0x%X idx=%u val=0x%02X (irq=0x%02X drp=%d want=%d)",
+            (unsigned)o, (unsigned)index_, (unsigned)v,
+            (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_);
+    }
     const uint32_t off = addr - 0x1F80'1800u;
     switch (off & 3u)
     {
@@ -2134,7 +2164,8 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // ReadN/ReadS continuous: after INT1 is acked, queue next sector read.
                 // Don't advance loc_lba_ yet - the current sector data must remain
                 // available for DMA3. The advance happens when pending_irq fires in tick().
-                else if (reading_active_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
+                // Skip if a command is queued (e.g. Pause) — it will stop reading when executed.
+                else if (reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     // Queue next INT1 after read delay. loc_lba_ will be advanced
                     // when this pending IRQ fires in tick().
@@ -2248,8 +2279,8 @@ void Cdrom::tick(uint32_t cycles)
                 want_data_ = 0;
                 data_ready_pending_ = 1;
                 pending_irq_reason_ = 0; // clear marker before pushing resp
-                emu::logf(emu::LogLevel::info, "CD",
-                    "ReadN auto-advance: LBA now %u", loc_lba_);
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                    "ReadN advance -> LBA=%u", loc_lba_);
             }
 
             clear_resp();

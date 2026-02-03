@@ -61,6 +61,10 @@ class Core
     void set_text_out(std::FILE* f);
     void set_text_io_sink(const flog::Sink& s, const flog::Clock& c);
 
+    // Callback for BIOS putchar (B(3Dh)). Called for each character.
+    using PutcharCallback = void(*)(char ch, void* user);
+    void set_putchar_callback(PutcharCallback cb, void* user);
+
     // Insert disc and GPU dump configuration (optional).
     bool insert_disc(const char* path, char* err, size_t err_cap);
     void set_gpu_dump_file(const char* path);
@@ -120,6 +124,8 @@ class Core
 
     // pending text sinks (set before cpu_ exists)
     std::FILE* text_out_{nullptr};
+    PutcharCallback putchar_cb_{nullptr};
+    void* putchar_cb_user_{nullptr};
     flog::Sink text_io_{};
     flog::Clock text_clock_{};
     int has_text_clock_{0};

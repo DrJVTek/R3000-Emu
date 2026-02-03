@@ -8,6 +8,7 @@
 #include "../audio/wav_writer.h"
 #include "../cdrom/cdrom.h"
 #include "../gpu/gpu.h"
+#include "../log/emu_log.h"
 
 namespace r3000
 {
@@ -419,22 +420,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     {
         if (cdrom_)
         {
-            const uint8_t before = cdrom_->irq_line();
             cdrom_->mmio_write8(phys, v);
-            const uint8_t after = cdrom_->irq_line();
-            // Track IRQ line for edge detection in tick().
-            // Rising edge (0→1): set deferred edge flag for tick() to handle.
-            // Falling edge (1→0): auto-clear I_STAT bit 2.
-            if (after && !before)
-            {
-                cdrom_irq_edge_ = true;
-            }
-            else if (!after && before)
-            {
-                i_stat_ &= ~(1u << 2);
-                cdrom_irq_edge_ = false;
-            }
-            cdrom_irq_prev_ = after;
         }
         return true;
     }
@@ -772,6 +758,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                     // DMA3 (CDROM → RAM)
                     if (ch == 3 && cdrom_)
                     {
+                        emu::logf(emu::LogLevel::info, "BUS", "DMA3 CD→RAM madr=0x%08X bcr=0x%08X words=%u",
+                            dma_[ch].madr, dma_[ch].bcr,
+                            (dma_[ch].bcr & 0xFFFF) * (((dma_[ch].bcr >> 16) & 0xFFFF) ? ((dma_[ch].bcr >> 16) & 0xFFFF) : 1));
                         const uint32_t bs = dma_[ch].bcr & 0xFFFF;
                         const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
                         const uint32_t words = bs * (bc ? bc : 1);
@@ -1133,7 +1122,7 @@ void Bus::tick(uint32_t cycles)
                     // exception dispatch.
                     i_stat_ = 0;
                     if (cdrom_) cdrom_->clear_irq_flags();
-                    i_mask_ = 0x0075; // VBlank(0) | CDROM(2) | TMR0(4) | TMR1(5) | TMR2(6)
+                    i_mask_ = 0x0071; // VBlank(0) | TMR0(4) | TMR1(5) | TMR2(6) — NOT CDROM(2)
                 }
             }
             else
@@ -1148,16 +1137,15 @@ void Bus::tick(uint32_t cycles)
     {
         cdrom_->tick(cycles);
 
-        // CDROM IRQ: edge-triggered latch.
-        // Rising edge (0→1): set I_STAT bit 2.
-        // I_STAT bit 2 stays set until software clears it by writing to I_STAT.
-        // We do NOT auto-clear on falling edge — that's how real PS1 works.
+        // CDROM IRQ: directly reflect the CDROM irq_line into I_STAT bit 2.
+        // On real PS1, I_STAT bits are active-high while the source is asserted.
+        // The BIOS clears the CDROM IRQ by writing to the CDROM IRQ ack register
+        // (which drops irq_line), not by writing to I_STAT.
         uint8_t cdirq = cdrom_->irq_line();
-        if (cdirq && !cdrom_irq_prev_)
-        {
-            // Rising edge: latch I_STAT bit 2.
+        if (cdirq)
             i_stat_ |= (1u << 2);
-        }
+        else
+            i_stat_ &= ~(1u << 2);
         cdrom_irq_prev_ = cdirq;
     }
 }

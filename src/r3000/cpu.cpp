@@ -308,18 +308,17 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
 
     const uint32_t epc = in_delay_slot ? (pc_of_fault - 4u) : pc_of_fault;
 
-    // Trace RI exceptions
+    // Trace RI exceptions (limited to first 5 per instance)
     if ((code & 0x1Fu) == EXC_RI)
     {
-        static int ri_count = 0;
-        if (++ri_count <= 5)
+        if (++ri_trace_count_ <= 5)
         {
             uint32_t paddr = pc_of_fault & 0x1FFFFFFFu;
             uint32_t instr_word = 0;
             if (paddr < bus_.ram_size())
                 instr_word = *(uint32_t*)(bus_.ram_ptr() + paddr);
             std::fprintf(stderr, "[RI] #%d PC=0x%08X instr=0x%08X IEc=%d ra=0x%08X\n",
-                ri_count, pc_of_fault, instr_word,
+                ri_trace_count_, pc_of_fault, instr_word,
                 (int)(cop0_[COP0_STATUS] & 1), gpr_[31]);
         }
     }
@@ -469,6 +468,15 @@ Cpu::StepResult Cpu::step()
     int hle_vec_gate = 0;
     if (hle_vectors_ && (pc_ == 0x0000'00A0u || pc_ == 0x0000'00B0u || pc_ == 0x0000'00C0u))
     {
+        // Passive hook: capture B(3Dh) putchar even when BIOS stubs are installed.
+        // This is pure observation — we don't alter the return, the real BIOS code
+        // will still execute normally after this.
+        if (pc_ == 0x0000'00B0u && (gpr_[9] & 0xFFu) == 0x3Du && putchar_cb_)
+        {
+            const char ch = (char)(gpr_[4] & 0xFFu);
+            putchar_cb_(ch, putchar_cb_user_);
+        }
+
         uint32_t w0 = 0;
         uint32_t w1 = 0;
         Bus::MemFault f{};
@@ -847,6 +855,8 @@ Cpu::StepResult Cpu::step()
                 const uint8_t ch = (uint8_t)(a0 & 0xFFu);
                 std::fputc((int)ch, stderr);
                 std::fflush(stderr);
+                if (putchar_cb_)
+                    putchar_cb_((char)ch, putchar_cb_user_);
                 if (text_out_)
                 {
                     std::fputc((int)ch, text_out_);
@@ -1770,11 +1780,13 @@ Cpu::StepResult Cpu::step()
         {
             hle_vblank_div_ = 0;
 
-            // NOTE: Do NOT set I_STAT bit 0 here. The GPU tick_vblank()
-            // already sets it at the correct ~680K cycle period. Setting
-            // it here (every 100K instructions) causes the kernel exception
-            // handler to loop forever because new VBlanks arrive before
-            // the handler finishes dispatching the previous one.
+            // Skip HLE event manipulation when the BIOS has installed real
+            // VBlank IRQ handling (I_MASK bit 0 set).  The real kernel
+            // exception handler dispatches VBlank events via SysEnqIntRP
+            // chain0; our HLE forcing events to "ready" conflicts with the
+            // BIOS DeliverEvent logic and causes VSync timeouts.
+            if (bus_.irq_mask_raw() & 1u)
+                goto skip_hle_events;
 
             for (uint32_t i = 0; i < (uint32_t)(sizeof(hle_events_) / sizeof(hle_events_[0])); ++i)
             {
@@ -1810,6 +1822,7 @@ Cpu::StepResult Cpu::step()
                     }
                 }
             }
+            skip_hle_events:;
         }
     }
 

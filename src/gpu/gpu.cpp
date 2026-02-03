@@ -900,7 +900,7 @@ void Gpu::gp1_write(uint32_t v)
         {
             // Bits: 0-1=H.res, 2=V.res, 3=video mode, 4=color depth, 5=interlace, 6=H.res2
             status_ = (status_ & ~0x7F4000u) | ((v & 0x3F) << 17) | ((v & 0x40) << 10);
-            emu::logf(emu::LogLevel::info, "GPU", "GP1 DISPLAY_MODE hres=%u vres=%u video=%s depth=%u interlace=%u",
+            emu::logf(emu::LogLevel::debug, "GPU", "GP1 DISPLAY_MODE hres=%u vres=%u video=%s depth=%u interlace=%u",
                 v & 3, (v >> 2) & 1, (v & 8) ? "PAL" : "NTSC",
                 (v >> 4) & 1, (v >> 5) & 1);
             break;

@@ -58,6 +58,7 @@ static void print_usage(void)
         "  --gpu-dump=<file>     Dump GPU commands to file\n"
         "  --wav-output=<file>   Save SPU audio to WAV file\n"
         "  --max-steps=N         Stop after N instructions\n"
+        "  --max-time=N          Stop after N seconds wall clock (default: 300)\n"
         "  --load=<file>         Load ELF or PS-X EXE directly (skips BIOS)\n"
         "  --pretty              Pretty print instructions\n"
         "  --trace-io            Verbose MMIO logging\n"
@@ -219,6 +220,8 @@ int main(int argc, char** argv)
     }
 
     const uint64_t max_steps = parse_u64_or_zero(arg_value(argc, argv, "--max-steps="));
+    const uint64_t max_time_raw = parse_u64_or_zero(arg_value(argc, argv, "--max-time="));
+    const uint64_t max_time_s = (max_time_raw != 0) ? max_time_raw : 300; // default 5 min
     const uint64_t pc_sample = parse_u64_or_zero(arg_value(argc, argv, "--pc-sample="));
 
     const flog::Level hw_lvl = parse_flog_level_or(arg_value(argc, argv, "--hw-log-level="), flog::Level::info);
@@ -396,6 +399,7 @@ int main(int argc, char** argv)
     );
 
     uint64_t steps = 0;
+    const auto run_start = std::chrono::steady_clock::now();
     for (;;)
     {
         const auto res = core.step();
@@ -411,6 +415,16 @@ int main(int argc, char** argv)
             {
                 emu::logf(emu::LogLevel::info, "MAIN", "Stop: reached --max-steps=%" PRIu64, max_steps);
                 break;
+            }
+            if (max_time_s != 0 && (steps & 0xFFFF) == 0)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - run_start).count();
+                if ((uint64_t)elapsed >= max_time_s)
+                {
+                    emu::logf(emu::LogLevel::info, "MAIN", "Stop: reached --max-time=%" PRIu64 "s (steps=%" PRIu64 ")", max_time_s, steps);
+                    break;
+                }
             }
             continue;
         }

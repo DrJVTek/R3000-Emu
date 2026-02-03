@@ -171,6 +171,11 @@ class Cdrom
     uint8_t cmd_irq_pending_{0};     // IRQ type to set when delay expires
 
     uint8_t last_cmd_{0};             // last command executed (for debug)
+
+    // Trace counters (per-instance, not static, so they reset between PIE sessions).
+    int mmio_rd_trace_{0};
+    uint32_t data_read_count_{0};
+    int mmio_wr_trace_{0};
 };
 
 } // namespace cdrom

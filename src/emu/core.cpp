@@ -107,6 +107,14 @@ void Core::set_text_io_sink(const flog::Sink& s, const flog::Clock& c)
         cpu_->set_text_io_sink(text_io_, text_clock_);
 }
 
+void Core::set_putchar_callback(PutcharCallback cb, void* user)
+{
+    putchar_cb_ = cb;
+    putchar_cb_user_ = user;
+    if (cpu_)
+        cpu_->set_putchar_callback(cb, user);
+}
+
 bool Core::insert_disc(const char* path, char* err, size_t err_cap)
 {
     emu::logf(emu::LogLevel::info, "CORE", "insert_disc: path=%s", path ? path : "(null)");
@@ -206,6 +214,8 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
         cpu_->set_text_out(text_out_);
     if (has_text_clock_ && text_io_.f)
         cpu_->set_text_io_sink(text_io_, text_clock_);
+    if (putchar_cb_)
+        cpu_->set_putchar_callback(putchar_cb_, putchar_cb_user_);
 
     // Apply initial registers (loader-provided).
     if (img.has_gp)

@@ -103,6 +103,15 @@ class Cpu
         text_out_ = f;
     }
 
+    // Callback for BIOS putchar (B(3Dh)). Called for each character.
+    // Signature: void(char ch, void* user)
+    using PutcharCallback = void(*)(char ch, void* user);
+    void set_putchar_callback(PutcharCallback cb, void* user)
+    {
+        putchar_cb_ = cb;
+        putchar_cb_user_ = user;
+    }
+
     // Duplique le texte (BIOS putc / write-like) vers un log combiné (ex: logs/io.log).
     // On bufferise par ligne pour éviter le spam par caractère.
     void set_text_io_sink(const flog::Sink& s, const flog::Clock& c)
@@ -270,6 +279,8 @@ class Cpu
     int trace_io_{0};
     int hle_vectors_{0};
     std::FILE* text_out_{nullptr};
+    PutcharCallback putchar_cb_{nullptr};
+    void* putchar_cb_user_{nullptr};
     flog::Sink text_io_{};
     flog::Clock text_clock_{};
     int text_has_clock_{0};
@@ -353,6 +364,7 @@ class Cpu
     bool branch_just_scheduled_{false};
 
     int pretty_{0};
+    int ri_trace_count_{0};
 };
 
 } // namespace r3000

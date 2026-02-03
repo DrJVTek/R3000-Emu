@@ -111,10 +111,6 @@ class Bus
     // Set a specific I_STAT bit (used by HLE VBlank delivery).
     void set_i_stat_bit(uint32_t bit) { i_stat_ |= (1u << bit); }
 
-    // CDROM IRQ edge flag (set by tick, cleared by CPU after delivering HLE events)
-    bool cdrom_irq_edge() const { return cdrom_irq_edge_; }
-    void clear_cdrom_irq_edge() { cdrom_irq_edge_ = false; }
-
     // Accès device (pour HLE BIOS côté CPU).
     cdrom::Cdrom* cdrom() const { return cdrom_; }
 
@@ -213,7 +209,6 @@ class Bus
     uint32_t dicr_{0};
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
-    bool cdrom_irq_edge_{false};
     uint32_t vblank_no_mask_count_{0}; // VBlank frames with I_MASK=0 (for auto-enable workaround)
 
     // ----------------------------
