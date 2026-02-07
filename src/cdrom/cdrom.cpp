@@ -600,6 +600,19 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
         return false;
     }
 
+    // Infer disc region early so BIOS GetID returns a matching SCEx string.
+    disc_region_ = infer_disc_region();
+    if (disc_region_.letter != 0)
+    {
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+            "disc region inferred: %c (%.4s)", disc_region_.letter, disc_region_.scex);
+    }
+    else
+    {
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+            "disc region unknown (GetID will fall back to SCEE)");
+    }
+
     if (logger_)
     {
         uint32_t ss = 0;
@@ -631,21 +644,110 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
     // PSX-SPX: status bit 1 = motor on
     status_ = 0x02u; // Motor spinning
 
-    // Queue unsolicited INT5 (shell close) for delivery after a short delay.
-    // On real PS1, the CD controller sends INT5 automatically when the lid closes.
-    // The BIOS polls I_STAT for this interrupt before sending any CD commands.
+    // Shell close INT5 will be queued after GetStat (cmd 0x01), which is when
+    // the BIOS installs its CDROM event handlers. Sending it too early can be missed.
     shell_close_sent_ = 0;
-    if (pending_irq_type_ == 0)
-    {
-        pending_irq_type_ = 0x05;
-        pending_irq_resp_ = status_;
-        pending_irq_reason_ = 0;
-        pending_irq_delay_ = 100000; // ~3ms, enough for BIOS to set up I_MASK
-        shell_close_sent_ = 1;
-        emu::logf(emu::LogLevel::info, "CD", "INT5 (shell close) queued on disc insert (delay=%u)", pending_irq_delay_);
-    }
 
     return true;
+}
+
+Cdrom::DiscRegion Cdrom::infer_disc_region()
+{
+    DiscRegion r{};
+
+    // 1) Try SYSTEM.CNF BOOT= filename (most reliable for PSX discs)
+    {
+        uint32_t cnf_lba = 0, cnf_size = 0;
+        if (iso9660_find_file("\\SYSTEM.CNF;1", &cnf_lba, &cnf_size) && cnf_lba != 0)
+        {
+            uint8_t cnf_buf[2048]{};
+            if (read_sector_2048(cnf_lba, cnf_buf))
+            {
+                const char* cnf = reinterpret_cast<const char*>(cnf_buf);
+                const char* p = std::strstr(cnf, "BOOT");
+                if (p)
+                {
+                    p += 4;
+                    while (*p == ' ' || *p == '\t' || *p == '=') ++p;
+                    if (std::strncmp(p, "cdrom:", 6) == 0) p += 6;
+                    while (*p == '\\') ++p;
+
+                    char boot_file[128]{};
+                    size_t i = 0;
+                    while (*p && *p != '\r' && *p != '\n' && *p != ';' && i + 1 < sizeof(boot_file))
+                    {
+                        char c = *p++;
+                        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+                        boot_file[i++] = c;
+                    }
+                    boot_file[i] = '\0';
+
+                    // Common region prefixes.
+                    // US: SCUS/SLUS (and sometimes "SC" variants)
+                    // EU: SCES/SLES
+                    // JP: SCPS/SLPS/SCPM
+                    auto starts = [&](const char* s) -> bool {
+                        return std::strncmp(boot_file, s, std::strlen(s)) == 0;
+                    };
+                    if (starts("SCUS") || starts("SLUS"))
+                    {
+                        r.letter = 'A';
+                        std::memcpy(r.scex, "SCEA", 4);
+                        return r;
+                    }
+                    if (starts("SCES") || starts("SLES"))
+                    {
+                        r.letter = 'E';
+                        std::memcpy(r.scex, "SCEE", 4);
+                        return r;
+                    }
+                    if (starts("SCPS") || starts("SLPS") || starts("SCPM"))
+                    {
+                        r.letter = 'I';
+                        std::memcpy(r.scex, "SCEI", 4);
+                        return r;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) Fallback: look at license sector text variants
+    {
+        uint8_t sec4[2048]{};
+        if (read_sector_2048(4, sec4))
+        {
+            auto contains = [&](const char* needle) -> bool {
+                const size_t n = std::strlen(needle);
+                for (size_t i = 0; i + n <= sizeof(sec4); ++i)
+                {
+                    if (std::memcmp(sec4 + i, needle, n) == 0)
+                        return true;
+                }
+                return false;
+            };
+            if (contains("of America") || contains("America"))
+            {
+                r.letter = 'A';
+                std::memcpy(r.scex, "SCEA", 4);
+                return r;
+            }
+            if (contains("Europe"))
+            {
+                r.letter = 'E';
+                std::memcpy(r.scex, "SCEE", 4);
+                return r;
+            }
+            if (contains("Japan"))
+            {
+                r.letter = 'I';
+                std::memcpy(r.scex, "SCEI", 4);
+                return r;
+            }
+        }
+    }
+
+    return r;
 }
 
 uint8_t Cdrom::bcd_to_u8(uint8_t bcd)
@@ -745,6 +847,35 @@ void Cdrom::set_irq(uint8_t flags)
         (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_);
 }
 
+void Cdrom::stop_reading_with_error(uint8_t reason)
+{
+    // DuckStation equivalent: StopReadingWithError()
+    // Send INT5 (error) with status|STAT_ERROR and reason code.
+    // Clear reading state so the drive stops.
+    emu::logf(emu::LogLevel::warn, "CD", "stop_reading_with_error: reason=0x%02X LBA=%u disc_sectors=%u",
+        (unsigned)reason, (unsigned)loc_lba_, disc_ ? disc_->disc_sectors : 0);
+
+    // Clear any pending async IRQ (but not command IRQs)
+    pending_irq_type_ = 0;
+    pending_irq_delay_ = 0;
+    pending_irq_reason_ = 0;
+    pending_irq_extra_len_ = 0;
+
+    // Clear reading state
+    reading_active_ = 0;
+    data_ready_pending_ = 0;
+    want_data_ = 0;
+
+    // Send error response: status|0x01 (error bit), then reason code
+    // Note: Don't permanently modify status_, just include error bit in response
+    clear_resp();
+    push_resp((uint8_t)(status_ | 0x01u));  // STAT_ERROR = bit 0
+    push_resp(reason);
+
+    // Set INT5 (error) - this goes through the normal IRQ mechanism
+    set_irq(0x05);
+}
+
 uint8_t Cdrom::status_reg() const
 {
     const uint8_t idx = (uint8_t)(index_ & 3u);
@@ -812,6 +943,13 @@ void Cdrom::try_fill_data_fifo()
                 ud[8],ud[9],ud[10],ud[11],ud[12],ud[13],ud[14],ud[15],
                 ud[16],ud[17],ud[18],ud[19],ud[20],ud[21],ud[22],ud[23],
                 ud[24],ud[25],ud[26],ud[27],ud[28],ud[29],ud[30],ud[31]);
+            // Dump PVD root directory record (bytes 156-171) for sector 16
+            if (loc_lba_ == 16 && raw_ss >= 2352)
+            {
+                emu::logf(emu::LogLevel::debug, "CD", "PVD RootDir[156..171]: %02X %02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                    ud[156], ud[157], ud[158], ud[159], ud[160], ud[161],
+                    ud[162], ud[163], ud[164], ud[165]);
+            }
         }
     }
 
@@ -854,6 +992,8 @@ void Cdrom::try_fill_data_fifo()
     {
         cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
             "FIFO FILL FAILED LBA=%u", (unsigned)loc_lba_);
+        // Note: Don't send error here - bounds checking is done in tick()
+        // during continuous reading. This can fail early for other reasons.
     }
 }
 
@@ -868,6 +1008,72 @@ uint32_t Cdrom::msf_to_lba(uint8_t m, uint8_t s, uint8_t f) const
     if (lba < 150u)
         return 0;
     return lba - 150u;
+}
+
+uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_spinup) const
+{
+    // Calculate seek time in CPU cycles based on LBA distance.
+    // Based on DuckStation timing model (logarithmic seek with spin-up delay).
+    //
+    // From DuckStation boot log observations:
+    //   2 LBA:   ~472,828 ticks = ~14 ms
+    //   3 LBA:   ~699,224 ticks = ~21 ms
+    //   5 LBA: ~1,162,645 ticks = ~34 ms
+    // 147 LBA: ~1,721,932 ticks = ~51 ms
+    // 157 LBA: ~1,712,543 ticks = ~51 ms
+    // Speed change (spin-up): 20,321,280 ticks = ~600 ms
+
+    constexpr uint32_t kSpinUpDelay = 20321280u;  // ~600ms at 33.8MHz
+    constexpr uint32_t kMinSeekTicks = 400000u;   // ~12ms minimum seek
+    constexpr uint32_t kMaxSeekTicks = 2000000u;  // ~60ms maximum seek (full stroke)
+
+    uint32_t total = 0;
+
+    // Add spin-up delay if motor is idle
+    if (include_spinup && !motor_spinning_)
+    {
+        total += kSpinUpDelay;
+        emu::logf(emu::LogLevel::info, "CD", "Drive idle, spin-up delay: %u ticks (~%u ms)",
+            kSpinUpDelay, kSpinUpDelay / 33868);
+    }
+
+    // Calculate seek distance
+    const uint32_t dist = (from_lba > to_lba) ? (from_lba - to_lba) : (to_lba - from_lba);
+
+    if (dist == 0)
+    {
+        // No seek needed, just rotational latency (~half rotation = ~6.7ms single, ~3.3ms double)
+        const uint32_t rot_delay = (mode_ & 0x80u) ? 110000u : 220000u;
+        total += rot_delay;
+    }
+    else if (dist <= 2)
+    {
+        // Very short seek: ~14ms
+        total += kMinSeekTicks;
+    }
+    else
+    {
+        // Logarithmic seek model: seek_time = base + factor * log2(distance)
+        // Approximate log2 using leading zeros count
+        uint32_t log2_dist = 0;
+        uint32_t temp = dist;
+        while (temp > 1)
+        {
+            temp >>= 1;
+            log2_dist++;
+        }
+
+        // Scale: ~14ms base + ~4ms per doubling of distance, max ~60ms
+        // At 33.8MHz: 1ms = 33868 ticks
+        const uint32_t seek_ticks = kMinSeekTicks + log2_dist * 135000u;
+        total += (seek_ticks > kMaxSeekTicks) ? kMaxSeekTicks : seek_ticks;
+    }
+
+    emu::logf(emu::LogLevel::info, "CD", "Seek %u->%u (%u LBA): %u ticks (~%.1f ms)%s",
+        from_lba, to_lba, dist, total, (double)total / 33868.0,
+        (include_spinup && !motor_spinning_) ? " (includes spin-up)" : "");
+
+    return total;
 }
 
 bool Cdrom::read_user_data_2048(uint32_t lba, uint8_t out[2048])
@@ -924,11 +1130,11 @@ static int iso_read_pvd(Cdrom* cd, uint32_t* out_root_lba, uint32_t* out_root_si
     uint8_t sec[2048];
     if (!cd->read_sector_2048(16, sec))
     {
-        std::fprintf(stderr, "[WARN] [ISO] PVD: read_sector_2048(16) failed\n");
+        emu::logf(emu::LogLevel::warn, "ISO", "PVD: read_sector_2048(16) failed");
         return 0;
     }
 
-    std::fprintf(stderr, "[INFO] [ISO] PVD sector 16: type=%02X magic='%c%c%c%c%c' ver=%02X\n",
+    emu::logf(emu::LogLevel::info, "ISO", "PVD sector 16: type=%02X magic='%c%c%c%c%c' ver=%02X",
         sec[0], sec[1], sec[2], sec[3], sec[4], sec[5], sec[6]);
 
     // Primary Volume Descriptor:
@@ -1246,6 +1452,14 @@ void Cdrom::exec_command(uint8_t cmd)
 
     emu::logf(emu::LogLevel::info, "CD", "CMD 0x%02X (%s) params=%u", cmd, cmd_name(cmd), (unsigned)param_count_);
 
+    // DEBUG: Show param_fifo_ content for SetLoc
+    if (cmd == 0x02)
+    {
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+            "SetLoc ENTRY: param_count=%u fifo=[%02X,%02X,%02X,%02X]",
+            param_count_, param_fifo_[0], param_fifo_[1], param_fifo_[2], param_fifo_[3]);
+    }
+
     const uint8_t expected = cmd_expected_params(cmd);
     if (expected != 0 && param_count_ < expected)
     {
@@ -1309,6 +1523,37 @@ void Cdrom::exec_command(uint8_t cmd)
             loc_msf_[1] = param_fifo_[1];
             loc_msf_[2] = param_fifo_[2];
             loc_lba_ = msf_to_lba(loc_msf_[0], loc_msf_[1], loc_msf_[2]);
+
+            // Detect garbage LBA (beyond disc bounds) - likely uninitialized MSF cache
+            const uint32_t disc_end = disc_ ? disc_->disc_sectors : 0;
+
+            // DEBUG: Log SetLoc details for MSF >= 40:00:00 (likely garbage)
+            if (loc_msf_[0] >= 0x40)
+            {
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+                    "SetLoc HIGH MSF: %02X:%02X:%02X -> LBA=%u disc_end=%u param_count=%u fifo=[%02X,%02X,%02X]",
+                    loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_, disc_end, param_count_,
+                    param_fifo_[0], param_fifo_[1], param_fifo_[2]);
+            }
+
+            if (disc_end > 0 && loc_lba_ >= disc_end)
+            {
+                emu::logf(emu::LogLevel::warn, "CD", "SetLoc GARBAGE: MSF=%02X:%02X:%02X -> LBA=%u >= disc_end=%u param_count=%u fifo=[%02X,%02X,%02X,%02X]",
+                    loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_, disc_end,
+                    (unsigned)param_count_,
+                    param_fifo_[0], param_fifo_[1], param_fifo_[2], param_fifo_[3]);
+                // Call debug callback to dump CPU state
+                if (garbage_setloc_cb_)
+                {
+                    garbage_setloc_cb_(loc_lba_, disc_end, garbage_setloc_user_);
+                }
+            }
+            else
+            {
+                emu::logf(emu::LogLevel::info, "CD", "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
+                    loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_);
+            }
+
             cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
                 "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
                 loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_);
@@ -1316,8 +1561,39 @@ void Cdrom::exec_command(uint8_t cmd)
             queue_cmd_irq(0x03);
             break;
         }
-        case 0x03: // Play
+        case 0x03: // Play (CDDA playback)
         {
+            // If a track parameter is provided, seek to that track first
+            if (param_count_ >= 1)
+            {
+                const uint8_t track_bcd = param_fifo_[0];
+                const uint8_t track = bcd_to_u8(track_bcd);
+                // Find track start LBA (simplified - would need proper TOC)
+                // For now, use the current loc_lba_ set by previous SetLoc
+                emu::logf(emu::LogLevel::info, "CD", "Play: track=%u (BCD=0x%02X), using loc_lba_=%u",
+                    track, track_bcd, loc_lba_);
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                    "Play: track=%u (BCD=0x%02X), using loc_lba_=%u", track, track_bcd, loc_lba_);
+            }
+            else
+            {
+                emu::logf(emu::LogLevel::info, "CD", "Play: no track param, using loc_lba_=%u", loc_lba_);
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                    "Play: no track param, using loc_lba_=%u", loc_lba_);
+            }
+
+            // Stop any active data reading
+            reading_active_ = 0;
+            read_pending_irq1_ = 0;
+            data_ready_pending_ = 0;
+            async_stat_pending_ = 0;
+            // Keep motor spinning for CDDA playback
+            motor_idle_countdown_ = 0;
+            motor_spinning_ = 1;
+
+            // Start CDDA playback
+            start_cdda_playback();
+
             push_resp(status_);
             queue_cmd_irq(0x03);
             break;
@@ -1337,11 +1613,31 @@ void Cdrom::exec_command(uint8_t cmd)
             // - Second response: INT1 (data ready)
             // - Continuous: after INT1 ack, auto-advance to next sector and send another INT1
             // - Data FIFO is loaded only after Want Data (Index0.Bit7).
+            const uint32_t disc_end = disc_ ? disc_->disc_sectors : 0;
+
+            // Check if sector is beyond disc bounds BEFORE starting read
+            // This prevents INT1 from being sent for an unreadable sector
+            if (disc_end > 0 && loc_lba_ >= disc_end)
+            {
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+                    "ReadN/S REJECTED: LBA=%u >= disc_end=%u (garbage SetLoc?)", loc_lba_, disc_end);
+                // Send error response: stat|error, reason=0x10 (invalid argument)
+                push_resp((uint8_t)(status_ | 0x01u));
+                push_resp(0x10u); // ERROR_REASON_INVALID_ARGUMENT
+                queue_cmd_irq(0x05); // INT5: error
+                break;
+            }
+
+            cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                "ReadN/S START: LBA=%u disc_end=%u motor_spinning=%d", loc_lba_, disc_end, (int)motor_spinning_);
+
             clear_data();
             want_data_ = 0;
             data_ready_pending_ = 0;
             read_pending_irq1_ = 1;
             reading_active_ = 1;
+            // Stop motor countdown - reading keeps motor spinning
+            motor_idle_countdown_ = 0;
 
             // Set status: motor on (bit1) + reading (bit5)
             status_ |= 0x22u;
@@ -1351,6 +1647,9 @@ void Cdrom::exec_command(uint8_t cmd)
         }
         case 0x07: // MotorOn
         {
+            status_ |= 0x02u; // Motor on
+            motor_spinning_ = 1;
+            motor_idle_countdown_ = 0;
             push_resp(status_);
             queue_cmd_irq(0x03);
             break;
@@ -1359,8 +1658,12 @@ void Cdrom::exec_command(uint8_t cmd)
         {
             reading_active_ = 0;
             read_pending_irq1_ = 0;
+            stop_cdda_playback();  // Stop CDDA if playing
             status_ &= ~0x20u; // clear Reading
             status_ &= ~0x02u; // clear Motor on
+            // Motor spins down immediately on Stop
+            motor_spinning_ = 0;
+            motor_idle_countdown_ = 0;
             push_resp(status_);
             queue_cmd_irq(0x03);
             // Stop has INT2 second response
@@ -1378,7 +1681,11 @@ void Cdrom::exec_command(uint8_t cmd)
             // Clear reading and active flags
             reading_active_ = 0;
             read_pending_irq1_ = 0;
+            stop_cdda_playback();  // Stop CDDA if playing
             status_ &= ~0x20u;
+            // Motor spins down after a delay on Pause (~1 second)
+            // DuckStation: motor becomes idle, next read needs spin-up
+            motor_idle_countdown_ = 33868800u; // ~1 second at 33.8MHz
             // Pause has INT2 second response
             pending_irq_type_ = 0x02;
             pending_irq_resp_ = status_;
@@ -1390,6 +1697,10 @@ void Cdrom::exec_command(uint8_t cmd)
         {
             status_ = 0x02u; // Motor on after init
             mode_ = 0x20; // default mode: double speed
+            // Init starts motor spin-up, but doesn't complete immediately
+            motor_spinning_ = 0; // Will need spin-up on first read
+            motor_idle_countdown_ = 0;
+            head_lba_ = 0; // Reset head position
             push_resp(status_);
             queue_cmd_irq(0x03);
             // Queue second response INT2 (Init complete) after first is acked
@@ -1397,6 +1708,7 @@ void Cdrom::exec_command(uint8_t cmd)
             pending_irq_resp_ = status_;
             pending_irq_reason_ = 0;
             pending_irq_delay_ = 80000;
+            pending_irq_extra_len_ = 0; // Clear leftover extra bytes from previous cmd (e.g. GetID)
             break;
         }
         case 0x0B: // Mute
@@ -1560,6 +1872,9 @@ void Cdrom::exec_command(uint8_t cmd)
                 if (first == 99)
                     first = 1;
             }
+            emu::logf(emu::LogLevel::info, "CD", "GetTN: first=%u last=%u track_count=%u disc_sectors=%u",
+                first, last, disc_ ? disc_->track_count : 0, disc_ ? disc_->disc_sectors : 0);
+
             push_resp(status_);
             push_resp(u8_to_bcd(first));
             push_resp(u8_to_bcd(last));
@@ -1607,6 +1922,10 @@ void Cdrom::exec_command(uint8_t cmd)
             const uint32_t ss = rem / 75u;
             const uint32_t ff = rem % 75u;
 
+            emu::logf(emu::LogLevel::info, "CD", "GetTD: track=%02X -> LBA=%u MSF=%02u:%02u:%02u (BCD %02X:%02X:%02X)",
+                param_fifo_[0], start_lba, mm, ss, ff,
+                u8_to_bcd((uint8_t)mm), u8_to_bcd((uint8_t)ss), u8_to_bcd((uint8_t)ff));
+
             push_resp(status_);
             push_resp(u8_to_bcd((uint8_t)mm));
             push_resp(u8_to_bcd((uint8_t)ss));
@@ -1625,15 +1944,18 @@ void Cdrom::exec_command(uint8_t cmd)
             // - Motor seeks to target position (takes time)
             // - INT2 (seek complete)
             //
-            // Emulator simplification: instant seek.
-            // This is acceptable because:
-            // - We correctly update the read head position (loc_lba_/loc_msf_)
-            // - Games poll for INT2 completion, which we signal immediately
-            // - Cycle-accurate seek timing is not required for correct emulation
-            //
-            // The position was already set by SetLoc, so we just signal completion.
+            // Seek time depends on distance from current head position.
+            // We use a logarithmic model like DuckStation.
             push_resp(status_);
-            queue_cmd_irq(0x02); // INT2: seek complete (not INT3)
+            queue_cmd_irq(0x03); // INT3: command accepted
+            pending_irq_type_ = 0x02;  // INT2: seek complete
+            pending_irq_resp_ = status_;
+            pending_irq_reason_ = 0;
+            // Calculate realistic seek time (no spin-up for SeekL/SeekP, motor was already on)
+            pending_irq_delay_ = calc_seek_time(head_lba_, loc_lba_, false);
+            // Update head position after seek completes
+            head_lba_ = loc_lba_;
+            pending_irq_extra_len_ = 0;
             break;
         }
         case 0x17: // SetClock
@@ -1710,7 +2032,7 @@ void Cdrom::exec_command(uint8_t cmd)
                 case 0x22: // Get region char
                     // Return stat + region letter: 'I'=Japan, 'A'=America, 'E'=Europe
                     push_resp(status_);
-                    push_resp('E'); // Europe
+            push_resp(disc_region_.letter ? (uint8_t)disc_region_.letter : (uint8_t)'E');
                     queue_cmd_irq(0x03);
                     break;
                 default:
@@ -1738,7 +2060,7 @@ void Cdrom::exec_command(uint8_t cmd)
             // [3] ATIP: 0x00 (not used on PS1)
             // [4..7] Region string: "SCEI" (Japan), "SCEA" (US), "SCEE" (Europe), or 0x00 (unlicensed)
             //
-            // For a licensed disc with valid data track, we return SCEE (Europe) by default.
+            // For a licensed disc with valid data track, return inferred SCEx.
             // If no disc is inserted, return error.
             if (!disc_)
             {
@@ -1769,13 +2091,16 @@ void Cdrom::exec_command(uint8_t cmd)
             pending_irq_extra_len_ = 0;
             if (has_data_track)
             {
-                pending_irq_extra_[pending_irq_extra_len_++] = 0x02;  // flags: licensed data
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // flags: 0x00 = licensed disc, region OK
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x20;  // disc type: CD-ROM (Mode1/Mode2/XA)
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // ATIP
-                pending_irq_extra_[pending_irq_extra_len_++] = 'S';   // Region "SCEE"
-                pending_irq_extra_[pending_irq_extra_len_++] = 'C';
-                pending_irq_extra_[pending_irq_extra_len_++] = 'E';
-                pending_irq_extra_[pending_irq_extra_len_++] = 'E';
+                const char* scex = disc_region_.scex;
+                if (disc_region_.letter == 0)
+                    scex = "SCEE"; // fallback
+                pending_irq_extra_[pending_irq_extra_len_++] = (uint8_t)scex[0];
+                pending_irq_extra_[pending_irq_extra_len_++] = (uint8_t)scex[1];
+                pending_irq_extra_[pending_irq_extra_len_++] = (uint8_t)scex[2];
+                pending_irq_extra_[pending_irq_extra_len_++] = (uint8_t)scex[3];
             }
             else
             {
@@ -1903,9 +2228,14 @@ void Cdrom::exec_command(uint8_t cmd)
             }
 
             // TOC is already loaded - signal completion.
-            // Real hardware sends INT3 then INT2; we simplify to just INT2.
+            // Send INT3 (ACK) then INT2 (complete), like real hardware.
             push_resp(status_);
-            queue_cmd_irq(0x02); // INT2: command complete (not INT3)
+            queue_cmd_irq(0x03); // INT3: command accepted
+            pending_irq_type_ = 0x02;  // INT2
+            pending_irq_resp_ = status_;
+            pending_irq_reason_ = 0;
+            pending_irq_delay_ = 50000; // ~1.5ms
+            pending_irq_extra_len_ = 0;
             cd_log(
                 log_cd_,
                 log_io_,
@@ -2041,6 +2371,14 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                         queued_param_count_ = (uint8_t)sizeof(queued_params_);
                     for (uint8_t i = 0; i < queued_param_count_; ++i)
                         queued_params_[i] = param_fifo_[i];
+
+                    // DEBUG: Log if queued SetLoc has high MSF
+                    if (v == 0x02 && param_count_ >= 1 && param_fifo_[0] >= 0x40)
+                    {
+                        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+                            "QUEUE HIGH MSF: cmd=0x02 params=[%02X,%02X,%02X] param_count=%u",
+                            param_fifo_[0], param_fifo_[1], param_fifo_[2], param_count_);
+                    }
                     busy_ = 1;
                 }
                 else
@@ -2065,7 +2403,16 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
             {
                 if (param_count_ < (uint8_t)sizeof(param_fifo_))
                 {
+                    // DEBUG: Trace ALL param writes
+                    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                        "PARAM[%u]=0x%02X", param_count_, v);
                     param_fifo_[param_count_++] = v;
+                }
+                else
+                {
+                    // DEBUG: param fifo overflow
+                    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+                        "PARAM OVERFLOW: v=0x%02X param_count=%u REJECTED", v, param_count_);
                 }
             }
             else if (index_ == 1)
@@ -2151,6 +2498,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // If we just acknowledged the first response (INT3) of a read command,
                 // defer INT1 (data ready) to a future tick so the IRQ line has a
                 // proper low→high edge that the bus can detect.
+                // Use realistic seek timing based on distance and motor state.
                 if (read_pending_irq1_ && ((old_flags & 0x07u) != 0u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     read_pending_irq1_ = 0;
@@ -2158,7 +2506,11 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     pending_irq_type_ = 0x01; // INT1 (data ready)
                     pending_irq_resp_ = status_;
                     pending_irq_reason_ = 0;
-                    pending_irq_delay_ = 5000; // small delay for edge detection
+                    // Calculate realistic seek time: includes spin-up if motor was idle,
+                    // plus seek delay based on distance from current head position.
+                    pending_irq_delay_ = calc_seek_time(head_lba_, loc_lba_, true);
+                    // Mark motor as spinning after this seek
+                    motor_spinning_ = 1;
                     try_fill_data_fifo();
                 }
                 // ReadN/ReadS continuous: after INT1 is acked, queue next sector read.
@@ -2200,7 +2552,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // INT5 shell close: do NOT send here (IRQ_ACK path).
                 // The BIOS enables CDROM in I_MASK later, and a late INT5 would crash
                 // because the BIOS event handler isn't installed for unsolicited IRQs.
-                // INT5 is sent on disc insert (via IRQ_ENABLE path) instead.
+                // INT5 is queued after GetStat instead.
 
                 // If there is a queued command and no pending IRQ flags (and no
                 // deferred IRQ waiting), start it now. The queued command will
@@ -2212,6 +2564,14 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     param_count_ = queued_param_count_;
                     for (uint8_t i = 0; i < param_count_; ++i)
                         param_fifo_[i] = queued_params_[i];
+
+                    // DEBUG: Log if restored params contain high MSF values
+                    if (queued_cmd_ == 0x02 && param_count_ >= 1 && param_fifo_[0] >= 0x40)
+                    {
+                        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+                            "QUEUE RESTORE HIGH MSF: cmd=0x%02X params=[%02X,%02X,%02X] queued_param_count=%u",
+                            queued_cmd_, param_fifo_[0], param_fifo_[1], param_fifo_[2], queued_param_count_);
+                    }
                     queued_cmd_valid_ = 0;
                     busy_ = 1;
                     exec_command(queued_cmd_);
@@ -2258,8 +2618,12 @@ void Cdrom::tick(uint32_t cycles)
     // Deliver pending async IRQs after delay expires.
     if (pending_irq_type_ != 0)
     {
-        // Count down delay (if any remaining).
-        if (pending_irq_delay_ > 0)
+        // Count down delay ONLY after the first response (INT3) has been
+        // delivered.  On real hardware the second response (INT2) arrives
+        // well after the first; counting both delays simultaneously caused
+        // INT2 to fire immediately after INT3 was ACK'd, which confused
+        // the BIOS state machine (it expects a real gap between the two).
+        if (cmd_irq_pending_ == 0 && pending_irq_delay_ > 0)
         {
             if (cycles >= pending_irq_delay_)
                 pending_irq_delay_ = 0;
@@ -2274,6 +2638,16 @@ void Cdrom::tick(uint32_t cycles)
             const uint8_t is_read_advance = (pending_irq_reason_ == 0xFFu) ? 1u : 0u;
             if (is_read_advance)
             {
+                // Check if next sector would exceed disc bounds
+                const uint32_t disc_end = disc_ ? disc_->disc_sectors : 0;
+                if (disc_end > 0 && (loc_lba_ + 1) >= disc_end)
+                {
+                    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+                        "ReadN advance STOPPED: LBA=%u+1 >= disc_end=%u", loc_lba_, disc_end);
+                    stop_reading_with_error(0x80); // ERROR_REASON_NOT_READY
+                    return; // Don't deliver INT1, we sent INT5 instead
+                }
+
                 loc_lba_++;
                 clear_data();
                 want_data_ = 0;
@@ -2281,6 +2655,12 @@ void Cdrom::tick(uint32_t cycles)
                 pending_irq_reason_ = 0; // clear marker before pushing resp
                 cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
                     "ReadN advance -> LBA=%u", loc_lba_);
+            }
+
+            // Update head position when INT1 (data ready) is delivered
+            if (pending_irq_type_ == 0x01)
+            {
+                head_lba_ = loc_lba_;
             }
 
             clear_resp();
@@ -2303,6 +2683,204 @@ void Cdrom::tick(uint32_t cycles)
 
     // Deliver pending read INT1 after delay.
     // (ReadN/ReadS second response is also async on real hardware.)
+
+    // Motor idle countdown: after Pause, motor spins down after ~1 second
+    if (motor_idle_countdown_ > 0)
+    {
+        if (cycles >= motor_idle_countdown_)
+        {
+            motor_idle_countdown_ = 0;
+            motor_spinning_ = 0;
+            emu::logf(emu::LogLevel::info, "CD", "Motor spun down (idle)");
+        }
+        else
+        {
+            motor_idle_countdown_ -= cycles;
+        }
+    }
+
+    // Tick CDDA playback (process audio sectors at the correct rate)
+    if (playing_cdda_)
+    {
+        tick_cdda(cycles);
+    }
+}
+
+// ============================================================================
+// CDDA Audio Playback Implementation
+// ============================================================================
+
+bool Cdrom::read_raw_sector(uint32_t lba, uint8_t out[2352])
+{
+    if (!disc_)
+        return false;
+
+    uint32_t ss = 0;
+    if (!disc_->read_sector_raw(lba, out, 2352, &ss))
+        return false;
+
+    // For audio tracks, raw data is 2352 bytes of PCM audio
+    // For 2048-byte images, we can't read raw - just fill with silence
+    if (ss == 2048)
+    {
+        // No raw audio available
+        std::memset(out, 0, 2352);
+        return false;
+    }
+
+    return (ss == 2352);
+}
+
+void Cdrom::start_cdda_playback()
+{
+    if (!disc_)
+        return;
+
+    playing_cdda_ = 1;
+    cdda_lba_ = loc_lba_;
+    cdda_sector_pos_ = 0;
+    cdda_sector_samples_ = 0;
+    cdda_cycle_accum_ = 0;
+
+    // Clear audio FIFO
+    audio_fifo_read_ = 0;
+    audio_fifo_write_ = 0;
+    audio_fifo_count_ = 0;
+
+    // Set status: Playing + Motor On
+    status_ = (status_ | 0x80) & ~0x20;  // Set Play bit (7), clear Read bit (5)
+
+    emu::logf(emu::LogLevel::info, "CD", "CDDA playback started at LBA=%u", cdda_lba_);
+    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        "CDDA playback started at LBA=%u", cdda_lba_);
+}
+
+void Cdrom::stop_cdda_playback()
+{
+    if (!playing_cdda_)
+        return;
+
+    playing_cdda_ = 0;
+    status_ &= ~0x80;  // Clear Play bit
+
+    emu::logf(emu::LogLevel::info, "CD", "CDDA playback stopped at LBA=%u", cdda_lba_);
+    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        "CDDA playback stopped at LBA=%u", cdda_lba_);
+}
+
+void Cdrom::add_cdda_frame(int16_t left, int16_t right)
+{
+    if (audio_fifo_count_ >= kAudioFifoSize)
+    {
+        // FIFO full, drop oldest sample
+        audio_fifo_read_ = (audio_fifo_read_ + 1) % kAudioFifoSize;
+        audio_fifo_count_--;
+    }
+
+    // Apply CD audio volume matrix (like DuckStation)
+    // left_out = (left * vol_ll + right * vol_rl) >> 7
+    // right_out = (right * vol_rr + left * vol_lr) >> 7
+    int32_t left_out = ((int32_t)left * vol_ll_ + (int32_t)right * vol_rl_) >> 7;
+    int32_t right_out = ((int32_t)right * vol_rr_ + (int32_t)left * vol_lr_) >> 7;
+
+    // Clamp to int16_t range
+    if (left_out > 32767) left_out = 32767;
+    if (left_out < -32768) left_out = -32768;
+    if (right_out > 32767) right_out = 32767;
+    if (right_out < -32768) right_out = -32768;
+
+    audio_fifo_l_[audio_fifo_write_] = (int16_t)left_out;
+    audio_fifo_r_[audio_fifo_write_] = (int16_t)right_out;
+    audio_fifo_write_ = (audio_fifo_write_ + 1) % kAudioFifoSize;
+    audio_fifo_count_++;
+}
+
+void Cdrom::process_cdda_sector()
+{
+    // Read raw 2352-byte sector
+    if (!read_raw_sector(cdda_lba_, cdda_sector_buf_))
+    {
+        emu::logf(emu::LogLevel::warn, "CD", "CDDA: failed to read sector LBA=%u", cdda_lba_);
+        stop_cdda_playback();
+        return;
+    }
+
+    // CDDA sectors are raw 16-bit stereo PCM audio (little-endian)
+    // 2352 bytes = 588 stereo sample pairs (588 left + 588 right samples)
+    // At 1x speed: 75 sectors/sec, 588 samples/sector = 44100 Hz
+    // At 2x speed: 150 sectors/sec, but we only use every other sample = still 44100 Hz output
+
+    const bool double_speed = (mode_ & 0x80) != 0;  // Mode bit 7 = double speed
+    const int samples_per_sector = double_speed ? 294 : 588;  // Half samples at 2x (skip every other)
+    const int sample_step = double_speed ? 2 : 1;
+
+    for (int i = 0; i < samples_per_sector; i++)
+    {
+        const int offset = (i * sample_step) * 4;  // 4 bytes per stereo sample pair
+        int16_t left, right;
+        std::memcpy(&left, cdda_sector_buf_ + offset, sizeof(int16_t));
+        std::memcpy(&right, cdda_sector_buf_ + offset + 2, sizeof(int16_t));
+        add_cdda_frame(left, right);
+    }
+
+    cdda_sector_samples_ = samples_per_sector;
+    cdda_sector_pos_ = 0;
+
+    // Advance to next sector
+    cdda_lba_++;
+
+    // Check for end of disc
+    const uint32_t disc_end = disc_ ? disc_->disc_sectors : 0;
+    if (disc_end > 0 && cdda_lba_ >= disc_end)
+    {
+        emu::logf(emu::LogLevel::info, "CD", "CDDA: reached end of disc at LBA=%u", cdda_lba_);
+        stop_cdda_playback();
+        // Send INT4 (end of track/disc)
+        clear_resp();
+        push_resp(status_);
+        set_irq(0x04);
+    }
+}
+
+void Cdrom::tick_cdda(uint32_t cycles)
+{
+    // CDDA timing: 44100 Hz sample rate
+    // CPU clock: ~33.8688 MHz
+    // Cycles per sample: 33868800 / 44100 ≈ 768
+
+    static constexpr uint32_t kCyclesPerSample = 768;
+    static constexpr uint32_t kSamplesPerSector = 588;  // At 1x speed
+
+    cdda_cycle_accum_ += cycles;
+
+    // Process samples at 44100 Hz rate
+    while (cdda_cycle_accum_ >= kCyclesPerSample && playing_cdda_)
+    {
+        cdda_cycle_accum_ -= kCyclesPerSample;
+
+        // Need more samples? Read next sector
+        if (audio_fifo_count_ < kAudioFifoSize / 2)
+        {
+            process_cdda_sector();
+        }
+    }
+}
+
+bool Cdrom::get_audio_frame(int16_t* left, int16_t* right)
+{
+    if (audio_fifo_count_ == 0)
+    {
+        *left = 0;
+        *right = 0;
+        return false;
+    }
+
+    *left = audio_fifo_l_[audio_fifo_read_];
+    *right = audio_fifo_r_[audio_fifo_read_];
+    audio_fifo_read_ = (audio_fifo_read_ + 1) % kAudioFifoSize;
+    audio_fifo_count_--;
+
+    return true;
 }
 
 } // namespace cdrom

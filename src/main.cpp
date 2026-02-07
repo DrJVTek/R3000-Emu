@@ -63,7 +63,11 @@ static void print_usage(void)
         "  --pretty              Pretty print instructions\n"
         "  --trace-io            Verbose MMIO logging\n"
         "  --pc-sample=N         Print PC every N steps\n"
+        "  --bus-tick-batch=N    Tick HW every N CPU steps (1=accurate, 32=fast)\n"
+        "  --stop-on-pc=ADDR     Stop when PC hits ADDR (hex ok)\n"
         "  --emu-log-level=LVL   Set emu log level (error|warn|info|debug|trace)\n"
+        "  --reg-trace=START:END[:WATCH]  Trace registers in PC range, optionally watch for value\n"
+        "                        Example: --reg-trace=0x8004AB00:0x8004AC00:0x35096\n"
     );
 }
 
@@ -223,12 +227,43 @@ int main(int argc, char** argv)
     const uint64_t max_time_raw = parse_u64_or_zero(arg_value(argc, argv, "--max-time="));
     const uint64_t max_time_s = (max_time_raw != 0) ? max_time_raw : 300; // default 5 min
     const uint64_t pc_sample = parse_u64_or_zero(arg_value(argc, argv, "--pc-sample="));
+    const uint64_t stop_on_pc = parse_u64_or_zero(arg_value(argc, argv, "--stop-on-pc="));
+    const char* bus_tick_batch_s = arg_value(argc, argv, "--bus-tick-batch=");
+    uint32_t bus_tick_batch = 0;
+    if (bus_tick_batch_s)
+    {
+        uint64_t v = parse_u64_or_zero(bus_tick_batch_s);
+        if (v < 1u) v = 1u;
+        if (v > 128u) v = 128u;
+        bus_tick_batch = (uint32_t)v;
+    }
 
     const flog::Level hw_lvl = parse_flog_level_or(arg_value(argc, argv, "--hw-log-level="), flog::Level::info);
     const flog::Level cd_lvl = parse_flog_level_or(arg_value(argc, argv, "--cd-log-level="), hw_lvl);
     const flog::Level gpu_lvl = parse_flog_level_or(arg_value(argc, argv, "--gpu-log-level="), hw_lvl);
     const flog::Level io_lvl = parse_flog_level_or(arg_value(argc, argv, "--io-log-level="), hw_lvl);
     const flog::Level sys_lvl = parse_flog_level_or(arg_value(argc, argv, "--system-log-level="), hw_lvl);
+
+    // Parse --reg-trace=START:END[:WATCH]
+    // Example: --reg-trace=0x8004AB00:0x8004AC00:0x35096
+    uint32_t reg_trace_start = 0, reg_trace_end = 0, reg_trace_watch = 0;
+    const char* reg_trace_s = arg_value(argc, argv, "--reg-trace=");
+    if (reg_trace_s)
+    {
+        // Parse format: START:END or START:END:WATCH
+        char* endp = nullptr;
+        reg_trace_start = (uint32_t)std::strtoul(reg_trace_s, &endp, 0);
+        if (endp && *endp == ':')
+        {
+            reg_trace_end = (uint32_t)std::strtoul(endp + 1, &endp, 0);
+            if (endp && *endp == ':')
+            {
+                reg_trace_watch = (uint32_t)std::strtoul(endp + 1, &endp, 0);
+            }
+        }
+        emu::logf(emu::LogLevel::info, "MAIN", "Register trace: PC=0x%08X-0x%08X watch=0x%08X",
+            reg_trace_start, reg_trace_end, reg_trace_watch);
+    }
 
     const uint32_t kRamSize = 2u * 1024u * 1024u;
     emu::Core core(&logger);
@@ -363,6 +398,13 @@ int main(int argc, char** argv)
     core_opt.pretty = has_flag(argc, argv, "--pretty") ? 1 : 0;
     core_opt.trace_io = trace_io ? 1 : 0;
     core_opt.hle_vectors = has_flag(argc, argv, "--hle") ? 1 : 0;
+    if (bus_tick_batch != 0)
+        core_opt.bus_tick_batch = bus_tick_batch;
+    if (stop_on_pc != 0)
+    {
+        core_opt.stop_on_pc_enabled = 1;
+        core_opt.stop_on_pc = (uint32_t)stop_on_pc;
+    }
 
     {
         char err[256];
@@ -371,6 +413,16 @@ int main(int argc, char** argv)
         {
             emu::logf(emu::LogLevel::error, "MAIN", "Core init failed: %s", err[0] ? err : "unknown error");
             return 1;
+        }
+    }
+
+    // Enable register trace mode if requested
+    if (reg_trace_start != 0 || reg_trace_end != 0)
+    {
+        if (core.cpu())
+        {
+            core.cpu()->set_reg_trace(reg_trace_start, reg_trace_end, reg_trace_watch);
+            emu::logf(emu::LogLevel::info, "MAIN", "Register trace enabled");
         }
     }
 
@@ -408,8 +460,18 @@ int main(int argc, char** argv)
             ++steps;
             if (pc_sample != 0 && (steps % pc_sample) == 0)
             {
-                emu::logf(emu::LogLevel::info, "MAIN", "SAMPLE step=%" PRIu64 " PC=0x%08X INSTR=0x%08X",
-                    steps, res.pc, res.instr);
+                const r3000::Cpu* cpu = core.cpu();
+                const r3000::Bus* bus = core.bus();
+                const uint32_t cause = cpu ? cpu->cop0(13) : 0u;
+                const uint32_t status = cpu ? cpu->cop0(12) : 0u;
+                const uint32_t epc = cpu ? cpu->cop0(14) : 0u;
+                const uint32_t exc = (cause >> 2) & 0x1Fu;
+                const uint32_t i_stat = bus ? bus->irq_stat_raw() : 0u;
+                const uint32_t i_mask = bus ? bus->irq_mask_raw() : 0u;
+                const uint32_t ipend = bus ? bus->irq_pending_masked() : 0u;
+                emu::logf(emu::LogLevel::info, "MAIN",
+                    "SAMPLE step=%" PRIu64 " PC=0x%08X INSTR=0x%08X exc=%u epc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%08X i_mask=0x%08X ipend=0x%08X",
+                    steps, res.pc, res.instr, exc, epc, cause, status, i_stat, i_mask, ipend);
             }
             if (max_steps != 0 && steps >= max_steps)
             {

@@ -175,6 +175,13 @@ int Gpu::tick_vblank(uint32_t cycles)
 
         // Log frame stats
         frame_count_++;
+
+        // Log every 50 VBlanks (~1 second) to confirm timing
+        if ((frame_count_ % 50) == 1)
+        {
+            emu::logf(emu::LogLevel::info, "GPU", "VBlank #%u (every 50 = ~1sec at 50Hz)", frame_count_);
+        }
+
         const auto& s = frame_stats_;
         if (s.total_words > 0)
         {

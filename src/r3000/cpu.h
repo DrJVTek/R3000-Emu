@@ -44,6 +44,10 @@ class Cpu
     {
         return gpr_[idx & 31u];
     }
+    uint32_t cop0(uint32_t idx) const
+    {
+        return (idx < 32u) ? cop0_[idx] : 0u;
+    }
 
     void set_pretty(int enabled)
     {
@@ -86,6 +90,10 @@ class Cpu
     void set_hle_vectors(int enabled);
     void set_hle_tcb_addr(uint32_t phys) { hle_tcb_addr_ = phys; }
 
+    // Disable HLE pseudo-vblank when GPU generates real VBlanks.
+    // Call set_use_gpu_vblank(1) when a GPU is present and handling VBlanks.
+    void set_use_gpu_vblank(int enabled) { use_gpu_vblank_ = enabled ? 1 : 0; }
+
 #ifdef R3000_DBG_LOOP_DETECTORS
     void set_loop_detectors(int enabled) { loop_detectors_ = enabled; }
 #else
@@ -95,6 +103,12 @@ class Cpu
     // Batch bus ticking: tick every N steps instead of every step.
     // Higher values = faster but less accurate. 1 = cycle-accurate (default CLI). 32 = good for UE5.
     void set_bus_tick_batch(uint32_t n) { bus_tick_batch_ = (n < 1) ? 1 : n; }
+
+    // Cycle multiplier: compensate for simplified 1-cycle-per-instruction model.
+    // Real MIPS R3000 averages ~1.5-2 cycles/instruction due to loads, branches, etc.
+    // Default 2 gives better SPU timing (audio duration matches real hardware).
+    void set_cycle_multiplier(uint32_t n) { cycle_multiplier_ = (n < 1) ? 1 : n; }
+    uint32_t cycle_multiplier() const { return cycle_multiplier_; }
 
     // Debug: fichier de sortie texte (BIOS putc / syscalls "write-like" / etc).
     // Objectif: avoir un "console.log" séparé et facile à relire pendant le live.
@@ -152,6 +166,29 @@ class Cpu
     uint32_t gpr(uint32_t idx) const { return (idx < 32) ? gpr_[idx] : 0; }
 
     void set_cop0(uint32_t idx, uint32_t v) { if (idx < 32) cop0_[idx] = v; }
+
+    // Debug: dump CPU state (PC, registers, recent trace) via emu::logf
+    void dump_debug_state(const char* reason);
+
+    // Advanced register trace mode - logs every instruction with full register state
+    // in a PC range. Use set_reg_trace() to enable and configure.
+    struct RegTraceConfig
+    {
+        uint32_t pc_start;      // Start PC of trace range (0 = disabled)
+        uint32_t pc_end;        // End PC of trace range
+        uint32_t watch_value;   // Value to watch for in any register (0 = disabled)
+        int enabled;            // Master enable
+    };
+
+    void set_reg_trace(uint32_t pc_start, uint32_t pc_end, uint32_t watch_value = 0)
+    {
+        reg_trace_.pc_start = pc_start;
+        reg_trace_.pc_end = pc_end;
+        reg_trace_.watch_value = watch_value;
+        reg_trace_.enabled = (pc_start != 0 || pc_end != 0) ? 1 : 0;
+    }
+
+    void set_reg_trace_enabled(int enabled) { reg_trace_.enabled = enabled; }
 
     StepResult step();
 
@@ -294,6 +331,7 @@ class Cpu
 
     uint32_t bus_tick_accum_{0};
     uint32_t bus_tick_batch_{1}; // tick bus every N steps (1 = every step, 32 = batched)
+    uint32_t cycle_multiplier_{1}; // cycles per instruction (1 = default, 2 = approximate real R3000 average)
 
     std::FILE* compare_file_{nullptr};
 
@@ -320,9 +358,30 @@ class Cpu
     };
 
     HleEvent hle_events_[32]{};
+
+    // Deliver an event (set matching events from busy to ready).
+    // Same logic as B(07h) DeliverEvent, but callable from the HLE exception handler.
+    void hle_deliver_event(uint32_t cls, uint32_t spec)
+    {
+        for (uint32_t i = 0; i < (uint32_t)(sizeof(hle_events_) / sizeof(hle_events_[0])); ++i)
+        {
+            HleEvent& e = hle_events_[i];
+            if ((e.status & 0x2000u) && e.cls == cls && e.spec == spec)
+            {
+                e.status &= ~0x2000u;
+                e.status |= 0x4000u;
+                // TEMP: diagnostic
+                static int s_deliver_diag = 0;
+                // Debug: event match diagnostic (disabled - use emu::logf in cpp if needed)
+                (void)s_deliver_diag;
+            }
+        }
+    }
+
     uint32_t hle_vblank_div_{0};
     uint32_t hle_vblank_counter_{0}; // Software VBlank frame counter (root counter 3)
     int hle_pseudo_vblank_{0};
+    int use_gpu_vblank_{0}; // When 1, GPU generates VBlanks - disable HLE pseudo-vblank
     uint32_t hle_rand_seed_{0};
 
     // HLE BIOS File I/O (cdrom:) - minimal pour permettre le boot CD.
@@ -365,6 +424,10 @@ class Cpu
 
     int pretty_{0};
     int ri_trace_count_{0};
+    int aerr_trace_count_{0};
+
+    // Advanced register trace
+    RegTraceConfig reg_trace_{};
 };
 
 } // namespace r3000

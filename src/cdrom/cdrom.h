@@ -52,6 +52,22 @@ class Cdrom
     // Tick (called from bus). Handles async IRQ delivery (INT5, INT1 for reads).
     void tick(uint32_t cycles);
 
+    // Audio output for SPU: get next stereo sample pair from CDDA/XA playback.
+    // Returns true if audio is available, false if FIFO is empty.
+    bool get_audio_frame(int16_t* left, int16_t* right);
+
+    // Check if CDDA is currently playing
+    bool is_playing_cdda() const { return playing_cdda_ != 0; }
+
+    // Debug callback: called when garbage SetLoc is detected.
+    // Signature: void(uint32_t lba, uint32_t disc_end, void* user)
+    using GarbageSetLocCallback = void(*)(uint32_t lba, uint32_t disc_end, void* user);
+    void set_garbage_setloc_callback(GarbageSetLocCallback cb, void* user)
+    {
+        garbage_setloc_cb_ = cb;
+        garbage_setloc_user_ = user;
+    }
+
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).
     // Retourne false si pas de disque ou secteur illisible.
     bool read_sector_2048(uint32_t lba, uint8_t out[2048]);
@@ -66,6 +82,12 @@ class Cdrom
 
   private:
     struct Disc;
+    struct DiscRegion
+    {
+        // PS1 region letters: 'I'=Japan, 'A'=America, 'E'=Europe. 0 = unknown.
+        char letter{0};
+        char scex[4]{0, 0, 0, 0}; // "SCEI"/"SCEA"/"SCEE" (no NUL).
+    };
 
     // Helpers BCD (le BIOS parle en BCD).
     static uint8_t bcd_to_u8(uint8_t bcd);
@@ -87,11 +109,25 @@ class Cdrom
 
     void set_irq(uint8_t flags);
     void queue_cmd_irq(uint8_t flags);
+    void stop_reading_with_error(uint8_t reason);
     uint8_t status_reg() const;
     void try_fill_data_fifo();
 
+    // CDDA audio processing
+    void start_cdda_playback();
+    void stop_cdda_playback();
+    void process_cdda_sector();
+    void add_cdda_frame(int16_t left, int16_t right);
+    void tick_cdda(uint32_t cycles);
+    bool read_raw_sector(uint32_t lba, uint8_t out[2352]);
+
     uint32_t msf_to_lba(uint8_t m, uint8_t s, uint8_t f) const;
     bool read_user_data_2048(uint32_t lba, uint8_t out[2048]);
+    DiscRegion infer_disc_region();
+
+    // Seek timing: calculate delay in CPU cycles based on LBA distance.
+    // Uses logarithmic model like DuckStation for realistic timing.
+    uint32_t calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_spinup) const;
 
     rlog::Logger* logger_{nullptr};
 
@@ -101,6 +137,11 @@ class Cdrom
     int has_clock_{0};
 
     Disc* disc_{nullptr};
+    DiscRegion disc_region_{};
+
+    // Debug callback for garbage SetLoc
+    GarbageSetLocCallback garbage_setloc_cb_{nullptr};
+    void* garbage_setloc_user_{nullptr};
 
     // Registres CDROM (modèle minimal, mais avec sémantique réelle).
     uint8_t index_{0};   // écrit via 0x1F801800
@@ -141,12 +182,38 @@ class Cdrom
     uint8_t mode_{0};
     uint8_t filter_file_{0};
     uint8_t filter_chan_{0};
+    uint8_t seek_pending_{0};  // SetLoc was called, next read needs seek delay
+
+    // Motor and head position tracking for realistic seek/spin-up timing.
+    // Real PS1: motor spins down after Stop/Pause, spin-up takes ~600ms.
+    // Seek time depends on LBA distance (logarithmic model like DuckStation).
+    uint8_t motor_spinning_{0};      // 0=idle (needs spin-up), 1=spinning
+    uint32_t head_lba_{0};           // Physical head position (for seek distance calc)
+    uint32_t motor_idle_countdown_{0}; // Cycles until motor spins down after Pause
 
     // Audio volume registers (pas critique pour boot, mais présents dans l'I/O map).
     uint8_t vol_ll_{0x80}; // L-CD -> L-SPU
     uint8_t vol_lr_{0x00}; // L-CD -> R-SPU
     uint8_t vol_rr_{0x80}; // R-CD -> R-SPU
     uint8_t vol_rl_{0x00}; // R-CD -> L-SPU
+
+    // CDDA playback state
+    uint8_t playing_cdda_{0};        // CDDA playback active
+    uint32_t cdda_lba_{0};           // Current CDDA sector LBA
+    uint32_t cdda_sector_samples_{0}; // Samples remaining in current sector
+    uint32_t cdda_cycle_accum_{0};   // Cycle accumulator for CDDA timing
+
+    // CDDA audio FIFO (ring buffer for stereo samples)
+    static constexpr int kAudioFifoSize = 4096;  // sample pairs (L+R)
+    int16_t audio_fifo_l_[kAudioFifoSize]{};
+    int16_t audio_fifo_r_[kAudioFifoSize]{};
+    int audio_fifo_read_{0};
+    int audio_fifo_write_{0};
+    int audio_fifo_count_{0};
+
+    // Current sector buffer for CDDA (2352 bytes raw)
+    uint8_t cdda_sector_buf_[2352]{};
+    int cdda_sector_pos_{0};  // Current sample position in sector (0..587 for 1x, 0..293 for 2x)
 
     // Shell close interrupt tracking.
     // INT5 is sent when the BIOS enables it and a disc is present.

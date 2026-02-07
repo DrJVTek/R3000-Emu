@@ -4,6 +4,8 @@
 #include <functional>
 #include "spu_voice.h"
 
+namespace cdrom { class Cdrom; }
+
 namespace audio
 {
 
@@ -57,8 +59,19 @@ class Spu
     // Set audio callback for streaming (e.g., to UE5)
     void set_audio_callback(AudioCallback cb) { audio_callback_ = std::move(cb); }
 
+    // Set CDROM for CDDA audio integration
+    void set_cdrom(cdrom::Cdrom* cd) { cdrom_ = cd; }
+
     // SPUSTAT register value
     uint16_t stat() const;
+
+    // IRQ callback (called when SPU triggers interrupt)
+    using IrqCallback = std::function<void()>;
+    void set_irq_callback(IrqCallback cb) { irq_callback_ = std::move(cb); }
+
+    // Check and clear IRQ flag (for reading SPUSTAT)
+    bool irq_pending() const { return irq_flag_; }
+    void clear_irq_flag() { irq_flag_ = false; }
 
     // Tick called from bus (cycle-based)
     void tick_cycles(uint32_t cycles);
@@ -114,6 +127,11 @@ class Spu
     uint32_t xfer_addr_cur_{0};  // Current byte address
     uint16_t xfer_ctrl_{0};
 
+    // IRQ registers
+    uint16_t irq_addr_{0};       // IRQ trigger address (8-byte units)
+    bool irq_flag_{false};       // IRQ pending flag (SPUSTAT bit 6)
+    IrqCallback irq_callback_{}; // Called when IRQ triggers
+
     // FIFO for manual transfers
     uint16_t fifo_[32]{};
     int fifo_count_{0};
@@ -144,6 +162,10 @@ class Spu
 
     // Debug: total samples generated
     uint64_t total_samples_{0};
+    uint64_t callback_invocations_{0};
+
+    // CDROM for CDDA audio
+    cdrom::Cdrom* cdrom_{nullptr};
 };
 
 } // namespace audio

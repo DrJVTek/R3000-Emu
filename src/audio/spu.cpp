@@ -1,6 +1,7 @@
 #include "spu.h"
 #include "wav_writer.h"
 #include "../log/emu_log.h"
+#include "../cdrom/cdrom.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -54,8 +55,8 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
                 {
                     voices_[i].key_on();
                     endx_ &= ~(1u << i);
-                    emu::logf(emu::LogLevel::debug, "SPU", "KEY_ON voice %d addr=0x%05X",
-                        i, (uint32_t)voices_[i].read_reg(0x06) << 3);
+                    emu::logf(emu::LogLevel::debug, "SPU", "[%7.3fs] KEY_ON voice %d addr=0x%05X",
+                        total_samples_ / 44100.0, i, (uint32_t)voices_[i].read_reg(0x06) << 3);
                 }
             }
             kon_shadow_ = kon_;
@@ -75,7 +76,8 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
                 if (koff_ & (1u << i))
                 {
                     voices_[i].key_off();
-                    emu::logf(emu::LogLevel::debug, "SPU", "KEY_OFF voice %d", i);
+                    emu::logf(emu::LogLevel::debug, "SPU", "[%7.3fs] KEY_OFF voice %d",
+                        total_samples_ / 44100.0, i);
                 }
             }
             koff_ = 0;
@@ -93,17 +95,23 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
         case 0x198: eon_ = (eon_ & 0xFFFF0000) | val; break;
         case 0x19A: eon_ = (eon_ & 0x0000FFFF) | (static_cast<uint32_t>(val & 0xFF) << 16); break;
 
-        // ENDX - clear on write
+        // ENDX - clear on write (like DuckStation's "Unknown SPU register write" log)
         case 0x19C:
         case 0x19E:
+            emu::logf(emu::LogLevel::debug, "SPU", "[%7.3fs] ENDX write 0x%03X val=0x%04X (clearing endx_=0x%06X)",
+                total_samples_ / 44100.0, offset, val, endx_);
             endx_ = 0;
             break;
 
         // Reverb work area start
         case 0x1A2: reverb_base_ = val; break;
 
-        // IRQ address
-        case 0x1A4: /* irq_addr */ break;
+        // IRQ address (in 8-byte units)
+        case 0x1A4:
+            irq_addr_ = val;
+            emu::logf(emu::LogLevel::debug, "SPU", "IRQ_ADDR=0x%05X (reg=0x%04X)",
+                static_cast<uint32_t>(val) << 3, val);
+            break;
 
         // Transfer address
         case 0x1A6:
@@ -128,9 +136,22 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
         {
             const uint16_t old = ctrl_;
             ctrl_ = val;
-            if (val != old)
-                emu::logf(emu::LogLevel::debug, "SPU", "SPUCNT 0x%04X->0x%04X en=%d mute=%d cd=%d xfer=%d",
-                    old, val, (val>>15)&1, (val>>14)&1, val&1, (val>>1)&7);
+
+            // Writing to SPUCNT acknowledges (clears) the SPU IRQ flag
+            if (irq_flag_)
+            {
+                emu::logf(emu::LogLevel::debug, "SPU", "IRQ acknowledged (SPUCNT write)");
+                irq_flag_ = false;
+            }
+
+            // Log at warn level when cd bit changes (bit 0) - critical for debugging audio issues
+            if ((val & 1) != (old & 1))
+                emu::logf(emu::LogLevel::warn, "SPU", "[%7.3fs] SPUCNT CD-bit change: 0x%04X->0x%04X cd=%d->%d",
+                    total_samples_ / 44100.0, old, val, old & 1, val & 1);
+            else if (val != old)
+                // Note: mute is active-low (bit14=0 means muted, bit14=1 means NOT muted)
+                emu::logf(emu::LogLevel::info, "SPU", "[%7.3fs] SPUCNT 0x%04X->0x%04X en=%d muted=%d cd=%d xfer=%d irq_en=%d",
+                    total_samples_ / 44100.0, old, val, (val>>15)&1, ((val>>14)&1)==0, val&1, (val>>1)&7, (val>>6)&1);
             break;
         }
 
@@ -195,10 +216,23 @@ uint16_t Spu::read_reg(uint32_t offset) const
         case 0x19A: return static_cast<uint16_t>(eon_ >> 16);
 
         // ENDX - voices that reached end
-        case 0x19C: return static_cast<uint16_t>(endx_);
-        case 0x19E: return static_cast<uint16_t>(endx_ >> 16);
+        case 0x19C:
+        case 0x19E:
+        {
+            // Debug: log voice states when game reads ENDX
+            static uint32_t endx_read_count = 0;
+            if ((++endx_read_count % 1000) == 1) {
+                int active = 0;
+                for (int v = 0; v < kNumVoices; v++)
+                    if (voices_[v].is_active()) active++;
+                emu::logf(emu::LogLevel::debug, "SPU", "ENDX read #%u: 0x%06X active_voices=%d ctrl=0x%04X",
+                    endx_read_count, endx_, active, ctrl_);
+            }
+            return (offset == 0x19C) ? static_cast<uint16_t>(endx_) : static_cast<uint16_t>(endx_ >> 16);
+        }
 
         case 0x1A2: return reverb_base_;
+        case 0x1A4: return irq_addr_;
         case 0x1A6: return xfer_addr_reg_;
         case 0x1A8: return 0;  // FIFO read (not commonly used)
         case 0x1AA: return ctrl_;
@@ -243,23 +277,40 @@ uint16_t Spu::stat() const
     // SPUSTAT (PSX-SPX):
     // Bit 0-5:  Current mode (mirror of SPUCNT bits 0-5)
     // Bit 6:    IRQ9 flag (0=No, 1=IRQ9 set)
-    // Bit 7-8:  Data transfer DMA read/write request (from SPUCNT bits 4-5)
-    // Bit 9:    Data transfer DMA write request
+    // Bit 7:    DMA read/write request (active when ready for DMA)
+    // Bit 8:    DMA write request
+    // Bit 9:    DMA read request
     // Bit 10:   Data transfer busy flag (0=Ready, 1=Busy)
     // Bit 11:   Writing to capture buffers (0=First, 1=Second)
 
     uint16_t s = ctrl_ & 0x3F;  // Bits 0-5: current mode from SPUCNT
 
-    // Bit 7-8: DMA request flags (reflect transfer mode from SPUCNT bits 4-5)
-    // Only set when SPU is enabled (SPUCNT bit 15)
-    if (ctrl_ & (1u << 15))
+    // Bit 6: IRQ9 flag
+    if (irq_flag_)
+        s |= (1u << 6);
+
+    // DMA request flags based on transfer mode (SPUCNT bits 4-5)
+    const uint16_t xfer_mode = (ctrl_ >> 4) & 3u;
+
+    if (xfer_mode == 2)  // DMA write mode
     {
-        const uint16_t xfer_mode = (ctrl_ >> 4) & 3u;
-        if (xfer_mode == 2)      // DMA write
-            s |= (1u << 8);
-        else if (xfer_mode == 3) // DMA read
-            s |= (1u << 9);
+        // Ready to receive data - set write request
+        s |= (1u << 7);  // DMA request
+        s |= (1u << 8);  // DMA write request
     }
+    else if (xfer_mode == 3)  // DMA read mode
+    {
+        // Ready to send data - set read request
+        s |= (1u << 7);  // DMA request
+        s |= (1u << 9);  // DMA read request
+    }
+
+    // Bit 10: Transfer busy - we complete transfers instantly, so never busy
+    // s |= 0; // Always ready (not busy)
+
+    // Bit 11: Capture buffer half - toggle based on sample count
+    if ((total_samples_ / 256) & 1)
+        s |= (1u << 11);
 
     return s;
 }
@@ -312,6 +363,14 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
 
     // Check if SPU is enabled (SPUCNT bit 15)
     bool spu_enabled = (ctrl_ & 0x8000) != 0;
+    // Mute bit (bit 14) - Active LOW like DuckStation: 0=Muted, 1=Not muted
+    // Named "mute_n" in DuckStation meaning NOT-mute when bit is set
+    bool spu_muted = (ctrl_ & 0x4000) == 0; // bit 14 = 0 means muted (active low)
+
+    // IRQ address in bytes (for comparison with voice current_addr)
+    const uint32_t irq_addr_bytes = static_cast<uint32_t>(irq_addr_) << 3;
+    // IRQ enabled via SPUCNT bit 6
+    const bool irq_enabled = (ctrl_ & 0x40) != 0;
 
     if (spu_enabled)
     {
@@ -327,6 +386,21 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
                 voices_[i].clear_loop_end();
             }
 
+            // Check for IRQ trigger: voice address matches IRQ address
+            // Only trigger if IRQ is enabled and not already pending
+            if (irq_enabled && !irq_flag_ && irq_addr_ != 0)
+            {
+                // Compare voice current address with IRQ address (both in bytes)
+                if (voices_[i].current_addr() == irq_addr_bytes)
+                {
+                    irq_flag_ = true;
+                    emu::logf(emu::LogLevel::info, "SPU", "IRQ triggered! voice=%d addr=0x%05X",
+                        i, irq_addr_bytes);
+                    if (irq_callback_)
+                        irq_callback_();
+                }
+            }
+
             // Apply voice volume (signed 15-bit)
             int16_t vol_l = static_cast<int16_t>(voices_[i].read_reg(0x00));
             int16_t vol_r = static_cast<int16_t>(voices_[i].read_reg(0x02));
@@ -337,26 +411,48 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
             mix_r += sample_r;
         }
 
-        // Mix XA audio if available
-        if (xa_samples_available_ > 0 && (ctrl_ & 0x01))  // CD audio enable
+        // Mix CD audio (XA/CDDA) if enabled (bit 0 = CD audio enable)
+        if (ctrl_ & 0x01)
         {
-            int16_t xa_l = xa_buffer_l_[xa_read_pos_];
-            int16_t xa_r = xa_buffer_r_[xa_read_pos_];
+            int16_t cd_l = 0, cd_r = 0;
+            bool has_cd_audio = false;
 
-            // Apply CD volume
-            int32_t cd_l = (xa_l * cd_vol_l_) >> 15;
-            int32_t cd_r = (xa_r * cd_vol_r_) >> 15;
+            // First try CDDA from CDROM (live playback)
+            if (cdrom_ && cdrom_->get_audio_frame(&cd_l, &cd_r))
+            {
+                has_cd_audio = true;
+            }
+            // Fallback to XA buffer (for XA-ADPCM sectors pushed via push_xa_samples)
+            else if (xa_samples_available_ > 0)
+            {
+                cd_l = xa_buffer_l_[xa_read_pos_];
+                cd_r = xa_buffer_r_[xa_read_pos_];
+                xa_read_pos_ = (xa_read_pos_ + 1) % kXaBufferSize;
+                xa_samples_available_--;
+                has_cd_audio = true;
+            }
 
-            mix_l += cd_l;
-            mix_r += cd_r;
+            if (has_cd_audio)
+            {
+                // Apply CD volume
+                int32_t mixed_l = ((int32_t)cd_l * cd_vol_l_) >> 15;
+                int32_t mixed_r = ((int32_t)cd_r * cd_vol_r_) >> 15;
 
-            xa_read_pos_ = (xa_read_pos_ + 1) % kXaBufferSize;
-            xa_samples_available_--;
+                mix_l += mixed_l;
+                mix_r += mixed_r;
+            }
         }
 
         // Apply main volume
         mix_l = (mix_l * main_vol_l_) >> 15;
         mix_r = (mix_r * main_vol_r_) >> 15;
+    }
+
+    // Apply mute (bit 14: 0 = muted, 1 = not muted - active low)
+    if (spu_muted)
+    {
+        mix_l = 0;
+        mix_r = 0;
     }
 
     // Clamp to 16-bit
@@ -378,10 +474,11 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
     // Periodic stats (every ~1 second of audio)
     if ((total_samples_ & 0xFFFF) == 0 && total_samples_ > 0)
     {
-        emu::logf(emu::LogLevel::debug, "SPU", "samples=%llu en=%d mainvol=%d/%d ctrl=0x%04X cb=%s",
-            (unsigned long long)total_samples_, (ctrl_ >> 15) & 1,
+        emu::logf(emu::LogLevel::debug, "SPU", "samples=%llu cb_calls=%llu en=%d muted=%d mainvol=%d/%d ctrl=0x%04X cb=%s out=%d/%d",
+            (unsigned long long)total_samples_, (unsigned long long)callback_invocations_,
+            spu_enabled ? 1 : 0, spu_muted ? 1 : 0,
             (int)main_vol_l_, (int)main_vol_r_, ctrl_,
-            audio_callback_ ? "yes" : "no");
+            audio_callback_ ? "yes" : "no", mix_l, mix_r);
     }
 
     // Buffer for callback
@@ -393,6 +490,7 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
         // Flush buffer when full
         if (output_buffer_pos_ >= 2048)
         {
+            callback_invocations_++;
             audio_callback_(output_buffer_, output_buffer_pos_ / 2);
             output_buffer_pos_ = 0;
         }
@@ -403,6 +501,7 @@ void Spu::flush_audio()
 {
     if (audio_callback_ && output_buffer_pos_ > 0)
     {
+        callback_invocations_++;
         audio_callback_(output_buffer_, output_buffer_pos_ / 2);
         output_buffer_pos_ = 0;
     }

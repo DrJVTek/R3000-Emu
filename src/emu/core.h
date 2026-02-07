@@ -94,6 +94,9 @@ class Core
     r3000::Bus* bus();
     r3000::Cpu* cpu();
 
+    // Cycle multiplier for timing accuracy (1=simplified, 2=approximate real R3000)
+    void set_cycle_multiplier(uint32_t n);
+
   private:
     void set_err(char* err, size_t err_cap, const char* msg) const;
 

@@ -1,6 +1,5 @@
 #include "bus.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -36,6 +35,20 @@ Bus::Bus(
     // Create SPU
     spu_ = new audio::Spu();
     spu_owned_ = true;
+
+    // Connect SPU to CDROM for CDDA audio
+    if (spu_ && cdrom_)
+    {
+        spu_->set_cdrom(cdrom_);
+    }
+
+    // Set up SPU IRQ callback: when SPU triggers IRQ, set I_STAT bit 9
+    if (spu_)
+    {
+        spu_->set_irq_callback([this]() {
+            i_stat_ |= (1u << 9);  // SPU IRQ = bit 9
+        });
+    }
 }
 
 Bus::~Bus()
@@ -111,6 +124,72 @@ static uint32_t phys_addr(uint32_t virt)
 // masked to the actual RAM size.
 static constexpr uint32_t kRamWindow = 0x00800000u; // 8 MB
 
+// ------------------ SIO0 (minimal controller) ------------------
+uint16_t Bus::sio0_stat_value() const
+{
+    uint16_t stat = (uint16_t)(sio0_stat_ | 0x00C5u); // TXRDY|TXEMPTY|DSR|CTS
+    if (sio0_rx_ready_)
+    {
+        stat |= 0x0002u; // RXRDY
+        stat |= 0x0100u; // IRQ
+    }
+    else
+    {
+        stat &= static_cast<uint16_t>(~0x0002u & 0xFFFFu);
+        stat &= static_cast<uint16_t>(~0x0100u & 0xFFFFu);
+    }
+    return stat;
+}
+
+uint16_t Bus::sio0_read_data()
+{
+    uint16_t v = sio0_rx_ready_ ? (uint16_t)sio0_rx_data_ : 0x00FFu;
+    sio0_rx_ready_ = 0;
+    return v;
+}
+
+void Bus::sio0_write_data(uint8_t v)
+{
+    uint8_t resp = 0xFFu;
+    switch (sio0_tx_phase_)
+    {
+        case 0:
+            // Expect 0x01 (start)
+            resp = 0xFFu;
+            sio0_tx_phase_ = (v == 0x01u) ? 1u : 0u;
+            break;
+        case 1:
+            // Command byte (poll/config/etc). Reply with digital pad ID (0x41).
+            (void)v;
+            resp = 0x41u;
+            sio0_tx_phase_ = 2u;
+            break;
+        case 2:
+            // Ack byte
+            resp = 0x5Au;
+            sio0_tx_phase_ = 3u;
+            break;
+        case 3:
+            // Buttons low
+            resp = 0xFFu;
+            sio0_tx_phase_ = 4u;
+            break;
+        case 4:
+            // Buttons high
+            resp = 0xFFu;
+            sio0_tx_phase_ = 0u;
+            break;
+        default:
+            resp = 0xFFu;
+            sio0_tx_phase_ = 0u;
+            break;
+    }
+    sio0_rx_data_ = resp;
+    sio0_rx_ready_ = 1;
+    // Raise SIO IRQ (bit 7) when a byte is ready.
+    i_stat_ |= (1u << 7);
+}
+
 // ================== READ FUNCTIONS ==================
 
 bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
@@ -159,6 +238,26 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
         return true;
     }
 
+    // SIO0 (Serial/Controller)
+    if (phys >= kSio0Base && phys < kSio0Base + kSio0Size)
+    {
+        const uint32_t off = phys - kSio0Base;
+        switch (off)
+        {
+            case 0x0: out = (uint8_t)(sio0_read_data() & 0xFFu); break;       // DATA
+            case 0x4: out = (uint8_t)(sio0_stat_value() & 0xFFu); break;       // STAT low
+            case 0x5: out = (uint8_t)((sio0_stat_value() >> 8) & 0xFFu); break; // STAT high
+            case 0x8: out = (uint8_t)(sio0_mode_ & 0xFFu); break;             // MODE low
+            case 0x9: out = (uint8_t)((sio0_mode_ >> 8) & 0xFFu); break;       // MODE high
+            case 0xA: out = (uint8_t)(sio0_ctrl_ & 0xFFu); break;             // CTRL low
+            case 0xB: out = (uint8_t)((sio0_ctrl_ >> 8) & 0xFFu); break;       // CTRL high
+            case 0xE: out = (uint8_t)(sio0_baud_ & 0xFFu); break;             // BAUD low
+            case 0xF: out = (uint8_t)((sio0_baud_ >> 8) & 0xFFu); break;       // BAUD high
+            default: out = 0; break;
+        }
+        return true;
+    }
+
     // EXP1 (open bus 0xFF)
     if (phys >= kExp1Base && phys < kExp1Base + kExp1Size)
     {
@@ -191,8 +290,11 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
     // RAM (mirrored)
     if (phys < kRamWindow)
     {
-        const uint32_t mp = phys & (ram_size_ - 1);
-        out = (uint16_t)ram_[mp] | ((uint16_t)ram_[mp + 1] << 8);
+        // Note: RAM is mirrored via masking; multi-byte accesses must wrap too.
+        const uint32_t rm = ram_size_ - 1;
+        const uint32_t mp0 = phys & rm;
+        const uint32_t mp1 = (phys + 1u) & rm;
+        out = (uint16_t)ram_[mp0] | ((uint16_t)ram_[mp1] << 8);
         return true;
     }
 
@@ -213,6 +315,22 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
     if (phys == kIrqMaskAddr)
     {
         out = (uint16_t)(i_mask_ & 0xFFFF);
+        return true;
+    }
+
+    // SIO0 (Serial/Controller)
+    if (phys >= kSio0Base && phys < kSio0Base + kSio0Size)
+    {
+        const uint32_t off = phys - kSio0Base;
+        switch (off)
+        {
+            case 0x0: out = sio0_read_data(); break;    // DATA
+            case 0x4: out = sio0_stat_value(); break;   // STAT
+            case 0x8: out = sio0_mode_; break;          // MODE
+            case 0xA: out = sio0_ctrl_; break;          // CTRL
+            case 0xE: out = sio0_baud_; break;          // BAUD
+            default: out = 0; break;
+        }
         return true;
     }
 
@@ -266,9 +384,14 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
     // RAM (mirrored)
     if (phys < kRamWindow)
     {
-        const uint32_t mp = phys & (ram_size_ - 1);
-        out = (uint32_t)ram_[mp] | ((uint32_t)ram_[mp + 1] << 8) |
-              ((uint32_t)ram_[mp + 2] << 16) | ((uint32_t)ram_[mp + 3] << 24);
+        // Note: RAM is mirrored via masking; multi-byte accesses must wrap too.
+        const uint32_t rm = ram_size_ - 1;
+        const uint32_t mp0 = phys & rm;
+        const uint32_t mp1 = (phys + 1u) & rm;
+        const uint32_t mp2 = (phys + 2u) & rm;
+        const uint32_t mp3 = (phys + 3u) & rm;
+        out = (uint32_t)ram_[mp0] | ((uint32_t)ram_[mp1] << 8) |
+              ((uint32_t)ram_[mp2] << 16) | ((uint32_t)ram_[mp3] << 24);
         return true;
     }
 
@@ -430,12 +553,12 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     if (phys >= kIrqStatAddr && phys < kIrqStatAddr + 4)
     {
         const uint32_t byte_off = phys - kIrqStatAddr;
-        // Read-modify-write: clear bits in the relevant byte
-        uint32_t mask = (uint32_t)v << (byte_off * 8);
-        uint32_t keep = ~((uint32_t)0xFF << (byte_off * 8)); // bits outside this byte
-        uint32_t old = i_stat_;
-        i_stat_ = (i_stat_ & keep) | (i_stat_ & mask);
-        (void)old;
+        // I_STAT: writing 0 clears the bit. (Writing 1 keeps it set.)
+        const uint32_t shift = byte_off * 8;
+        const uint32_t mask = 0xFFu << shift;
+        const uint32_t old = i_stat_;
+        const uint32_t new_byte = ((old >> shift) & 0xFFu) & v;
+        i_stat_ = (old & ~mask) | (new_byte << shift);
         return true;
     }
     if (phys >= kIrqMaskAddr && phys < kIrqMaskAddr + 4)
@@ -443,6 +566,46 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         const uint32_t byte_off = phys - kIrqMaskAddr;
         uint32_t shift = byte_off * 8;
         i_mask_ = (i_mask_ & ~((uint32_t)0xFF << shift)) | ((uint32_t)v << shift);
+        return true;
+    }
+
+    // SIO0 (Serial/Controller)
+    if (phys >= kSio0Base && phys < kSio0Base + kSio0Size)
+    {
+        const uint32_t off = phys - kSio0Base;
+        switch (off)
+        {
+            case 0x0:
+                sio0_data_ = v;
+                sio0_write_data(v);
+                break;
+            case 0x4:
+                sio0_stat_ = (uint16_t)((sio0_stat_ & 0xFF00u) | v);
+                break;
+            case 0x5:
+                sio0_stat_ = (uint16_t)((sio0_stat_ & 0x00FFu) | ((uint16_t)v << 8));
+                break;
+            case 0x8:
+                sio0_mode_ = (uint16_t)((sio0_mode_ & 0xFF00u) | v);
+                break;
+            case 0x9:
+                sio0_mode_ = (uint16_t)((sio0_mode_ & 0x00FFu) | ((uint16_t)v << 8));
+                break;
+            case 0xA:
+                sio0_ctrl_ = (uint16_t)((sio0_ctrl_ & 0xFF00u) | v);
+                break;
+            case 0xB:
+                sio0_ctrl_ = (uint16_t)((sio0_ctrl_ & 0x00FFu) | ((uint16_t)v << 8));
+                break;
+            case 0xE:
+                sio0_baud_ = (uint16_t)((sio0_baud_ & 0xFF00u) | v);
+                break;
+            case 0xF:
+                sio0_baud_ = (uint16_t)((sio0_baud_ & 0x00FFu) | ((uint16_t)v << 8));
+                break;
+            default:
+                break;
+        }
         return true;
     }
 
@@ -476,21 +639,46 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
     // RAM (mirrored)
     if (phys < kRamWindow)
     {
-        const uint32_t mp = phys & (ram_size_ - 1);
-        ram_[mp] = (uint8_t)(v & 0xFF);
-        ram_[mp + 1] = (uint8_t)((v >> 8) & 0xFF);
+        // Note: RAM is mirrored via masking; multi-byte accesses must wrap too.
+        const uint32_t rm = ram_size_ - 1;
+        const uint32_t mp0 = phys & rm;
+        const uint32_t mp1 = (phys + 1u) & rm;
+        ram_[mp0] = (uint8_t)(v & 0xFF);
+        ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
         return true;
     }
 
     // IRQ Controller
     if (phys == kIrqStatAddr)
     {
-        i_stat_ &= v;
+        // I_STAT: writing 0 clears the bit. (Writing 1 keeps it set.)
+        const uint32_t old = i_stat_;
+        const uint32_t new_low = (old & 0xFFFFu) & (uint32_t)v;
+        i_stat_ = (old & 0xFFFF0000u) | new_low;
         return true;
     }
     if (phys == kIrqMaskAddr)
     {
         i_mask_ = v;
+        return true;
+    }
+
+    // SIO0 (Serial/Controller)
+    if (phys >= kSio0Base && phys < kSio0Base + kSio0Size)
+    {
+        const uint32_t off = phys - kSio0Base;
+        switch (off)
+        {
+            case 0x0:
+                sio0_data_ = v;
+                sio0_write_data((uint8_t)(v & 0xFFu));
+                break;
+            case 0x8: sio0_mode_ = v; break;  // MODE
+            case 0xA: sio0_ctrl_ = v; break;  // CTRL
+            case 0xE: sio0_baud_ = v; break;  // BAUD
+            case 0x4: sio0_stat_ = v; break;  // STAT (rarely written)
+            default: break;
+        }
         return true;
     }
 
@@ -571,8 +759,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     // Demo MMIO print
     if (addr == kMmioPrintU32)
     {
-        std::fprintf(stderr, "[GUEST:MMIO] %u (0x%08X)\n", v, v);
-        std::fflush(stderr);
+        emu::logf(emu::LogLevel::info, "GUEST", "MMIO print: %u (0x%08X)", v, v);
         return true;
     }
 
@@ -587,17 +774,23 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     // RAM (mirrored)
     if (phys < kRamWindow)
     {
-        const uint32_t mp = phys & (ram_size_ - 1);
-        ram_[mp] = (uint8_t)(v & 0xFF);
-        ram_[mp + 1] = (uint8_t)((v >> 8) & 0xFF);
-        ram_[mp + 2] = (uint8_t)((v >> 16) & 0xFF);
-        ram_[mp + 3] = (uint8_t)((v >> 24) & 0xFF);
+        // Note: RAM is mirrored via masking; multi-byte accesses must wrap too.
+        const uint32_t rm = ram_size_ - 1;
+        const uint32_t mp0 = phys & rm;
+        const uint32_t mp1 = (phys + 1u) & rm;
+        const uint32_t mp2 = (phys + 2u) & rm;
+        const uint32_t mp3 = (phys + 3u) & rm;
+        ram_[mp0] = (uint8_t)(v & 0xFF);
+        ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
+        ram_[mp2] = (uint8_t)((v >> 16) & 0xFF);
+        ram_[mp3] = (uint8_t)((v >> 24) & 0xFF);
         return true;
     }
 
     // IRQ Controller
     if (phys == kIrqStatAddr)
     {
+        // I_STAT: writing 0 clears the bit. (Writing 1 keeps it set.)
         i_stat_ &= v;
         return true;
     }
@@ -684,6 +877,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
                         const uint32_t words = bs * (bc ? bc : 1);
                         uint32_t ma = dma_[ch].madr & 0x1FFFFF;
+
+                        emu::logf(emu::LogLevel::info, "BUS", "DMA4 SPU %s madr=0x%08X bcr=0x%08X words=%u spu_addr=0x%05X",
+                            dir ? "RAM→SPU" : "SPU→RAM", dma_[ch].madr, dma_[ch].bcr, words, spu_xfer_addr_cur_);
 
                         if (dir == 0) // From SPU (read)
                         {
@@ -825,11 +1021,12 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         dicr_ = (dicr_ & ~wr_mask) | (v & wr_mask);
         dicr_ &= ~ack_mask; // acknowledge flags
 
-        // Recompute master flag (bit 31): set if any (flag & enable) channel is active
+        // Recompute master flag (bit 31): set if any (flag & enable) channel is active and master enable is set
         const uint32_t flags   = (dicr_ >> 24) & 0x7Fu;
         const uint32_t enables = (dicr_ >> 16) & 0x7Fu;
         const int force = (dicr_ >> 15) & 1;
-        if (force || (flags & enables))
+        const int master_en = (dicr_ >> 23) & 1;
+        if (master_en && (force || (flags & enables)))
             dicr_ |= (1u << 31);
         else
             dicr_ &= ~(1u << 31);
@@ -958,15 +1155,16 @@ void Bus::dma_finish(int ch)
     const uint32_t flags   = (dicr_ >> 24) & 0x7Fu;
     const uint32_t enables = (dicr_ >> 16) & 0x7Fu;
     const int force = (dicr_ >> 15) & 1;
-    if (force || (flags & enables))
+    const int master_en = (dicr_ >> 23) & 1;
+    if (master_en && (force || (flags & enables)))
         dicr_ |= (1u << 31);
     else
         dicr_ &= ~(1u << 31);
 
-    // NOTE: We intentionally do NOT raise IRQ3 (I_STAT bit 3) here.
-    // The game's HookEntryInt handler dispatches IRQs through the
-    // SysEnqIntRP priority chain which we don't fully emulate yet.
-    // DMA completion is detected by polling DICR/CHCR instead.
+    // Raise DMA IRQ (I_STAT bit 3) when DICR master flag is set.
+    // The BIOS uses DMA IRQs during CD boot (e.g., sector transfers).
+    if (dicr_ & (1u << 31))
+        i_stat_ |= (1u << 3);
 }
 
 // ================== EVENT DELIVERY ==================
@@ -1027,6 +1225,8 @@ static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t c
 
 void Bus::tick(uint32_t cycles)
 {
+    static constexpr uint32_t kForceMaskAfterCycles = 600000u; // ~1 VBlank period worth of CPU cycles
+
     // Tick timers
     for (int ch = 0; ch < 3; ++ch)
     {
@@ -1048,6 +1248,13 @@ void Bus::tick(uint32_t cycles)
                 timer_prescale_accum_[1] += cycles;
                 inc = timer_prescale_accum_[1] / 2150;
                 timer_prescale_accum_[1] %= 2150;
+            }
+            else if (ch == 2 && (timers_[ch].mode & 0x0100))
+            {
+                // Timer 2 with prescaler: sysclock/8 (bit 8 set = use sysclock/8)
+                timer_prescale_accum_[2] += cycles;
+                inc = timer_prescale_accum_[2] / 8;
+                timer_prescale_accum_[2] %= 8;
             }
 
             uint32_t new_count = timers_[ch].count + inc;
@@ -1085,10 +1292,36 @@ void Bus::tick(uint32_t cycles)
         }
     }
 
-    // SPU tick
-    for (uint32_t i = 0; i < cycles; ++i)
+    // SPU tick (apply simple cycle delays without per-cycle loop)
+    if (cycles != 0)
     {
-        spu_tick_one();
+        // Apply SPUCNT with delay
+        if (spu_apply_delay_ > 0)
+        {
+            if (cycles >= spu_apply_delay_)
+            {
+                spu_apply_delay_ = 0;
+                spu_cnt_applied_ = spu_cnt_reg_;
+            }
+            else
+            {
+                spu_apply_delay_ -= cycles;
+            }
+        }
+
+        // Clear busy flag after transfer delay
+        if (spu_busy_delay_ > 0)
+        {
+            if (cycles >= spu_busy_delay_)
+            {
+                spu_busy_delay_ = 0;
+                spu_busy_ = 0;
+            }
+            else
+            {
+                spu_busy_delay_ -= cycles;
+            }
+        }
     }
 
     // Tick SPU audio generation
@@ -1115,14 +1348,12 @@ void Bus::tick(uint32_t cycles)
                 ++vblank_no_mask_count_;
                 if (vblank_no_mask_count_ >= 40)
                 {
-                    // Only enable VBlank IRQ. CDROM IRQs are delivered via
-                    // direct event table manipulation (deliver_cdrom_events)
-                    // because the kernel's SysEnqIntRP CDROM handler causes
-                    // re-entrancy issues when the response IRQ fires during
-                    // exception dispatch.
-                    i_stat_ = 0;
-                    if (cdrom_) cdrom_->clear_irq_flags();
-                    i_mask_ = 0x0071; // VBlank(0) | TMR0(4) | TMR1(5) | TMR2(6) — NOT CDROM(2)
+                    // Enable standard IRQ sources, including CDROM.
+                    // Note: earlier bring-up versions avoided CDROM IRQ due to
+                    // re-entrancy concerns in the BIOS handler; we now prefer
+                    // correctness so BIOS CD boot can work.
+                    i_mask_ = 0x0075; // VBlank(0) | CDROM(2) | TMR0(4) | TMR1(5) | TMR2(6)
+                    emu::logf(emu::LogLevel::info, "BUS", "Auto-enable I_MASK=0x%04X after %u VBlanks", (unsigned)i_mask_, (unsigned)vblank_no_mask_count_);
                 }
             }
             else
@@ -1137,16 +1368,40 @@ void Bus::tick(uint32_t cycles)
     {
         cdrom_->tick(cycles);
 
-        // CDROM IRQ: directly reflect the CDROM irq_line into I_STAT bit 2.
-        // On real PS1, I_STAT bits are active-high while the source is asserted.
-        // The BIOS clears the CDROM IRQ by writing to the CDROM IRQ ack register
-        // (which drops irq_line), not by writing to I_STAT.
-        uint8_t cdirq = cdrom_->irq_line();
-        if (cdirq)
+        // CDROM IRQ: edge-triggered into I_STAT bit 2.
+        // On real PS1, I_STAT latches on a 0->1 transition and is cleared by
+        // writing 0 to I_STAT (not by the line going low).
+        const uint8_t cdirq = cdrom_->irq_line();
+        if (cdirq && !cdrom_irq_prev_)
+        {
             i_stat_ |= (1u << 2);
-        else
-            i_stat_ &= ~(1u << 2);
+            // BIOS event system: mark CDROM class events as ready.
+            // This mirrors the kernel DeliverEvent() that would normally run in the IRQ handler.
+            deliver_events_for_class(ram_, ram_size_, 0x28u);
+        }
         cdrom_irq_prev_ = cdirq;
+    }
+
+    // If BIOS never enables IRQs (I_MASK stays 0), it can hang forever waiting on events.
+    // Force-enable a minimal mask after some time has passed, even if VBlank is not reached
+    // due to host throttling (e.g. UE5 time budget).
+    if (i_mask_ == 0)
+    {
+        if (no_mask_cycles_ < 0xFFFFFFFFu - cycles)
+            no_mask_cycles_ += cycles;
+        else
+            no_mask_cycles_ = 0xFFFFFFFFu;
+
+        if (no_mask_cycles_ >= kForceMaskAfterCycles)
+        {
+            i_mask_ = 0x0075; // VBlank(0) | CDROM(2) | TMR0(4) | TMR1(5) | TMR2(6)
+            emu::logf(emu::LogLevel::info, "BUS", "Auto-enable I_MASK=0x%04X after cycles=%u (VBlanks=%u)",
+                (unsigned)i_mask_, (unsigned)no_mask_cycles_, (unsigned)vblank_no_mask_count_);
+        }
+    }
+    else
+    {
+        no_mask_cycles_ = 0;
     }
 }
 

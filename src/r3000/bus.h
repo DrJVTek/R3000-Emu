@@ -55,6 +55,7 @@ class Bus
 
     uint32_t ram_size() const;
     uint8_t* ram_ptr() { return ram_; }
+    bool has_bios() const { return bios_ != nullptr && bios_size_ != 0; }
 
     // Lecture/écriture RAM/MMIO. Retourne false en cas de fault (et remplit fault).
     bool read_u8(uint32_t addr, uint8_t& out, MemFault& fault);
@@ -125,6 +126,9 @@ class Bus
     bool is_in_ram(uint32_t addr, uint32_t size) const;
     bool is_in_range(uint32_t addr, uint32_t base, uint32_t size, uint32_t access_size) const;
     void log_mem(const char* op, uint32_t addr, uint32_t v) const;
+    void sio0_write_data(uint8_t v);
+    uint16_t sio0_read_data();
+    uint16_t sio0_stat_value() const;
 
     uint8_t* ram_{nullptr};
     uint32_t ram_size_{0};
@@ -160,6 +164,10 @@ class Bus
     static constexpr uint32_t kGpuBase = 0x1F80'1810u;
     static constexpr uint32_t kGpuSize = 8u; // 0x1810..0x1817 (GP0/GP1)
 
+    // SIO0 (Serial/Controller)
+    static constexpr uint32_t kSio0Base = 0x1F80'1040u;
+    static constexpr uint32_t kSio0Size = 0x10u; // 0x1040..0x104F
+
     static constexpr uint32_t kBiosBase = 0x1FC0'0000u;
     static constexpr uint32_t kBiosMaxSize = 512u * 1024u;
 
@@ -193,7 +201,17 @@ class Bus
     uint32_t i_stat_{0};
     uint32_t i_mask_{0};
     Timer timers_[3]{};
-    uint32_t timer_prescale_accum_[3]{}; // prescaler accumulator (dotclock/hblank)
+    uint32_t timer_prescale_accum_[3]{}; // prescaler accumulator (TMR0=dotclock, TMR1=hblank, TMR2=sysclock/8)
+
+    // SIO0 minimal state (enough for BIOS polling loops)
+    uint16_t sio0_data_{0};
+    uint16_t sio0_stat_{0x0005u}; // TXRDY|TXEMPTY by default
+    uint16_t sio0_mode_{0};
+    uint16_t sio0_ctrl_{0};
+    uint16_t sio0_baud_{0};
+    uint8_t sio0_rx_data_{0xFF};
+    uint8_t sio0_rx_ready_{0};
+    uint8_t sio0_tx_phase_{0};
 
     // DMA controller (PS1) - minimal (suffisant pour BIOS init).
     // On implémente surtout DMA2 (GPU) linked-list pour déverrouiller les boucles BIOS qui attendent CHCR.
@@ -210,6 +228,7 @@ class Bus
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
     uint32_t vblank_no_mask_count_{0}; // VBlank frames with I_MASK=0 (for auto-enable workaround)
+    uint32_t no_mask_cycles_{0}; // Cycles accumulated with I_MASK=0 (for auto-enable workaround)
 
     // ----------------------------
     // SPU (minimal, spec-aligned)

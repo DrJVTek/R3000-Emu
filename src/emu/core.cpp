@@ -11,6 +11,18 @@
 namespace emu
 {
 
+// Callback for CDROM garbage SetLoc detection - dumps CPU state for debugging
+static void on_garbage_setloc(uint32_t lba, uint32_t disc_end, void* user)
+{
+    Core* core = static_cast<Core*>(user);
+    if (core && core->cpu())
+    {
+        char reason[128];
+        std::snprintf(reason, sizeof(reason), "Garbage SetLoc: LBA=%u >= disc_end=%u", lba, disc_end);
+        core->cpu()->dump_debug_state(reason);
+    }
+}
+
 static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nullptr)
 {
     if (!err || cap == 0)
@@ -194,6 +206,9 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     cpu_->set_trace_io(opt.trace_io ? 1 : 0);
     cpu_->set_hle_vectors(opt.hle_vectors ? 1 : 0);
 
+    // GPU generates real VBlanks at ~50Hz. Disable HLE pseudo-vblank (~333Hz).
+    cpu_->set_use_gpu_vblank(1);
+
     cpu_->set_loop_detectors(opt.loop_detectors ? 1 : 0);
     cpu_->set_bus_tick_batch(opt.bus_tick_batch);
     cpu_->set_stop_on_high_ram(opt.stop_on_high_ram ? 1 : 0);
@@ -216,6 +231,9 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
         cpu_->set_text_io_sink(text_io_, text_clock_);
     if (putchar_cb_)
         cpu_->set_putchar_callback(putchar_cb_, putchar_cb_user_);
+
+    // Set up CDROM garbage SetLoc callback for debugging
+    cdrom_.set_garbage_setloc_callback(on_garbage_setloc, this);
 
     // Apply initial registers (loader-provided).
     if (img.has_gp)
@@ -263,6 +281,12 @@ r3000::Bus* Core::bus()
 r3000::Cpu* Core::cpu()
 {
     return cpu_.get();
+}
+
+void Core::set_cycle_multiplier(uint32_t n)
+{
+    if (cpu_)
+        cpu_->set_cycle_multiplier(n);
 }
 
 bool Core::fast_boot_from_cd(char* err, size_t err_cap)
@@ -431,6 +455,10 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
 
     // Enable HLE vectors so A0/B0/C0 calls + exception vector are intercepted
     cpu_->set_hle_vectors(1);
+
+    // GPU generates real VBlanks at ~50Hz. Disable HLE pseudo-vblank (~333Hz)
+    // which would corrupt game timing if both fire.
+    cpu_->set_use_gpu_vblank(1);
 
     // Set I_MASK for VBLANK + CDROM + DMA
     {

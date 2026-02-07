@@ -36,6 +36,9 @@ class SpuVoice
     // Debug: get envelope phase
     int env_phase() const { return static_cast<int>(env_phase_); }
 
+    // Get current SPU RAM address (for IRQ checking)
+    uint32_t current_addr() const { return current_addr_; }
+
   private:
     // ADPCM block decoding
     void decode_block(const uint8_t* block);

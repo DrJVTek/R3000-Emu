@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "../cdrom/cdrom.h"
+#include "../log/emu_log.h"
 
 namespace r3000
 {
@@ -224,6 +225,7 @@ void Cpu::reset(uint32_t reset_pc)
     }
     hle_vblank_div_ = 0;
     hle_pseudo_vblank_ = 0;
+    use_gpu_vblank_ = 0; // Will be set by Core if GPU is present
 
     // HLE File I/O init.
     for (uint32_t i = 0; i < (uint32_t)(sizeof(hle_files_) / sizeof(hle_files_[0])); ++i)
@@ -237,6 +239,7 @@ void Cpu::reset(uint32_t reset_pc)
 
     spin_pc_ = 0;
     spin_count_ = 0;
+    bus_tick_accum_ = 0;
 
     for (int i = 0; i < 256; ++i)
     {
@@ -247,6 +250,54 @@ void Cpu::reset(uint32_t reset_pc)
     stopped_on_high_ram_ = 0;
 
     gte_.reset();
+}
+
+void Cpu::dump_debug_state(const char* reason)
+{
+    emu::logf(emu::LogLevel::error, "CPU", "=== DEBUG DUMP: %s ===", reason ? reason : "unknown");
+    emu::logf(emu::LogLevel::error, "CPU", "PC=0x%08X EPC=0x%08X Cause=0x%08X Status=0x%08X",
+        pc_, cop0_[COP0_EPC], cop0_[COP0_CAUSE], cop0_[COP0_STATUS]);
+    emu::logf(emu::LogLevel::error, "CPU", "RA=$31=0x%08X SP=$29=0x%08X FP=$30=0x%08X GP=$28=0x%08X",
+        gpr_[31], gpr_[29], gpr_[30], gpr_[28]);
+    emu::logf(emu::LogLevel::error, "CPU", "A0=$4=0x%08X A1=$5=0x%08X A2=$6=0x%08X A3=$7=0x%08X",
+        gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
+    emu::logf(emu::LogLevel::error, "CPU", "V0=$2=0x%08X V1=$3=0x%08X T0=$8=0x%08X T1=$9=0x%08X",
+        gpr_[2], gpr_[3], gpr_[8], gpr_[9]);
+    emu::logf(emu::LogLevel::error, "CPU", "S0=$16=0x%08X S1=$17=0x%08X S2=$18=0x%08X S3=$19=0x%08X",
+        gpr_[16], gpr_[17], gpr_[18], gpr_[19]);
+
+    // Dump stack (16 words above and 8 words below SP)
+    const uint32_t sp = gpr_[29];
+    emu::logf(emu::LogLevel::error, "CPU", "--- Stack around SP=0x%08X ---", sp);
+    for (int i = -16; i <= 8; i += 4)
+    {
+        const uint32_t addr = sp + (uint32_t)(i * 4);
+        uint32_t val = 0;
+        if ((addr & 0xE000'0000u) == 0x8000'0000u || (addr & 0xE000'0000u) == 0x0000'0000u)
+        {
+            // Try to read from RAM
+            const uint32_t phys = addr & 0x001F'FFFFu;
+            Bus::MemFault fault{};
+            if (bus_.read_u32(phys, val, fault))
+            {
+                emu::logf(emu::LogLevel::error, "CPU", "  [SP%+d] 0x%08X = 0x%08X", i * 4, addr, val);
+            }
+        }
+    }
+
+    // Dump recent PC trace (last 32 instructions)
+    emu::logf(emu::LogLevel::error, "CPU", "--- Recent PC trace (latest last) ---");
+    for (uint32_t i = 0; i < 32; ++i)
+    {
+        const uint32_t pos = (recent_pos_ - 32 + i) & 255u;
+        const uint32_t trace_pc = recent_pc_[pos];
+        const uint32_t trace_instr = recent_instr_[pos];
+        if (trace_pc != 0 || trace_instr != 0)
+        {
+            emu::logf(emu::LogLevel::error, "CPU", "  PC=0x%08X INSTR=0x%08X", trace_pc, trace_instr);
+        }
+    }
+    emu::logf(emu::LogLevel::error, "CPU", "=== END DEBUG DUMP ===");
 }
 
 void Cpu::set_reg(uint32_t idx, uint32_t v)
@@ -317,9 +368,51 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
             uint32_t instr_word = 0;
             if (paddr < bus_.ram_size())
                 instr_word = *(uint32_t*)(bus_.ram_ptr() + paddr);
-            std::fprintf(stderr, "[RI] #%d PC=0x%08X instr=0x%08X IEc=%d ra=0x%08X\n",
+            emu::logf(emu::LogLevel::warn, "CPU", "RI #%d PC=0x%08X instr=0x%08X IEc=%d ra=0x%08X",
                 ri_trace_count_, pc_of_fault, instr_word,
                 (int)(cop0_[COP0_STATUS] & 1), gpr_[31]);
+        }
+    }
+
+    // Trace address errors (useful for BIOS hang debugging).
+    if (logger_ && ((code & 0x1Fu) == EXC_ADEL || (code & 0x1Fu) == EXC_ADES))
+    {
+        if (++aerr_trace_count_ <= 5)
+        {
+            rlog::logger_logf(
+                logger_,
+                rlog::Level::debug,
+                rlog::Category::exc,
+                "EXC %s: PC=0x%08X BadVAddr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X ra=0x%08X sp=0x%08X",
+                ((code & 0x1Fu) == EXC_ADEL) ? "ADEL" : "ADES",
+                pc_of_fault,
+                badvaddr,
+                gpr_[4], gpr_[5], gpr_[6],
+                gpr_[16], gpr_[17], gpr_[18],
+                gpr_[31], gpr_[29]
+            );
+
+            // On first ADEL/ADES, dump recent trace to identify the caller path.
+            if (aerr_trace_count_ == 1)
+            {
+                rlog::logger_logf(logger_, rlog::Level::debug, rlog::Category::exc, "Recent trace (latest last):");
+                for (uint32_t i = 0; i < 64; ++i)
+                {
+                    const uint32_t pos = (recent_pos_ - 64 + i) & 255u;
+                    const uint32_t pc = recent_pc_[pos];
+                    const uint32_t ii = recent_instr_[pos];
+                    if (pc == 0 && ii == 0)
+                        continue;
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::debug,
+                        rlog::Category::exc,
+                        "  PC=0x%08X INSTR=0x%08X",
+                        pc,
+                        ii
+                    );
+                }
+            }
         }
     }
 
@@ -416,6 +509,16 @@ Cpu::StepResult Cpu::step()
         spin_count_ = 1;
     }
 
+    // Reset "just scheduled" BEFORE the IRQ check.
+    // When a branch (jr/beq/...) executes in step N, it sets branch_just_scheduled_=true.
+    // At the start of step N+1 (the delay slot), this flag must be cleared so that
+    // raise_exception() can correctly detect we are in a branch delay slot (BD=1,
+    // EPC = branch PC).  If the flag is still true, the delay-slot detection fails,
+    // causing the exception handler to return to the delay slot address instead of
+    // the branch instruction, which makes the CPU fall through sequentially instead
+    // of taking the branch after RFE.
+    branch_just_scheduled_ = false;
+
     // -----------------------------
     // 0) IRQ (PS1) - check between instructions
     // -----------------------------
@@ -465,28 +568,23 @@ Cpu::StepResult Cpu::step()
     // On ne doit HLE ces vecteurs QUE tant qu'ils sont vides (RAM=0). Dès que le BIOS installe
     // de vrais stubs à 0xA0/0xB0/0xC0, on doit exécuter le code RAM normal, sinon on bloque des
     // init (dont le boot CD).
+    //
+    // HOWEVER: in fast-boot mode (hle_vectors_ enabled), the BIOS kernel
+    // tables are NOT initialised.  If game code installs stubs at these
+    // vectors (via BIOS calls we HLE'd), the stub code would try to use
+    // uninitialised function-pointer tables and crash.  We therefore
+    // ALWAYS intercept with HLE when hle_vectors_ is active.
     int hle_vec_gate = 0;
     if (hle_vectors_ && (pc_ == 0x0000'00A0u || pc_ == 0x0000'00B0u || pc_ == 0x0000'00C0u))
     {
         // Passive hook: capture B(3Dh) putchar even when BIOS stubs are installed.
-        // This is pure observation — we don't alter the return, the real BIOS code
-        // will still execute normally after this.
         if (pc_ == 0x0000'00B0u && (gpr_[9] & 0xFFu) == 0x3Du && putchar_cb_)
         {
             const char ch = (char)(gpr_[4] & 0xFFu);
             putchar_cb_(ch, putchar_cb_user_);
         }
 
-        uint32_t w0 = 0;
-        uint32_t w1 = 0;
-        Bus::MemFault f{};
-        const uint32_t p0 = pc_ + 0u;
-        const uint32_t p1 = pc_ + 4u;
-        const int ok0 = bus_.read_u32(p0, w0, f) ? 1 : 0;
-        const int ok1 = bus_.read_u32(p1, w1, f) ? 1 : 0;
-        const int empty = (ok0 && ok1 && w0 == 0 && w1 == 0) ? 1 : 0;
-        hle_vec_gate = empty;
-
+        hle_vec_gate = 1;
     }
 
     if (hle_vec_gate)
@@ -514,6 +612,12 @@ Cpu::StepResult Cpu::step()
             // Little-endian write.
             return write_u8_guest(vaddr + 0, (uint8_t)(v & 0xFFu)) && write_u8_guest(vaddr + 1, (uint8_t)((v >> 8) & 0xFFu)) &&
                    write_u8_guest(vaddr + 2, (uint8_t)((v >> 16) & 0xFFu)) && write_u8_guest(vaddr + 3, (uint8_t)((v >> 24) & 0xFFu));
+        };
+        auto read_u32_guest = [&](uint32_t vaddr, uint32_t& out) -> int
+        {
+            Bus::MemFault f{};
+            const uint32_t paddr = virt_to_phys(vaddr);
+            return bus_.read_u32(paddr, out, f) ? 1 : 0;
         };
         auto read_cstr_guest = [&](uint32_t vaddr, char* dst, uint32_t cap) -> uint32_t
         {
@@ -842,6 +946,197 @@ Cpu::StepResult Cpu::step()
                     // On laisse le BIOS continuer; ici, on dépend surtout du HLE pour ne pas tomber sur NOP.
                     ret_v0 = 0;
                     break;
+                case 0x13u: // A(13h) setjmp(buf)
+                {
+                    // Save RA, SP, FP, S0-S7, GP to the jmpbuf at a0.
+                    // Returns 0 on initial call.
+                    auto wj = [&](uint32_t addr, uint32_t val) {
+                        Bus::MemFault wf{};
+                        (void)bus_.write_u32(virt_to_phys(addr), val, wf);
+                    };
+                    wj(a0 + 0x00u, gpr_[31]); // RA
+                    wj(a0 + 0x04u, gpr_[29]); // SP
+                    wj(a0 + 0x08u, gpr_[30]); // FP
+                    for (uint32_t i = 0; i < 8; ++i)
+                        wj(a0 + 0x0Cu + i * 4u, gpr_[16 + i]); // S0-S7
+                    wj(a0 + 0x2Cu, gpr_[28]); // GP
+                    ret_v0 = 0;
+                    break;
+                }
+                case 0x14u: // A(14h) longjmp(buf, retval)
+                {
+                    // Restore registers from jmpbuf at a0, return a1.
+                    auto rj = [&](uint32_t addr) -> uint32_t {
+                        Bus::MemFault mf{};
+                        uint32_t v = 0;
+                        (void)bus_.read_u32(virt_to_phys(addr), v, mf);
+                        return v;
+                    };
+                    gpr_[31] = rj(a0 + 0x00u); // RA
+                    gpr_[29] = rj(a0 + 0x04u); // SP
+                    gpr_[30] = rj(a0 + 0x08u); // FP
+                    for (uint32_t i = 0; i < 8; ++i)
+                        gpr_[16 + i] = rj(a0 + 0x0Cu + i * 4u); // S0-S7
+                    gpr_[28] = rj(a0 + 0x2Cu); // GP
+                    ret_v0 = (a1 != 0) ? a1 : 1u;
+                    break;
+                }
+                case 0x17u: // A(17h) strcmp(s1, s2)
+                {
+                    uint32_t i = 0;
+                    for (;; ++i)
+                    {
+                        uint8_t c1 = 0, c2 = 0;
+                        read_u8_guest(a0 + i, c1);
+                        read_u8_guest(a1 + i, c2);
+                        if (c1 != c2 || c1 == 0)
+                        {
+                            ret_v0 = (uint32_t)(int32_t)((int)c1 - (int)c2);
+                            break;
+                        }
+                    }
+                    break;
+                }
+                case 0x18u: // A(18h) strncmp(s1, s2, maxlen)
+                {
+                    ret_v0 = 0;
+                    for (uint32_t i = 0; i < a2; ++i)
+                    {
+                        uint8_t c1 = 0, c2 = 0;
+                        read_u8_guest(a0 + i, c1);
+                        read_u8_guest(a1 + i, c2);
+                        if (c1 != c2 || c1 == 0)
+                        {
+                            ret_v0 = (uint32_t)(int32_t)((int)c1 - (int)c2);
+                            break;
+                        }
+                    }
+                    break;
+                }
+                case 0x19u: // A(19h) strcpy(dst, src)
+                {
+                    uint32_t i = 0;
+                    for (;; ++i)
+                    {
+                        uint8_t ch = 0;
+                        read_u8_guest(a1 + i, ch);
+                        write_u8_guest(a0 + i, ch);
+                        if (ch == 0) break;
+                    }
+                    ret_v0 = a0;
+                    break;
+                }
+                case 0x1Au: // A(1Ah) strncpy(dst, src, maxlen)
+                {
+                    uint32_t i = 0;
+                    bool ended = false;
+                    for (; i < a2; ++i)
+                    {
+                        if (!ended)
+                        {
+                            uint8_t ch = 0;
+                            read_u8_guest(a1 + i, ch);
+                            write_u8_guest(a0 + i, ch);
+                            if (ch == 0) ended = true;
+                        }
+                        else
+                        {
+                            write_u8_guest(a0 + i, 0);
+                        }
+                    }
+                    ret_v0 = a0;
+                    break;
+                }
+                case 0x1Cu: // A(1Ch) strcat(dst, src)
+                {
+                    uint32_t dlen = hle_strlen(a0, 1024u * 1024u);
+                    uint32_t i = 0;
+                    for (;; ++i)
+                    {
+                        uint8_t ch = 0;
+                        read_u8_guest(a1 + i, ch);
+                        write_u8_guest(a0 + dlen + i, ch);
+                        if (ch == 0) break;
+                    }
+                    ret_v0 = a0;
+                    break;
+                }
+                case 0x25u: // A(25h) toupper(c)
+                {
+                    uint32_t c = a0 & 0xFFu;
+                    if (c >= 'a' && c <= 'z') c -= 0x20u;
+                    ret_v0 = c;
+                    break;
+                }
+                case 0x26u: // A(26h) tolower(c)
+                {
+                    uint32_t c = a0 & 0xFFu;
+                    if (c >= 'A' && c <= 'Z') c += 0x20u;
+                    ret_v0 = c;
+                    break;
+                }
+                case 0x34u: // A(34h) malloc(size)
+                {
+                    // Simple bump allocator
+                    uint32_t aligned = (kalloc_ptr_ + 3u) & ~3u;
+                    if (aligned + a0 <= kalloc_end_)
+                    {
+                        ret_v0 = aligned;
+                        kalloc_ptr_ = aligned + a0;
+                    }
+                    else
+                    {
+                        ret_v0 = 0; // out of memory
+                    }
+                    break;
+                }
+                case 0x35u: // A(35h) free(ptr)
+                    // No-op for bump allocator
+                    ret_v0 = 0;
+                    break;
+                case 0x39u: // A(39h) InitHeap(base, size)
+                {
+                    // Simple heap init: store base+size for malloc
+                    kalloc_ptr_ = a0;
+                    kalloc_end_ = a0 + a1;
+                    ret_v0 = 0;
+                    break;
+                }
+                case 0x49u: // A(49h) GPU_cw(gp0cmd) — send GP0 command word
+                {
+                    Bus::MemFault wf{};
+                    (void)bus_.write_u32(0x1F80'1810u, a0, wf);
+                    ret_v0 = 0;
+                    break;
+                }
+                case 0x70u: // A(70h) _bu_init()
+                    ret_v0 = 0;
+                    break;
+                case 0x71u: // A(71h) _96_init() — CD driver initialization
+                {
+                    // The BIOS calls this before starting the boot executable.
+                    // It sets up CDROM IRQ handlers via SysEnqIntRP and reads the TOC.
+                    // For HLE, we just return success. The IRQ handlers are set up
+                    // separately via the HLE event system.
+                    emu::logf(emu::LogLevel::debug, "HLE", "A(0x71) _96_init() called");
+                    ret_v0 = 1; // success
+                    break;
+                }
+                case 0x72u: // A(72h) _96_remove() — CD driver cleanup
+                {
+                    // Removes the CD driver IRQ handlers. Due to a SysDeqIntRP bug
+                    // in the original BIOS, this function doesn't actually work.
+                    // For HLE, we just return success.
+                    emu::logf(emu::LogLevel::debug, "HLE", "A(0x72) _96_remove() a0=0x%08X a1=0x%08X", a0, a1);
+                    ret_v0 = 1;
+                    break;
+                }
+                case 0x9Fu: // A(9Fh) SetMem(megabytes)
+                {
+                    // Set available RAM size. We ignore this (always 2MB).
+                    ret_v0 = 0;
+                    break;
+                }
                 default:
                     handled = 0;
                     break;
@@ -1040,6 +1335,9 @@ Cpu::StepResult Cpu::step()
                                 e.status = (a2 & 0x2000u) ? 0x2000u : 0x1000u;
                                 ret_v0 = 0xF100'0000u | (idx & 0xFFFFu);
 
+                                emu::logf(emu::LogLevel::debug, "HLE", "OpenEvent[%u] cls=0x%08X spec=0x%04X mode=0x%04X",
+                                    idx, a0, a1, a2);
+
                                 if (sys_has_clock_)
                                 {
                                     flog::logf(
@@ -1187,10 +1485,119 @@ Cpu::StepResult Cpu::step()
                             entryint_hook_addr_ = 0;
                         }
                         break;
-                    case 0x19u: // B(19h) HookEntryInt(addr)
-                        entryint_hook_addr_ = a0;
-                        ret_v0 = 1;
+                    case 0x19u: // B(19h) SetCustomExitFromException(addr)
+                    {
+                        // The custom exit handler replaces ReturnFromException.
+                        // On the real PS1, the BIOS performs a longjmp to the
+                        // setjmp buffer at addr when returning from an exception.
+                        hle_custom_exit_handler_ = a0;
+                        ret_v0 = 0;
                         break;
+                    }
+                    case 0x17u: // B(17h) ReturnFromException()
+                    {
+                        // PS1 BIOS ReturnFromException:
+                        // 1. Read PCB pointer from RAM[0x108]
+                        // 2. Read current TCB from PCB[0]
+                        // 3. Restore all GPRs, HI, LO, Status, EPC from TCB
+                        // 4. Apply RFE (shift Status >> 2)
+                        // 5. Jump to saved EPC
+                        //
+                        // TCB layout (standard PS1 kernel):
+                        //   +0x08: r26 (k0)       +0x0C: r27 (k1)
+                        //   +0x10: cop0r13 (Cause) +0x14: cop0r14 (EPC)
+                        //   +0x18..(+0x18+24*4)=+0x78: r1..r25
+                        //   +0x7C: r28 (gp)  +0x80: r29 (sp)
+                        //   +0x84: r30 (fp)  +0x88: r31 (ra)
+                        //   +0x8C: cop0r12 (SR)
+                        //   +0x90: hi        +0x94: lo
+
+                        uint32_t pcb_ptr = 0;
+                        if (!read_u32_guest(0x108u, pcb_ptr))
+                        {
+                            if (sys_has_clock_)
+                                flog::logf(sys_io_, sys_clock_, flog::Level::error, "CPU",
+                                    "ReturnFromException: failed to read PCB at 0x108");
+                            ret_v0 = 0;
+                            break;
+                        }
+
+                        uint32_t tcb_ptr = 0;
+                        if (!read_u32_guest(pcb_ptr, tcb_ptr))
+                        {
+                            if (sys_has_clock_)
+                                flog::logf(sys_io_, sys_clock_, flog::Level::error, "CPU",
+                                    "ReturnFromException: failed to read TCB from PCB=0x%08X", pcb_ptr);
+                            ret_v0 = 0;
+                            break;
+                        }
+
+                        // Restore r1..r25 from TCB+0x18 + (n-1)*4
+                        for (uint32_t n = 1; n <= 25; ++n)
+                        {
+                            uint32_t val = 0;
+                            (void)read_u32_guest(tcb_ptr + 0x18u + (n - 1u) * 4u, val);
+                            gpr_[n] = val;
+                        }
+                        // r26 (k0) from TCB+0x08, r27 (k1) from TCB+0x0C
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x08u, v); gpr_[26] = v; }
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x0Cu, v); gpr_[27] = v; }
+                        // r28 (gp) from +0x7C, r29 (sp) from +0x80
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x7Cu, v); gpr_[28] = v; }
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x80u, v); gpr_[29] = v; }
+                        // r30 (fp) from +0x84, r31 (ra) from +0x88
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x84u, v); gpr_[30] = v; }
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x88u, v); gpr_[31] = v; }
+
+                        // Restore COP0 Status from +0x8C
+                        uint32_t saved_sr = 0;
+                        (void)read_u32_guest(tcb_ptr + 0x8Cu, saved_sr);
+
+                        // Restore HI/LO from +0x90/+0x94
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x90u, v); hi_ = v; }
+                        { uint32_t v = 0; (void)read_u32_guest(tcb_ptr + 0x94u, v); lo_ = v; }
+
+                        // Read saved EPC from +0x14
+                        uint32_t saved_epc = 0;
+                        (void)read_u32_guest(tcb_ptr + 0x14u, saved_epc);
+
+                        // If using custom_exit (game handles IRQs itself) and CDROM IRQ is
+                        // still pending, ack it before RFE to prevent infinite re-trigger.
+                        // Some games (e.g., Ridge Racer) don't properly ack CDROM in their
+                        // exception handler, relying on the BIOS to do it.
+                        if (hle_custom_exit_handler_ != 0)
+                        {
+                            Bus::MemFault mf_ack{};
+                            uint32_t cur_i_stat = 0;
+                            (void)bus_.read_u32(0x1F80'1070u, cur_i_stat, mf_ack);
+                            if (cur_i_stat & 0x0004u)  // CDROM pending
+                            {
+                                // Ack CDROM register first (write 0x07 to Index1.IRQ_Flags)
+                                bus_.write_u8(0x1F80'1800u, 0x01u, mf_ack);  // Set Index 1
+                                bus_.write_u8(0x1F80'1803u, 0x07u, mf_ack);  // Ack IRQ flags
+                                bus_.write_u8(0x1F80'1800u, 0x00u, mf_ack);  // Restore Index 0
+                                // Ack I_STAT bit 2
+                                (void)bus_.write_u32(0x1F80'1070u, cur_i_stat & ~0x0004u, mf_ack);
+                            }
+                        }
+
+                        // Apply RFE: shift Status[5:0] right by 2
+                        saved_sr = (saved_sr & ~0x3Fu) | ((saved_sr >> 2) & 0x0Fu);
+                        cop0_[COP0_STATUS] = saved_sr;
+
+                        if (sys_has_clock_)
+                        {
+                            flog::logf(sys_io_, sys_clock_, flog::Level::debug, "CPU",
+                                "ReturnFromException: TCB=0x%08X EPC=0x%08X SR=0x%08X",
+                                tcb_ptr, saved_epc, saved_sr);
+                        }
+
+                        // Jump directly to saved EPC (bypass normal gpr_[31] return)
+                        pc_ = saved_epc;
+                        r.kind = StepResult::Kind::ok;
+                        r.instr = 0;
+                        return r;
+                    }
                     case 0x20u: // B(20h) UnDeliverEvent(class,spec)
                         {
                             const uint32_t cls = a0;
@@ -1207,6 +1614,42 @@ Cpu::StepResult Cpu::step()
                             }
                             ret_v0 = 1;
                         }
+                        break;
+                    case 0x12u: // B(12h) InitPad(buf1, sz1, buf2, sz2)
+                        // Joypad init. Store buffers but no actual pad emulation yet.
+                        ret_v0 = 1;
+                        break;
+                    case 0x13u: // B(13h) StartPad()
+                        // Start joypad polling. No-op.
+                        ret_v0 = 1;
+                        break;
+                    case 0x14u: // B(14h) StopPad()
+                        ret_v0 = 1;
+                        break;
+                    case 0x38u: // B(38h) chdir(name)
+                        // Change CD directory. No-op for our flat ISO view.
+                        ret_v0 = 0;
+                        break;
+                    case 0x3Bu: // B(3Bh) FileRead(fd, dst, len)
+                        ret_v0 = 0;
+                        break;
+                    case 0x4Au: // B(4Ah) InitCard(pad_enable)
+                        // Memory card init. No-op.
+                        ret_v0 = 1;
+                        break;
+                    case 0x4Bu: // B(4Bh) StartCard()
+                        // Start memory card communication. No-op.
+                        ret_v0 = 1;
+                        break;
+                    case 0x56u: // B(56h) GetC0Table
+                        ret_v0 = 0;
+                        break;
+                    case 0x57u: // B(57h) GetB0Table
+                        ret_v0 = 0;
+                        break;
+                    case 0x5Bu: // B(5Bh) ChangeClearPad(int)
+                        // Controller init. No-op for now.
+                        ret_v0 = 0;
                         break;
                     default:
                         handled = 0;
@@ -1327,6 +1770,9 @@ Cpu::StepResult Cpu::step()
 
         if (!handled)
         {
+            const char* vec_name = (pc_ == 0xA0u) ? "A" : (pc_ == 0xB0u) ? "B" : "C";
+            emu::logf(emu::LogLevel::debug, "HLE", "Unhandled %s(0x%02X) a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X",
+                vec_name, fn, a0, a1, a2, a3, gpr_[31]);
             if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exc))
             {
                 rlog::logger_logf(
@@ -1340,6 +1786,12 @@ Cpu::StepResult Cpu::step()
                     a1,
                     a2
                 );
+            }
+            if (sys_has_clock_)
+            {
+                flog::logf(sys_io_, sys_clock_, flog::Level::warn, "CPU",
+                    "HLE UNHANDLED %s(0x%02X) a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X",
+                    vec_name, fn, a0, a1, a2, a3, gpr_[31]);
             }
             ret_v0 = 0;
         }
@@ -1367,128 +1819,205 @@ Cpu::StepResult Cpu::step()
     }
 
     // Exception vector en RAM (BEV=0): 0x80000080.
-    // HLE "safe" uniquement si la RAM à 0x00000080 est encore vide (tout à 0).
-    // Dès que le BIOS installe un vrai handler, on doit l'exécuter (sinon on casse le dispatch).
+    //
+    // In fast-boot mode (hle_vectors_ active), we intercept exceptions and dispatch
+    // to the game's registered handler (via B(0x19) HookEntryInt).  If the game has
+    // registered a hook, we save CPU context into the TCB and jump to the hook — the
+    // game's handler processes the IRQ and eventually calls B(0x17) ReturnFromException.
+    // If no hook is registered, we handle IRQs in HLE (deliver events, clear I_STAT, RFE).
     if (hle_vectors_ && pc_ == 0x8000'0080u)
     {
-        uint32_t w0 = 0;
-        uint32_t w1 = 0;
-        uint32_t w2 = 0;
-        uint32_t w3 = 0;
-        Bus::MemFault f{};
-        const int ok0 = bus_.read_u32(0x0000'0080u, w0, f) ? 1 : 0;
-        const int ok1 = bus_.read_u32(0x0000'0084u, w1, f) ? 1 : 0;
-        const int ok2 = bus_.read_u32(0x0000'0088u, w2, f) ? 1 : 0;
-        const int ok3 = bus_.read_u32(0x0000'008Cu, w3, f) ? 1 : 0;
+        exc_vec_hits_++;
+        const uint32_t cause = cop0_[COP0_CAUSE];
+        const uint32_t status = cop0_[COP0_STATUS];
+        const uint32_t epc = cop0_[COP0_EPC];
+        const uint32_t code = (cause >> 2) & 0x1Fu;
 
-        const int ram_vec_empty = (ok0 && ok1 && ok2 && ok3 && w0 == 0 && w1 == 0 && w2 == 0 && w3 == 0) ? 1 : 0;
+        const int log_it = (exc_vec_hits_ <= 16u) || ((exc_vec_hits_ & (exc_vec_hits_ - 1u)) == 0u);
 
-        if (ram_vec_empty)
+        if (code == 0u)
         {
-            // On logge ici parce que si on boucle sur 0x80000080, c'est typiquement une exception
-            // "non gérée" (MMIO manquant, IRQ, ou autre détail COP0).
-            exc_vec_hits_++;
-            const uint32_t cause = cop0_[COP0_CAUSE];
-            const uint32_t status = cop0_[COP0_STATUS];
-            const uint32_t epc = cop0_[COP0_EPC];
-            const uint32_t bad = cop0_[COP0_BADVADDR];
-            const uint32_t code = (cause >> 2) & 0x1Fu;
+            // Helper: save full CPU context to TCB
+            auto save_context_to_tcb = [&]() {
+                Bus::MemFault rmf{};
+                auto rg = [&](uint32_t vaddr, uint32_t& out) {
+                    (void)bus_.read_u32(virt_to_phys(vaddr), out, rmf);
+                };
+                uint32_t pcb_ptr = 0, tcb_ptr = 0;
+                rg(0x80000108u, pcb_ptr);
+                rg(pcb_ptr, tcb_ptr);
+                if (tcb_ptr != 0)
+                {
+                    auto w = [&](uint32_t addr, uint32_t val) {
+                        Bus::MemFault wf{};
+                        (void)bus_.write_u32(virt_to_phys(addr), val, wf);
+                    };
+                    w(tcb_ptr + 0x08u, gpr_[26]);
+                    w(tcb_ptr + 0x0Cu, gpr_[27]);
+                    w(tcb_ptr + 0x10u, cause);
+                    w(tcb_ptr + 0x14u, epc);
+                    for (uint32_t n = 1; n <= 25; ++n)
+                        w(tcb_ptr + 0x18u + (n - 1u) * 4u, gpr_[n]);
+                    w(tcb_ptr + 0x7Cu, gpr_[28]);
+                    w(tcb_ptr + 0x80u, gpr_[29]);
+                    w(tcb_ptr + 0x84u, gpr_[30]);
+                    w(tcb_ptr + 0x88u, gpr_[31]);
+                    w(tcb_ptr + 0x8Cu, status);
+                    w(tcb_ptr + 0x90u, hi_);
+                    w(tcb_ptr + 0x94u, lo_);
+                }
+            };
 
-            // Throttle: premières occurrences, puis espacées (puissances de 2) pour éviter le spam.
-            const int log_it = (exc_vec_hits_ <= 16u) || ((exc_vec_hits_ & (exc_vec_hits_ - 1u)) == 0u);
+            // ---- CUSTOM EXIT (longjmp) MODE ----
+            // When the game registered B(0x19) SetCustomExitFromException, it wants
+            // to handle IRQs itself.  We save context to TCB (so B(0x17) works later)
+            // and longjmp to the game's handler.  We do NOT process IRQs in HLE —
+            // the game reads I_STAT, CDROM regs, etc. itself.
+            if (hle_custom_exit_handler_ != 0)
+            {
+                save_context_to_tcb();
+                // Don't clear I_STAT, don't ack CDROM — the game does it, or
+                // B(0x17) will ack CDROM before RFE if still pending.
+                // Longjmp exit happens below (after the if/else chain).
+            }
+            else
+            {
+                // ---- FULL HLE MODE ----
+                // No custom exit handler — handle everything in HLE.
+                Bus::MemFault mf{};
+                uint32_t i_stat = 0, i_mask = 0;
+                (void)bus_.read_u32(0x1F80'1070u, i_stat, mf);
+                (void)bus_.read_u32(0x1F80'1074u, i_mask, mf);
+                const uint32_t pending = i_stat & i_mask;
+
+                if (log_it && sys_has_clock_)
+                {
+                    flog::logf(sys_io_, sys_clock_, flog::Level::info, "CPU",
+                        "HLE EXC VEC (full HLE) IRQ I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X EPC=0x%08X",
+                        i_stat, i_mask, pending, epc);
+                }
+
+                if (pending & 0x0001u)
+                {
+                    hle_deliver_event(0xF000'0001u, 0x0001u);
+                    if (hle_pseudo_vblank_)
+                        hle_vblank_counter_++;
+                }
+                if (pending & 0x0002u)
+                    hle_deliver_event(0xF000'0001u, 0x0002u);
+                if (pending & 0x0004u)
+                {
+                    uint32_t cd_spec = 0x0004u;
+                    if (bus_.cdrom())
+                    {
+                        const uint8_t cd_irq_type = bus_.cdrom()->irq_flags_raw() & 0x07u;
+                        switch (cd_irq_type)
+                        {
+                            case 1: cd_spec = 0x0002u; break;
+                            case 2: cd_spec = 0x0008u; break;
+                            case 3: cd_spec = 0x0004u; break;
+                            case 4: cd_spec = 0x0010u; break;
+                            case 5: cd_spec = 0x0020u; break;
+                        }
+                    }
+                    hle_deliver_event(0xF000'0003u, cd_spec);
+
+                    // Acknowledge CDROM IRQ register to allow next INT
+                    if (bus_.cdrom())
+                    {
+                        Bus::MemFault cwf{};
+                        bus_.write_u8(0x1F80'1800u, 0x01u, cwf);
+                        bus_.write_u8(0x1F80'1803u, 0x07u, cwf);
+                        bus_.write_u8(0x1F80'1800u, 0x00u, cwf);
+                    }
+                }
+                if (pending & 0x0008u)
+                    hle_deliver_event(0xF000'0009u, 0x0001u);
+                if (pending & 0x0010u)
+                    hle_deliver_event(0xF200'0001u, 0x0001u);
+                if (pending & 0x0020u)
+                    hle_deliver_event(0xF200'0002u, 0x0001u);
+                if (pending & 0x0040u)
+                    hle_deliver_event(0xF200'0003u, 0x0001u);
+                if (pending & 0x0080u)
+                    hle_deliver_event(0xF000'0001u, 0x0080u);
+                if (pending & 0x0100u)
+                    hle_deliver_event(0xF000'0001u, 0x0100u);
+
+                // Acknowledge handled bits in I_STAT
+                {
+                    Bus::MemFault wf{};
+                    const uint32_t ack = i_stat & ~pending;
+                    (void)bus_.write_u32(0x1F80'1070u, ack, wf);
+                }
+            }
+        }
+        else if (code == 8u)
+        {
             if (log_it && sys_has_clock_)
-            {
-                // Lire l'instruction à EPC pour comprendre ce qui a réellement fauté.
-                uint32_t epc_instr = 0;
-                Bus::MemFault epc_fault{};
-                const uint32_t epc_phys = virt_to_phys(epc);
-                (void)bus_.read_u32(epc_phys, epc_instr, epc_fault);
+                flog::logf(sys_io_, sys_clock_, flog::Level::warn, "CPU",
+                    "HLE EXC VEC SYSCALL fell through to 0x80000080 EPC=0x%08X", epc);
+        }
+        else
+        {
+            if (log_it && sys_has_clock_)
+                flog::logf(sys_io_, sys_clock_, flog::Level::warn, "CPU",
+                    "HLE EXC VEC code=%u EPC=0x%08X Cause=0x%08X Status=0x%08X BadVAddr=0x%08X",
+                    code, epc, cause, status, cop0_[COP0_BADVADDR]);
+        }
 
-                // Decode minimal, surtout utile pour ADES (store misaligné).
-                const uint32_t opc = op(epc_instr);
-                const uint32_t rs_i = rs(epc_instr);
-                const uint32_t rt_i = rt(epc_instr);
-                const int16_t imm_i = imm_s(epc_instr);
-                const uint32_t base_v = gpr_[rs_i & 31u];
-                const uint32_t rt_v = gpr_[rt_i & 31u];
-                const uint32_t eff = base_v + (uint32_t)(int32_t)imm_i;
+        // ---- EXIT FROM EXCEPTION ----
+        // If the game set a custom exit handler (B(0x19) SetCustomExitFromException),
+        // perform a longjmp to the setjmp buffer instead of normal RFE+EPC return.
+        // The buffer layout matches our setjmp (A(0x13)):
+        //   +0x00: RA  +0x04: SP  +0x08: FP
+        //   +0x0C..+0x28: S0-S7 (8 regs × 4 bytes)
+        //   +0x2C: GP
+        if (hle_custom_exit_handler_ != 0 && code == 0u)
+        {
+            const uint32_t buf = hle_custom_exit_handler_;
+            Bus::MemFault mf{};
+            auto rj = [&](uint32_t addr) -> uint32_t {
+                uint32_t v = 0;
+                (void)bus_.read_u32(virt_to_phys(addr), v, mf);
+                return v;
+            };
+            gpr_[31] = rj(buf + 0x00u); // RA
+            gpr_[29] = rj(buf + 0x04u); // SP
+            gpr_[30] = rj(buf + 0x08u); // FP
+            for (uint32_t i = 0; i < 8; ++i)
+                gpr_[16 + i] = rj(buf + 0x0Cu + i * 4u); // S0-S7
+            gpr_[28] = rj(buf + 0x2Cu); // GP
+            gpr_[2] = 1; // v0 = 1 (longjmp return value, distinguishes from initial setjmp)
 
-                const char* store_name = "";
-                if (opc == 0x28u)
-                    store_name = "SB";
-                else if (opc == 0x29u)
-                    store_name = "SH";
-                else if (opc == 0x2Au)
-                    store_name = "SWL";
-                else if (opc == 0x2Bu)
-                    store_name = "SW";
-                else if (opc == 0x2Eu)
-                    store_name = "SWR";
+            // Do NOT perform RFE here!  On a real PS1, the BIOS longjmp for
+            // SetCustomExitFromException leaves IEc=0 (interrupts disabled).
+            // The game handler runs with interrupts off, processes the IRQ,
+            // acks I_STAT, and then calls B(0x17) ReturnFromException which
+            // does the RFE to re-enable interrupts.
+            //
+            // If we did RFE here, the pending I_STAT bit would immediately
+            // re-trigger an interrupt before the game can execute a single
+            // instruction, creating an infinite re-trigger loop.
 
-                flog::logf(
-                    sys_log_,
-                    sys_clock_,
-                    flog::Level::warn,
-                    "CPU",
-                    "HLE empty RAM vector hit=%" PRIu64
-                    " code=%u EPC=0x%08X BadVAddr=0x%08X Cause=0x%08X Status=0x%08X EPCInstr=0x%08X%s%s rs=%u(0x%08X) rt=%u(0x%08X) imm=%d eff=0x%08X%s",
-                    exc_vec_hits_,
-                    code,
-                    epc,
-                    bad,
-                    cause,
-                    status,
-                    epc_instr,
-                    store_name[0] ? " [" : "",
-                    store_name[0] ? store_name : "",
-                    rs_i,
-                    base_v,
-                    rt_i,
-                    rt_v,
-                    (int)imm_i,
-                    eff,
-                    store_name[0] ? "]" : ""
-                );
-                flog::logf(
-                    sys_io_,
-                    sys_clock_,
-                    flog::Level::warn,
-                    "CPU",
-                    "HLE empty RAM vector hit=%" PRIu64
-                    " code=%u EPC=0x%08X BadVAddr=0x%08X Cause=0x%08X Status=0x%08X EPCInstr=0x%08X%s%s rs=%u(0x%08X) rt=%u(0x%08X) imm=%d eff=0x%08X%s",
-                    exc_vec_hits_,
-                    code,
-                    epc,
-                    bad,
-                    cause,
-                    status,
-                    epc_instr,
-                    store_name[0] ? " [" : "",
-                    store_name[0] ? store_name : "",
-                    rs_i,
-                    base_v,
-                    rt_i,
-                    rt_v,
-                    (int)imm_i,
-                    eff,
-                    store_name[0] ? "]" : ""
-                );
-            }
-
-            if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exc))
-            {
-                rlog::logger_logf(
-                    logger_, rlog::Level::debug, rlog::Category::exc, "HLE empty RAM exception vector -> 0xBFC00180"
-                );
-            }
-            pc_ = 0xBFC0'0180u;
+            pc_ = gpr_[31]; // jump to saved RA
             r.kind = StepResult::Kind::ok;
             r.instr = 0;
             return r;
         }
+
+        // Normal RFE: restore previous mode/IE bits and return to EPC.
+        uint32_t st = cop0_[COP0_STATUS];
+        st = (st & ~0x3Fu) | ((st >> 2) & 0x0Fu);
+        cop0_[COP0_STATUS] = st;
+
+        pc_ = epc;
+        r.kind = StepResult::Kind::ok;
+        r.instr = 0;
+        return r;
     }
 
-    // Exception vector en RAM (BEV=0): 0x80000080 (normal).
+    // Exception vector en RAM (BEV=0): 0x80000080 (normal, non-fastboot).
     // Si un handler est présent, on le laisse s'exécuter, donc pas de return ici.
 
     // -----------------------------
@@ -1552,6 +2081,73 @@ Cpu::StepResult Cpu::step()
         if (logger_)
         {
             rlog::logger_logf(logger_, rlog::Level::error, rlog::Category::exc, "Stop-on-pc: PC=0x%08X", pc_);
+            rlog::logger_logf(logger_, rlog::Level::error, rlog::Category::exc, "Instr@PC=0x%08X", instr);
+            // Dump a small window of instructions around PC for quick inspection.
+            for (int i = -4; i <= 4; ++i)
+            {
+                const uint32_t vaddr = pc_ + (uint32_t)(i * 4);
+                uint32_t w = 0;
+                Bus::MemFault mf{};
+                if (bus_.read_u32(virt_to_phys(vaddr), w, mf))
+                {
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::error,
+                        rlog::Category::exc,
+                        "  [%+d] PC=0x%08X INSTR=0x%08X",
+                        i,
+                        vaddr,
+                        w
+                    );
+                }
+            }
+            rlog::logger_logf(
+                logger_,
+                rlog::Level::error,
+                rlog::Category::exc,
+                "Regs: a0=0x%08X a1=0x%08X a2=0x%08X v0=0x%08X v1=0x%08X t1=0x%08X t2=0x%08X ra=0x%08X",
+                gpr_[4], gpr_[5], gpr_[6], gpr_[2], gpr_[3], gpr_[9], gpr_[10], gpr_[31]
+            );
+            rlog::logger_logf(
+                logger_,
+                rlog::Level::error,
+                rlog::Category::exc,
+                "Regs: s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X sp=0x%08X",
+                gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[29]
+            );
+
+            // Dump a few words at s1/s2 (often point to structs in BIOS loops).
+            const uint32_t ptrs[2] = { gpr_[17], gpr_[18] };
+            const char* names[2] = { "s1", "s2" };
+            for (int pi = 0; pi < 2; ++pi)
+            {
+                const uint32_t evt_addr = ptrs[pi];
+                if (evt_addr < 0x0020'0000u || (evt_addr >= 0x8000'0000u && evt_addr < 0x8020'0000u) ||
+                    (evt_addr >= 0xA000'0000u && evt_addr < 0xA020'0000u))
+                {
+                    uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                    Bus::MemFault mf{};
+                    const uint32_t p0 = virt_to_phys(evt_addr + 0u);
+                    const uint32_t p1 = virt_to_phys(evt_addr + 4u);
+                    const uint32_t p2 = virt_to_phys(evt_addr + 8u);
+                    const uint32_t p3 = virt_to_phys(evt_addr + 12u);
+                    const int ok0 = bus_.read_u32(p0, w0, mf) ? 1 : 0;
+                    const int ok1 = bus_.read_u32(p1, w1, mf) ? 1 : 0;
+                    const int ok2 = bus_.read_u32(p2, w2, mf) ? 1 : 0;
+                    const int ok3 = bus_.read_u32(p3, w3, mf) ? 1 : 0;
+                    if (ok0 && ok1 && ok2 && ok3)
+                    {
+                        rlog::logger_logf(
+                            logger_,
+                            rlog::Level::error,
+                            rlog::Category::exc,
+                            "%s@0x%08X: [0]=0x%08X [4]=0x%08X [8]=0x%08X [C]=0x%08X",
+                            names[pi],
+                            evt_addr, w0, w1, w2, w3
+                        );
+                    }
+                }
+            }
             rlog::logger_logf(logger_, rlog::Level::error, rlog::Category::exc, "Recent trace (latest last):");
             for (uint32_t i = 0; i < 64; ++i)
             {
@@ -1761,24 +2357,41 @@ Cpu::StepResult Cpu::step()
     // slot.
     pc_ += 4;
 
-    // Reset "just scheduled" ici: il correspond uniquement à la branche posée pendant CETTE step().
-    branch_just_scheduled_ = false;
+    // NOTE: branch_just_scheduled_ is now reset at the top of step(), before the
+    // IRQ check, so that delay-slot detection works correctly for exceptions.
 
     // COP0 Count: utilisé par le BIOS pour des "delays" (busy-wait / timeouts).
     // Si Count ne bouge jamais, le BIOS peut rester bloqué indéfiniment.
-    // Modèle simplifié: +1 par instruction (pas cycle-accurate, mais suffisant pour la démo).
-    cop0_[COP0_COUNT] += 1;
-    bus_.tick(1);
+    // Modèle simplifié: cycle_multiplier_ par instruction (default 2 approximates real R3000).
+    cop0_[COP0_COUNT] += cycle_multiplier_;
+    // Bus tick batching: keep CPU stepping cheap while advancing HW with correct cycle deltas.
+    // This is especially important in UE where we have a strict wall-clock budget per frame.
+    // Use cycle_multiplier_ to better match real timing (SPU sample generation, timers, etc).
+    bus_tick_accum_ += cycle_multiplier_;
+    if (bus_tick_accum_ >= bus_tick_batch_)
+    {
+        bus_.tick(bus_tick_accum_);
+        bus_tick_accum_ = 0;
+    }
 
     // HLE: pseudo "vblank/tick" pour débloquer le kernel quand on n'a pas encore de GPU/VBlank réel.
     // On l'active généralement via C(00h) EnqueueTimerAndVblankIrqs().
-    if (hle_pseudo_vblank_)
+    // IMPORTANT: Only use this when:
+    // - hle_vectors_ = 1 (HLE mode, not real BIOS)
+    // - use_gpu_vblank_ = 0 (no real GPU generating VBlanks)
+    // The HLE pseudo-vblank fires at ~333Hz which corrupts game timing if a real GPU is present.
+    if (hle_pseudo_vblank_ && hle_vectors_ && !use_gpu_vblank_)
     {
         // Valeur arbitraire (pas cycle-accurate). Suffit pour casser les boucles "wait".
         hle_vblank_div_++;
         if (hle_vblank_div_ >= 100000u)
         {
             hle_vblank_div_ = 0;
+
+            // Always set VBlank IRQ in I_STAT. This triggers the BIOS exception
+            // handler when I_MASK bit 0 is enabled. Without this, the BIOS
+            // VSync() function times out waiting for an IRQ that never arrives.
+            bus_.set_i_stat_bit(0);
 
             // Skip HLE event manipulation when the BIOS has installed real
             // VBlank IRQ handling (I_MASK bit 0 set).  The real kernel
@@ -2012,7 +2625,7 @@ Cpu::StepResult Cpu::step()
                             // Démo pédagogique: le NOP canonique sur MIPS est: SLL r0, r0, 0
                             const uint32_t d = rd(instr);
                             const uint32_t t = rt(instr);
-                            const uint32_t s = shamt(instr);
+                            const uint32_t s = shamt(instr) & 31u;
                             if ((d & 31u) != 0u)
                             {
                                 wb_reg = d;
@@ -2028,7 +2641,7 @@ Cpu::StepResult Cpu::step()
                             // SRL rd, rt, shamt (logical shift right, zero-fill)
                             const uint32_t d = rd(instr);
                             const uint32_t t = rt(instr);
-                            const uint32_t s = shamt(instr);
+                            const uint32_t s = shamt(instr) & 31u;
                             if ((d & 31u) != 0u)
                             {
                                 wb_reg = d;
@@ -2044,7 +2657,7 @@ Cpu::StepResult Cpu::step()
                             // SRA rd, rt, shamt (arithmetic shift right, sign-fill)
                             const uint32_t d = rd(instr);
                             const uint32_t t = rt(instr);
-                            const uint32_t s = shamt(instr);
+                            const uint32_t s = shamt(instr) & 31u;
                             const uint32_t v = (uint32_t)(((int32_t)gpr_[t]) >> s);
                             if ((d & 31u) != 0u)
                             {
@@ -2157,10 +2770,7 @@ Cpu::StepResult Cpu::step()
                             if (svc == 0xFF00u)
                             {
                                 const uint32_t v = gpr_[4];
-                                // On imprime sur stderr pour éviter d'être "noyé" par le --pretty/logs
-                                // (stdout). Ça rend le printf guest beaucoup plus visible en live.
-                                std::fprintf(stderr, "[GUEST] %u (0x%08X)\n", v, v);
-                                std::fflush(stderr);
+                                emu::logf(emu::LogLevel::info, "GUEST", "%u (0x%08X)", v, v);
                             }
                             else if (svc == 0xFF02u)
                             {
@@ -3065,7 +3675,11 @@ Cpu::StepResult Cpu::step()
                 if (!load_u32(base, w))
                     break;
                 const uint32_t k = addr & 3u;
-                uint32_t v = gpr_[t];
+                // If there's a pending load for the same register (e.g., from a preceding LWR),
+                // use the pending value instead of gpr_[t]. This handles LWL/LWR pairs correctly.
+                uint32_t v = (pending_load_.valid && (pending_load_.reg & 31u) == t)
+                                 ? pending_load_.value
+                                 : gpr_[t];
                 switch (k)
                 {
                     case 0:
@@ -3101,7 +3715,11 @@ Cpu::StepResult Cpu::step()
                 if (!load_u32(base, w))
                     break;
                 const uint32_t k = addr & 3u;
-                uint32_t v = gpr_[t];
+                // If there's a pending load for the same register (e.g., from a preceding LWL),
+                // use the pending value instead of gpr_[t]. This handles LWL/LWR pairs correctly.
+                uint32_t v = (pending_load_.valid && (pending_load_.reg & 31u) == t)
+                                 ? pending_load_.value
+                                 : gpr_[t];
                 switch (k)
                 {
                     case 0:
@@ -3284,9 +3902,12 @@ Cpu::StepResult Cpu::step()
                     // CTC2: écriture CPU -> ctrl reg GTE
                     gte_.write_ctrl(d, gpr_[t]);
                 }
-                else if (rs_field == 0x10)
+                else if (rs_field & 0x10)
                 {
                     // CO: commande GTE (RTPS/MVMVA/NCLIP/...)
+                    // Bit 25 of the instruction (= bit 4 of rs_field) marks a COP2 CO
+                    // command.  Bits 24-21 carry sf/lm flags and are NOT always zero,
+                    // so we must test the bit, not compare rs_field == 0x10.
                     if (!gte_.execute(instr))
                     {
                         raise_exception(EXC_RI, 0, r.pc);
@@ -3294,7 +3915,6 @@ Cpu::StepResult Cpu::step()
                 }
                 else
                 {
-                    // Commandes GTE (RTPS/MVMVA/...) viendront ici (rs=0x10/0x12 selon forme).
                     raise_exception(EXC_RI, 0, r.pc);
                 }
                 break;
@@ -3652,6 +4272,68 @@ Cpu::StepResult Cpu::step()
                     phys,
                     mem_val
                 );
+            }
+        }
+    }
+
+    // =====================================================
+    // OPTIONAL: Advanced register trace mode
+    // =====================================================
+    // When enabled, logs every instruction with full register state
+    // in the configured PC range. Also watches for specific values.
+    if (reg_trace_.enabled)
+    {
+        const uint32_t trace_pc = r.pc;
+        const int in_range = (reg_trace_.pc_start == 0 && reg_trace_.pc_end == 0) ||
+                             (trace_pc >= reg_trace_.pc_start && trace_pc <= reg_trace_.pc_end);
+
+        if (in_range)
+        {
+            // Check if watch value appears in any register
+            int watch_hit = 0;
+            int watch_reg = -1;
+            if (reg_trace_.watch_value != 0)
+            {
+                for (int i = 0; i < 32; ++i)
+                {
+                    if (gpr_[i] == reg_trace_.watch_value)
+                    {
+                        watch_hit = 1;
+                        watch_reg = i;
+                        break;
+                    }
+                }
+            }
+
+            // Log instruction with key registers
+            emu::logf(emu::LogLevel::info, "REGTRACE",
+                "PC=%08X I=%08X v0=%08X v1=%08X a0=%08X a1=%08X a2=%08X a3=%08X t0=%08X t1=%08X sp=%08X ra=%08X",
+                trace_pc, instr,
+                gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7],
+                gpr_[8], gpr_[9], gpr_[29], gpr_[31]);
+
+            // If watch value hit, log extra detail
+            if (watch_hit)
+            {
+                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                    "WATCH HIT! PC=%08X value=0x%08X in %s (r%d)",
+                    trace_pc, reg_trace_.watch_value, reg_name(watch_reg), watch_reg);
+
+                // Dump all 32 registers
+                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                    "FULL DUMP: r0-r7:  %08X %08X %08X %08X %08X %08X %08X %08X",
+                    gpr_[0], gpr_[1], gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
+                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                    "FULL DUMP: r8-r15: %08X %08X %08X %08X %08X %08X %08X %08X",
+                    gpr_[8], gpr_[9], gpr_[10], gpr_[11], gpr_[12], gpr_[13], gpr_[14], gpr_[15]);
+                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                    "FULL DUMP: r16-r23: %08X %08X %08X %08X %08X %08X %08X %08X",
+                    gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[20], gpr_[21], gpr_[22], gpr_[23]);
+                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                    "FULL DUMP: r24-r31: %08X %08X %08X %08X %08X %08X %08X %08X",
+                    gpr_[24], gpr_[25], gpr_[26], gpr_[27], gpr_[28], gpr_[29], gpr_[30], gpr_[31]);
+                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                    "HI=%08X LO=%08X", hi_, lo_);
             }
         }
     }
