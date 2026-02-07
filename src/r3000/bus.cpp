@@ -221,6 +221,8 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
     if (phys >= kCdromBase && phys < kCdromBase + kCdromSize)
     {
         out = cdrom_ ? cdrom_->mmio_read8(phys) : 0;
+        // Check if CDROM IRQ edge occurred (e.g., after reading status that clears IRQ)
+        check_cdrom_irq_edge();
         return true;
     }
 
@@ -466,6 +468,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         {
             out = 0;
         }
+        check_cdrom_irq_edge();
         return true;
     }
 
@@ -545,6 +548,8 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         {
             cdrom_->mmio_write8(phys, v);
         }
+        // Check for IRQ edge after write (command execution, IRQ ack, etc.)
+        check_cdrom_irq_edge();
         return true;
     }
 
@@ -1221,6 +1226,28 @@ static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t c
     }
 }
 
+// ================== CDROM IRQ EDGE CHECK ==================
+
+void Bus::check_cdrom_irq_edge()
+{
+    if (!cdrom_)
+        return;
+
+    // CDROM IRQ: edge-triggered into I_STAT bit 2.
+    // On real PS1, I_STAT latches on a 0->1 transition and is cleared by
+    // writing 0 to I_STAT (not by the line going low).
+    const uint8_t cdirq = cdrom_->irq_line();
+    if (cdirq && !cdrom_irq_prev_)
+    {
+        i_stat_ |= (1u << 2);
+        emu::logf(emu::LogLevel::info, "BUS", "CDROM IRQ edge: i_stat=0x%04X", (unsigned)i_stat_);
+        // BIOS event system: mark CDROM class events as ready.
+        // This mirrors the kernel DeliverEvent() that would normally run in the IRQ handler.
+        deliver_events_for_class(ram_, ram_size_, 0x28u);
+    }
+    cdrom_irq_prev_ = cdirq;
+}
+
 // ================== TICK ==================
 
 void Bus::tick(uint32_t cycles)
@@ -1368,18 +1395,11 @@ void Bus::tick(uint32_t cycles)
     {
         cdrom_->tick(cycles);
 
-        // CDROM IRQ: edge-triggered into I_STAT bit 2.
-        // On real PS1, I_STAT latches on a 0->1 transition and is cleared by
-        // writing 0 to I_STAT (not by the line going low).
-        const uint8_t cdirq = cdrom_->irq_line();
-        if (cdirq && !cdrom_irq_prev_)
-        {
-            i_stat_ |= (1u << 2);
-            // BIOS event system: mark CDROM class events as ready.
-            // This mirrors the kernel DeliverEvent() that would normally run in the IRQ handler.
-            deliver_events_for_class(ram_, ram_size_, 0x28u);
-        }
-        cdrom_irq_prev_ = cdirq;
+        // CDROM IRQ edge detection is now done in check_cdrom_irq_edge() which
+        // is called after every CDROM register access. This ensures I_STAT bit 2
+        // is set before the game can poll the CDROM for the IRQ type.
+        // We still do a check here as a fallback for async IRQs (reads, etc.).
+        check_cdrom_irq_edge();
     }
 
     // If BIOS never enables IRQs (I_MASK stays 0), it can hang forever waiting on events.

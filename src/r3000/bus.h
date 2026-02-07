@@ -73,6 +73,11 @@ class Bus
     // Modèle très simplifié: on avance d'un certain nombre de cycles (souvent 1/cpu step).
     void tick(uint32_t cycles);
 
+    // Check CDROM IRQ edge and latch into I_STAT bit 2.
+    // Called after every CDROM register access to ensure I_STAT is updated
+    // before the CPU can poll the CDROM again.
+    void check_cdrom_irq_edge();
+
     // Debug: trace ciblé des écritures RAM "sensibles" (vecteurs low RAM, watch address).
     // Objectif: voir si le BIOS installe/écrase réellement les handlers en RAM, ou si tout reste à 0.
     void set_trace_vectors(int enabled)

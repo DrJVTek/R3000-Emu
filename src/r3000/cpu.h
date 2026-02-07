@@ -361,8 +361,10 @@ class Cpu
 
     // Deliver an event (set matching events from busy to ready).
     // Same logic as B(07h) DeliverEvent, but callable from the HLE exception handler.
-    void hle_deliver_event(uint32_t cls, uint32_t spec)
+    // Returns number of events matched.
+    int hle_deliver_event(uint32_t cls, uint32_t spec)
     {
+        int found = 0;
         for (uint32_t i = 0; i < (uint32_t)(sizeof(hle_events_) / sizeof(hle_events_[0])); ++i)
         {
             HleEvent& e = hle_events_[i];
@@ -370,12 +372,10 @@ class Cpu
             {
                 e.status &= ~0x2000u;
                 e.status |= 0x4000u;
-                // TEMP: diagnostic
-                static int s_deliver_diag = 0;
-                // Debug: event match diagnostic (disabled - use emu::logf in cpp if needed)
-                (void)s_deliver_diag;
+                found++;
             }
         }
+        return found;
     }
 
     uint32_t hle_vblank_div_{0};

@@ -569,11 +569,6 @@ Cpu::StepResult Cpu::step()
     // de vrais stubs à 0xA0/0xB0/0xC0, on doit exécuter le code RAM normal, sinon on bloque des
     // init (dont le boot CD).
     //
-    // HOWEVER: in fast-boot mode (hle_vectors_ enabled), the BIOS kernel
-    // tables are NOT initialised.  If game code installs stubs at these
-    // vectors (via BIOS calls we HLE'd), the stub code would try to use
-    // uninitialised function-pointer tables and crash.  We therefore
-    // ALWAYS intercept with HLE when hle_vectors_ is active.
     int hle_vec_gate = 0;
     if (hle_vectors_ && (pc_ == 0x0000'00A0u || pc_ == 0x0000'00B0u || pc_ == 0x0000'00C0u))
     {
@@ -584,7 +579,13 @@ Cpu::StepResult Cpu::step()
             putchar_cb_(ch, putchar_cb_user_);
         }
 
-        hle_vec_gate = 1;
+        // Only intercept if vector location is empty (zeros).
+        // Once BIOS installs real stubs, we let them run.
+        uint32_t w0 = 0, w1 = 0;
+        Bus::MemFault f{};
+        const int ok0 = bus_.read_u32(pc_, w0, f) ? 1 : 0;
+        const int ok1 = bus_.read_u32(pc_ + 4u, w1, f) ? 1 : 0;
+        hle_vec_gate = (ok0 && ok1 && w0 == 0 && w1 == 0) ? 1 : 0;
     }
 
     if (hle_vec_gate)
@@ -1835,7 +1836,37 @@ Cpu::StepResult Cpu::step()
 
         const int log_it = (exc_vec_hits_ <= 16u) || ((exc_vec_hits_ & (exc_vec_hits_ - 1u)) == 0u);
 
-        if (code == 0u)
+        // Check if BIOS has installed real exception handlers via SysEnqIntRP.
+        // The CDROM driver uses priority 2 chain at RAM[0x108].
+        // If a handler is registered, let the BIOS code run instead of HLE.
+        Bus::MemFault rmf{};
+        uint32_t cdrom_chain = 0;
+        (void)bus_.read_u32(0x108u, cdrom_chain, rmf); // Priority 2 = CDROM
+        const int bios_has_irq_handlers = (cdrom_chain != 0) ? 1 : 0;
+
+        // If BIOS has registered IRQ handlers via SysEnqIntRP, let its code run.
+        // The BIOS exception handler at 0x80000080 will dispatch to the chain.
+        if (bios_has_irq_handlers && code == 0u)
+        {
+            uint32_t w0 = 0;
+            (void)bus_.read_u32(0x80u, w0, rmf); // Read first word at 0x80000080 (phys 0x80)
+            if (w0 != 0)
+            {
+                // Real BIOS exception handler code exists - execute it normally
+                if (log_it && sys_has_clock_)
+                {
+                    flog::logf(sys_io_, sys_clock_, flog::Level::info, "CPU",
+                        "EXC VEC 0x80000080: BIOS handlers present (chain=0x%08X), running BIOS code",
+                        cdrom_chain);
+                }
+                // Don't intercept - skip HLE processing and let normal fetch/execute
+                // continue at PC=0x80000080 where the BIOS exception handler lives.
+                // DO NOT do RFE here - the BIOS handler will do that after processing.
+                goto skip_hle_exception_handling;
+            }
+        }
+
+        if (code == 0u && !bios_has_irq_handlers)
         {
             // Helper: save full CPU context to TCB
             auto save_context_to_tcb = [&]() {
@@ -1908,9 +1939,10 @@ Cpu::StepResult Cpu::step()
                 if (pending & 0x0004u)
                 {
                     uint32_t cd_spec = 0x0004u;
+                    uint8_t cd_irq_type = 0;
                     if (bus_.cdrom())
                     {
-                        const uint8_t cd_irq_type = bus_.cdrom()->irq_flags_raw() & 0x07u;
+                        cd_irq_type = bus_.cdrom()->irq_flags_raw() & 0x07u;
                         switch (cd_irq_type)
                         {
                             case 1: cd_spec = 0x0002u; break;
@@ -1920,7 +1952,9 @@ Cpu::StepResult Cpu::step()
                             case 5: cd_spec = 0x0020u; break;
                         }
                     }
-                    hle_deliver_event(0xF000'0003u, cd_spec);
+                    const int matched = hle_deliver_event(0xF000'0003u, cd_spec);
+                    emu::logf(emu::LogLevel::info, "HLE", "CDROM IRQ type=%u spec=0x%04X delivered to %d event(s)",
+                        (unsigned)cd_irq_type, cd_spec, matched);
 
                     // Acknowledge CDROM IRQ register to allow next INT
                     if (bus_.cdrom())
@@ -2017,8 +2051,9 @@ Cpu::StepResult Cpu::step()
         return r;
     }
 
+skip_hle_exception_handling:
     // Exception vector en RAM (BEV=0): 0x80000080 (normal, non-fastboot).
-    // Si un handler est présent, on le laisse s'exécuter, donc pas de return ici.
+    // When BIOS handlers exist, we jump here to let normal execution proceed.
 
     // -----------------------------
     // 1) FETCH
