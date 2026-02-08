@@ -1,6 +1,7 @@
 #include "core.h"
 
 #include <new>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -8,19 +9,18 @@
 #include "../r3000/cpu.h"
 #include "../log/emu_log.h"
 
+// Boot start time for milestone tracking
+static std::chrono::steady_clock::time_point g_boot_start;
+static bool g_boot_start_set = false;
+static uint64_t g_step_count = 0;
+
 namespace emu
 {
 
-// Callback for CDROM garbage SetLoc detection - dumps CPU state for debugging
-static void on_garbage_setloc(uint32_t lba, uint32_t disc_end, void* user)
+// Callback for CDROM garbage SetLoc detection
+static void on_garbage_setloc(uint32_t lba, uint32_t disc_end, void* /*user*/)
 {
-    Core* core = static_cast<Core*>(user);
-    if (core && core->cpu())
-    {
-        char reason[128];
-        std::snprintf(reason, sizeof(reason), "Garbage SetLoc: LBA=%u >= disc_end=%u", lba, disc_end);
-        core->cpu()->dump_debug_state(reason);
-    }
+    emu::logf(emu::LogLevel::warn, "CDROM", "Garbage SetLoc: LBA=%u >= disc_end=%u", lba, disc_end);
 }
 
 static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nullptr)
@@ -253,7 +253,81 @@ r3000::Cpu::StepResult Core::step()
         r.kind = r3000::Cpu::StepResult::Kind::halted;
         return r;
     }
-    return cpu_->step();
+
+    // Initialize boot timer on first step
+    if (!g_boot_start_set)
+    {
+        g_boot_start = std::chrono::steady_clock::now();
+        g_boot_start_set = true;
+        emu::logf(emu::LogLevel::info, "MILESTONE", "=== BOOT START (step 0) ===");
+    }
+
+    const uint32_t pc_before = cpu_->pc();
+    const auto res = cpu_->step();
+    ++g_step_count;
+
+    // MILESTONE 1: BIOS → Shell/Game (PC goes from 0xBFCxxxxx to 0x800xxxxx)
+    if (!milestones_.bios_to_shell_logged)
+    {
+        const uint32_t pc_after = res.pc;
+        const bool was_bios = (pc_before >= 0xBFC00000u && pc_before < 0xC0000000u);
+        const bool now_ram = (pc_after >= 0x80000000u && pc_after < 0x80200000u);
+        if (was_bios && now_ram)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(now - g_boot_start).count();
+            milestones_.bios_to_shell_step = g_step_count;
+            milestones_.bios_to_shell_time = elapsed_ms;
+            milestones_.bios_to_shell_logged = true;
+            emu::logf(emu::LogLevel::info, "MILESTONE",
+                "=== BIOS → SHELL/GAME: step=%llu time=%.1fms PC=0x%08X→0x%08X ===",
+                (unsigned long long)g_step_count, elapsed_ms, pc_before, pc_after);
+            emu::logf(emu::LogLevel::info, "MILESTONE",
+                "[DuckStation comparison: BIOS→Shell typically ~1800ms]");
+        }
+    }
+
+    // MILESTONE 2: First GPU primitives (check GPU frame stats)
+    if (!milestones_.first_gpu_prim_logged && milestones_.bios_to_shell_logged)
+    {
+        const auto& stats = gpu_.frame_stats();
+        if (stats.triangles > 0 || stats.quads > 0 || stats.rects > 0)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(now - g_boot_start).count();
+            milestones_.first_gpu_prim_step = g_step_count;
+            milestones_.first_gpu_prim_time = elapsed_ms;
+            milestones_.first_gpu_prim_logged = true;
+            emu::logf(emu::LogLevel::info, "MILESTONE",
+                "=== FIRST GPU PRIMITIVES: step=%llu time=%.1fms (tri=%u quad=%u rect=%u) ===",
+                (unsigned long long)g_step_count, elapsed_ms,
+                stats.triangles, stats.quads, stats.rects);
+            emu::logf(emu::LogLevel::info, "MILESTONE",
+                "[DuckStation comparison: First logo ~2000ms, License text ~4500ms]");
+        }
+    }
+
+    // MILESTONE 3: After ~200 frames with primitives (license likely done)
+    if (!milestones_.license_end_logged && milestones_.first_gpu_prim_logged)
+    {
+        const uint32_t frame_count = gpu_.vram_frame_count();
+        // Ridge Racer: license screen is around frame 150-180, game starts ~200
+        if (frame_count >= 200)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(now - g_boot_start).count();
+            milestones_.license_end_step = g_step_count;
+            milestones_.license_end_time = elapsed_ms;
+            milestones_.license_end_logged = true;
+            emu::logf(emu::LogLevel::info, "MILESTONE",
+                "=== LICENSE END (frame %u): step=%llu time=%.1fms ===",
+                frame_count, (unsigned long long)g_step_count, elapsed_ms);
+            emu::logf(emu::LogLevel::info, "MILESTONE",
+                "[DuckStation comparison: Game starts ~8000-10000ms after boot]");
+        }
+    }
+
+    return res;
 }
 
 uint32_t Core::pc() const

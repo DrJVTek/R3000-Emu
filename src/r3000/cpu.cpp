@@ -252,53 +252,6 @@ void Cpu::reset(uint32_t reset_pc)
     gte_.reset();
 }
 
-void Cpu::dump_debug_state(const char* reason)
-{
-    emu::logf(emu::LogLevel::error, "CPU", "=== DEBUG DUMP: %s ===", reason ? reason : "unknown");
-    emu::logf(emu::LogLevel::error, "CPU", "PC=0x%08X EPC=0x%08X Cause=0x%08X Status=0x%08X",
-        pc_, cop0_[COP0_EPC], cop0_[COP0_CAUSE], cop0_[COP0_STATUS]);
-    emu::logf(emu::LogLevel::error, "CPU", "RA=$31=0x%08X SP=$29=0x%08X FP=$30=0x%08X GP=$28=0x%08X",
-        gpr_[31], gpr_[29], gpr_[30], gpr_[28]);
-    emu::logf(emu::LogLevel::error, "CPU", "A0=$4=0x%08X A1=$5=0x%08X A2=$6=0x%08X A3=$7=0x%08X",
-        gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
-    emu::logf(emu::LogLevel::error, "CPU", "V0=$2=0x%08X V1=$3=0x%08X T0=$8=0x%08X T1=$9=0x%08X",
-        gpr_[2], gpr_[3], gpr_[8], gpr_[9]);
-    emu::logf(emu::LogLevel::error, "CPU", "S0=$16=0x%08X S1=$17=0x%08X S2=$18=0x%08X S3=$19=0x%08X",
-        gpr_[16], gpr_[17], gpr_[18], gpr_[19]);
-
-    // Dump stack (16 words above and 8 words below SP)
-    const uint32_t sp = gpr_[29];
-    emu::logf(emu::LogLevel::error, "CPU", "--- Stack around SP=0x%08X ---", sp);
-    for (int i = -16; i <= 8; i += 4)
-    {
-        const uint32_t addr = sp + (uint32_t)(i * 4);
-        uint32_t val = 0;
-        if ((addr & 0xE000'0000u) == 0x8000'0000u || (addr & 0xE000'0000u) == 0x0000'0000u)
-        {
-            // Try to read from RAM
-            const uint32_t phys = addr & 0x001F'FFFFu;
-            Bus::MemFault fault{};
-            if (bus_.read_u32(phys, val, fault))
-            {
-                emu::logf(emu::LogLevel::error, "CPU", "  [SP%+d] 0x%08X = 0x%08X", i * 4, addr, val);
-            }
-        }
-    }
-
-    // Dump recent PC trace (last 32 instructions)
-    emu::logf(emu::LogLevel::error, "CPU", "--- Recent PC trace (latest last) ---");
-    for (uint32_t i = 0; i < 32; ++i)
-    {
-        const uint32_t pos = (recent_pos_ - 32 + i) & 255u;
-        const uint32_t trace_pc = recent_pc_[pos];
-        const uint32_t trace_instr = recent_instr_[pos];
-        if (trace_pc != 0 || trace_instr != 0)
-        {
-            emu::logf(emu::LogLevel::error, "CPU", "  PC=0x%08X INSTR=0x%08X", trace_pc, trace_instr);
-        }
-    }
-    emu::logf(emu::LogLevel::error, "CPU", "=== END DEBUG DUMP ===");
-}
 
 void Cpu::set_reg(uint32_t idx, uint32_t v)
 {

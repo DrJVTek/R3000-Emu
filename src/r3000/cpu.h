@@ -167,9 +167,6 @@ class Cpu
 
     void set_cop0(uint32_t idx, uint32_t v) { if (idx < 32) cop0_[idx] = v; }
 
-    // Debug: dump CPU state (PC, registers, recent trace) via emu::logf
-    void dump_debug_state(const char* reason);
-
     // Advanced register trace mode - logs every instruction with full register state
     // in a PC range. Use set_reg_trace() to enable and configure.
     struct RegTraceConfig
