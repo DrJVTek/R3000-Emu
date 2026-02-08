@@ -12,6 +12,9 @@
 namespace r3000
 {
 
+// Forward declaration for use in CDROM IRQ callback.
+static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t cls_match);
+
 Bus::Bus(
     uint8_t* ram,
     uint32_t ram_size,
@@ -48,6 +51,26 @@ Bus::Bus(
         spu_->set_irq_callback([this]() {
             i_stat_ |= (1u << 9);  // SPU IRQ = bit 9
         });
+    }
+
+    // Set up CDROM IRQ callback: push-model notification like DuckStation.
+    // When CDROM IRQ line changes, immediately update I_STAT bit 2.
+    if (cdrom_)
+    {
+        cdrom_->set_irq_callback([](int irq_state, void* user) {
+            Bus* bus = static_cast<Bus*>(user);
+            // Edge detection: only latch on rising edge (0->1).
+            // This matches real PS1 behavior where I_STAT latches on rising edge
+            // and is only cleared by writing to I_STAT.
+            if (irq_state && !bus->cdrom_irq_prev_)
+            {
+                bus->i_stat_ |= (1u << 2);  // CDROM IRQ = bit 2
+                emu::logf(emu::LogLevel::info, "BUS", "CDROM IRQ push: i_stat=0x%04X", (unsigned)bus->i_stat_);
+                // BIOS event system: mark CDROM class events as ready.
+                deliver_events_for_class(bus->ram_, bus->ram_size_, 0x28u);
+            }
+            bus->cdrom_irq_prev_ = (uint8_t)irq_state;
+        }, this);
     }
 }
 
@@ -483,7 +506,12 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
             switch (reg)
             {
             case 0: out = timers_[ch].count; break;
-            case 1: out = timers_[ch].mode; break;
+            case 1:
+                // Reading mode register returns current value then clears bits 11-12
+                // (target reached and overflow flags). This is PS1 hardware behavior.
+                out = timers_[ch].mode;
+                timers_[ch].mode &= ~0x1800u; // Clear bits 11 (0x800) and 12 (0x1000)
+                break;
             case 2: out = timers_[ch].target; break;
             default: out = 0; break;
             }
@@ -828,6 +856,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         const int dir = (v >> 0) & 1;
                         const int mode = (v >> 9) & 3;
 
+                        emu::logf(emu::LogLevel::info, "BUS", "DMA2 GPU dir=%d mode=%d madr=0x%08X bcr=0x%08X",
+                            dir, mode, dma_[ch].madr, dma_[ch].bcr);
+
                         if (dir == 1) // To GPU
                         {
                             if (mode == 0 || mode == 1) // Burst or Block
@@ -849,13 +880,23 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             else if (mode == 2) // Linked list
                             {
                                 uint32_t node = dma_[ch].madr & 0x1FFFFF;
+                                uint32_t start_node = node;
+                                uint32_t total_ll_words = 0;
+                                uint32_t ll_nodes = 0;
+                                uint32_t first_header = 0;
+                                uint32_t second_header = 0;
+                                bool hit_safety = false;
                                 for (int safety = 0; safety < 0x100000; ++safety)
                                 {
                                     uint32_t header = (uint32_t)ram_[node] |
                                                       ((uint32_t)ram_[node + 1] << 8) |
                                                       ((uint32_t)ram_[node + 2] << 16) |
                                                       ((uint32_t)ram_[node + 3] << 24);
+                                    if (ll_nodes == 0) first_header = header;
+                                    if (ll_nodes == 1) second_header = header;
                                     uint32_t words = header >> 24;
+                                    total_ll_words += words;
+                                    ll_nodes++;
                                     for (uint32_t i = 0; i < words; ++i)
                                     {
                                         uint32_t off2 = (node + 4 + i * 4) & 0x1FFFFF;
@@ -868,7 +909,10 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                     if ((header & 0x00FFFFFF) == 0x00FFFFFF)
                                         break;
                                     node = header & 0x1FFFFF;
+                                    if (safety == 0x100000 - 1) hit_safety = true;
                                 }
+                                emu::logf(emu::LogLevel::info, "BUS", "DMA2 LL: start=0x%05X nodes=%u words=%u hdr0=0x%08X hdr1=0x%08X %s",
+                                    start_node, ll_nodes, total_ll_words, first_header, second_header, hit_safety ? "SAFETY" : "");
                             }
                         }
                         dma_finish(ch);
@@ -992,6 +1036,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         uint32_t words = dma_[ch].bcr & 0xFFFF;
                         if (words == 0) words = 0x10000;
                         uint32_t ma = dma_[ch].madr & 0x1FFFFF;
+
+                        emu::logf(emu::LogLevel::info, "BUS", "DMA6 OTC: madr=0x%08X bcr=0x%08X words=%u (OT tail at 0x%05X)",
+                            dma_[ch].madr, dma_[ch].bcr, words, ma);
 
                         for (uint32_t i = 0; i < words; ++i)
                         {
@@ -1161,15 +1208,25 @@ void Bus::dma_finish(int ch)
     const uint32_t enables = (dicr_ >> 16) & 0x7Fu;
     const int force = (dicr_ >> 15) & 1;
     const int master_en = (dicr_ >> 23) & 1;
+    const int old_master_flag = (dicr_ >> 31) & 1;
     if (master_en && (force || (flags & enables)))
         dicr_ |= (1u << 31);
     else
         dicr_ &= ~(1u << 31);
+    const int new_master_flag = (dicr_ >> 31) & 1;
 
     // Raise DMA IRQ (I_STAT bit 3) when DICR master flag is set.
     // The BIOS uses DMA IRQs during CD boot (e.g., sector transfers).
     if (dicr_ & (1u << 31))
         i_stat_ |= (1u << 3);
+
+    // Debug: log DMA completion state for channels 3 and 4 (CDROM/SPU)
+    if (ch == 3 || ch == 4)
+    {
+        emu::logf(emu::LogLevel::debug, "BUS",
+            "DMA%d finish: DICR=0x%08X flags=0x%02X en=0x%02X master_en=%d force=%d flag_set=%d irq_fired=%d",
+            ch, dicr_, flags, enables, master_en, force, new_master_flag, (dicr_ & (1u << 31)) ? 1 : 0);
+    }
 }
 
 // ================== EVENT DELIVERY ==================

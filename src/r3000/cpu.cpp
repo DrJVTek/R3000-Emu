@@ -2019,6 +2019,9 @@ skip_hle_exception_handling:
     if (!bus_.read_u32(pc_phys, instr, fault))
     {
         // Address error on instruction fetch (ADEL).
+        emu::logf(emu::LogLevel::error, "CPU",
+            "IFETCH fault kind=%d vaddr=0x%08X paddr=0x%08X — raising ADEL",
+            (int)fault.kind, pc_, pc_phys);
         if (logger_)
         {
             rlog::logger_logf(
@@ -2062,6 +2065,20 @@ skip_hle_exception_handling:
     recent_pc_[recent_pos_ & 255u] = pc_;
     recent_instr_[recent_pos_ & 255u] = instr;
     recent_pos_ = (recent_pos_ + 1) & 255u;
+
+    // DEBUG: Log kernel exception handler code for non-HLE analysis
+    // This captures the BIOS exception handler loop at 0x00001E00-0x00002000
+    if (!hle_vectors_ && pc_ >= 0x00001E00u && pc_ < 0x00002100u)
+    {
+        static uint32_t kernel_log_count = 0;
+        if (kernel_log_count < 200)  // Limit to first 200 instructions
+        {
+            emu::logf(emu::LogLevel::info, "BIOS_LOOP",
+                "PC=0x%08X INSTR=0x%08X | I_STAT=0x%04X I_MASK=0x%04X",
+                pc_, instr, bus_.irq_stat_raw(), bus_.irq_mask_raw());
+            ++kernel_log_count;
+        }
+    }
 
     if (stop_on_pc_ && !stopped_on_pc_ && pc_ == stop_pc_)
     {
@@ -2712,6 +2729,12 @@ skip_hle_exception_handling:
                     case 0x08:
                         { // JR
                             const uint32_t s = rs(instr);
+                            if (gpr_[s] == 0xFFFFFFFFu)
+                            {
+                                emu::logf(emu::LogLevel::error, "CPU",
+                                    "*** CRASH *** JR to 0xFFFFFFFF at PC=0x%08X (JR $%u) RA=0x%08X SP=0x%08X",
+                                    pc_ - 4, s, gpr_[31], gpr_[29]);
+                            }
                             schedule_branch(gpr_[s]);
                             break;
                         }

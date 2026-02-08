@@ -14,6 +14,9 @@ public class R3000EmuRuntime : ModuleRules
             "CoreUObject",
             "Engine",
             "AudioMixer",
+            "ProceduralMeshComponent",
+            "RHI",
+            "RenderCore",
         });
 
         // Source/src is a symlink to R3000-Emu/src

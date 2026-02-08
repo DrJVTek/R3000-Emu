@@ -1,6 +1,10 @@
 #pragma once
 
 #include "Components/ActorComponent.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/Runnable.h"
+#include "HAL/RunnableThread.h"
+#include "Templates/Atomic.h"
 
 // R3000-Emu loggers (repo code).
 #include "log/logger.h"
@@ -9,11 +13,18 @@
 #include "R3000EmuComponent.generated.h"
 
 class UR3000AudioComponent;
+class UR3000GpuComponent;
 
 namespace emu
 {
 class Core;
 }
+
+// Forward declare the worker thread class.
+class FR3000EmuWorker;
+
+// Delegate fired when the BIOS prints a complete line via putchar (B(3Dh)).
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBiosPrint, const FString&, Line);
 
 UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
 class UR3000EmuComponent : public UActorComponent
@@ -40,10 +51,10 @@ class UR3000EmuComponent : public UActorComponent
     int32 GetProgramCounter() const;
 
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu")
-    int64 GetStepsExecuted() const { return static_cast<int64>(StepsExecuted_); }
+    int64 GetStepsExecuted() const { return static_cast<int64>(StepsExecuted_.Load()); }
 
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu")
-    int32 GetCyclesLastFrame() const { return CyclesLastFrame_; }
+    int32 GetCyclesLastFrame() const { return CyclesLastFrame_.Load(); }
 
     // Optional: BIOS path to boot on BeginPlay.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
@@ -102,10 +113,59 @@ class UR3000EmuComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     bool bFastBoot{false};
 
+    // [DEPRECATED] HLE vectors are now always enabled for BIOS boot.
+    // Our hardware emulation isn't accurate enough for the real BIOS exception
+    // handler to work correctly without HLE interception. This setting is ignored.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (DeprecatedProperty))
+    bool bHleVectors{true};
+
     // Bus tick batching: tick hardware every N CPU steps instead of every step.
-    // 1 = cycle-accurate (slow), 32 = fast (good default for UE5), 64 = faster but less accurate.
+    // 1 = cycle-accurate (recommended with threaded mode), 32 = fast, 64 = faster but less accurate.
+    // With threaded mode enabled, BusTickBatch=1 is recommended for accurate timing.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "1", ClampMax = "128"))
     int32 BusTickBatch{1};
+
+    // Cycle multiplier: cycles counted per CPU instruction.
+    // 1 = simplified (original), 2 = approximate real R3000, higher = slower game.
+    // If audio is too short compared to real hardware, increase this value.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "1", ClampMax = "10"))
+    int32 CycleMultiplier{1};
+
+    // THREADED MODE (Recommended): Run emulation on a dedicated worker thread.
+    // This uses Windows waitable timers for precise PS1 timing (33.8688 MHz).
+    // Main UE5 thread only reads GPU state for rendering.
+    // This allows BusTickBatch=1 (cycle-accurate) without frame drops.
+    // When OFF, emulation runs in TickComponent (legacy mode).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
+    bool bThreadedMode{true};
+
+    // Audio-driven timing: pace emulation to audio sample consumption.
+    // WARNING: Only works if the emulator runs faster than real-time!
+    // If the emulator is slower than real-time, use wall-clock timing instead.
+    // Recommended: OFF (use wall-clock timing via waitable timer).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
+    bool bAudioDrivenTiming{false};
+
+    // Target audio buffer size in milliseconds for audio-driven mode.
+    // Higher = more latency but smoother; Lower = less latency but may stutter.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "10", ClampMax = "200"))
+    float AudioBufferTargetMs{50.0f};
+
+    // Periodically log PC progress to system.log (helps diagnose "stuck boot").
+    // 0 disables. Value is in executed steps (instructions).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Debug", meta = (ClampMin = "0", ClampMax = "50000000"))
+    int32 PcSampleIntervalSteps{5000000};
+
+    // Periodically log UE audio ring-buffer stats to system.log (helps diagnose "no sound").
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Debug")
+    bool bLogAudioStats{true};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Debug", meta = (ClampMin = "0.1", ClampMax = "10.0"))
+    float AudioStatsIntervalSec{1.0f};
+
+    // Event fired when the BIOS/game prints a complete line via putchar.
+    UPROPERTY(BlueprintAssignable, Category = "R3000Emu")
+    FOnBiosPrint OnBiosPrint;
 
     // Routing struct for emu::logf callback (tag → file).
     struct EmuLogFiles
@@ -114,14 +174,38 @@ class UR3000EmuComponent : public UActorComponent
         std::FILE* sys{nullptr};
     };
 
+    // Thread-safe accessors for worker thread
+    emu::Core* GetCore() const { return Core_; }
+    UR3000AudioComponent* GetAudioComp() const { return AudioComp_; }
+    bool IsRunning() const { return bRunning; }
+    bool IsAudioDrivenTiming() const { return bAudioDrivenTiming; }
+    float GetAudioBufferTargetMs() const { return AudioBufferTargetMs; }
+    int32 GetCycleMultiplier() const { return CycleMultiplier; }
+    int32 GetPcSampleIntervalSteps() const { return PcSampleIntervalSteps; }
+
+    // Thread-safe stats update (called from worker thread)
+    void UpdateStepsExecuted(uint64 Steps, uint64 Cycles);
+
   private:
+    friend class FR3000EmuWorker;
+
     bool BootBiosInternal();
+    void StopWorkerThread();
 
     emu::Core* Core_{nullptr};
-    uint64 StepsExecuted_{0};
+    TAtomic<uint64> StepsExecuted_{0};
     UR3000AudioComponent* AudioComp_{nullptr};
-    int32 CyclesLastFrame_{0};
+    UR3000GpuComponent* GpuComp_{nullptr};
+    TAtomic<int32> CyclesLastFrame_{0};
     TArray<uint8> BiosBytes_{};
+
+    // Worker thread for threaded emulation mode
+    FR3000EmuWorker* EmuWorker_{nullptr};
+    FRunnableThread* EmuThread_{nullptr};
+
+    // Critical section for GPU state synchronization
+    // (GPU reads from UE5 main thread, writes from emu worker thread)
+    mutable FCriticalSection GpuStateLock_;
 
     // File sinks (optional).
     std::FILE* CoreLogFile_{nullptr};
@@ -136,5 +220,20 @@ class UR3000EmuComponent : public UActorComponent
 
     rlog::Logger CoreLogger_{};
     emu::Log EmuLog_{};
+
+    // BIOS putchar line buffer → fires OnBiosPrint on newline.
+    FString PutcharLineBuf_{};
+    static void PutcharCB(char Ch, void* User);
+
+    uint64 NextPcSampleAt_{0};
+    double NextAudioStatsTime_{0.0};
+
+    // Audio-driven timing state (accessed atomically in threaded mode)
+    TAtomic<uint64> TotalCyclesExecuted_{0};      // Total CPU cycles executed since start
+    TAtomic<uint64> LastAudioSamplesConsumed_{0}; // Last observed audio sample count
+
+    // Thread control flags
+    TAtomic<bool> bWorkerShouldStop_{false};
+    TAtomic<bool> bWorkerPaused_{false};
 };
 

@@ -97,10 +97,26 @@ class Core
     // Cycle multiplier for timing accuracy (1=simplified, 2=approximate real R3000)
     void set_cycle_multiplier(uint32_t n);
 
+    // Boot milestone tracking (for debug comparison with DuckStation)
+    struct BootMilestones
+    {
+        uint64_t bios_to_shell_step{0};     // When PC first goes to 0x8000xxxx (shell/game)
+        uint64_t first_gpu_prim_step{0};    // When first GPU primitive is drawn
+        uint64_t license_end_step{0};       // After logo sequence (estimated)
+        double bios_to_shell_time{0.0};
+        double first_gpu_prim_time{0.0};
+        double license_end_time{0.0};
+        bool bios_to_shell_logged{false};
+        bool first_gpu_prim_logged{false};
+        bool license_end_logged{false};
+    };
+    BootMilestones& milestones() { return milestones_; }
+
   private:
     void set_err(char* err, size_t err_cap, const char* msg) const;
 
     rlog::Logger* logger_{nullptr};
+    BootMilestones milestones_{};
 
     std::unique_ptr<uint8_t[]> ram_{};
     uint32_t ram_size_{0};

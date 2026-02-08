@@ -8,6 +8,12 @@
   "CreatedBy": "R3000-Emu",
   "CanContainContent": false,
   "IsBetaVersion": true,
+  "Plugins": [
+    {
+      "Name": "ProceduralMeshComponent",
+      "Enabled": true
+    }
+  ],
   "Modules": [
     {
       "Name": "R3000EmuRuntime",

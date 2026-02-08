@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include "../log/filelog.h"
 #include "../log/logger.h"
@@ -20,6 +22,63 @@ struct DrawEnv
     uint16_t clip_x2{0}, clip_y2{0}; // E4h
     int16_t  offset_x{0}, offset_y{0}; // E5h
     uint16_t mask_bits{0};       // E6h
+};
+
+// Display configuration (GP1 registers)
+struct DisplayConfig
+{
+    uint16_t display_x{0}, display_y{0};       // GP1(05h) display start in VRAM
+    uint16_t h_range_x1{0x200};                // GP1(06h) horizontal range
+    uint16_t h_range_x2{0xC00};
+    uint16_t v_range_y1{0x010};                // GP1(07h) vertical range
+    uint16_t v_range_y2{0x100};
+    uint8_t h_res{0};                          // GP1(08h) 0=256,1=320,2=512,3=640,4=368
+    uint8_t v_res{0};                          // 0=240,1=480
+    bool is_pal{true};
+    bool color_24bit{false};
+    bool interlace{false};
+    bool display_enabled{true};                // GP1(03h)
+
+    uint16_t width() const
+    {
+        static constexpr uint16_t w[] = {256, 320, 512, 640, 368};
+        return (h_res < 5) ? w[h_res] : 320;
+    }
+    uint16_t height() const
+    {
+        return v_res ? 480 : (is_pal ? 256 : 240);
+    }
+};
+
+// Draw command vertex for UE5 rendering bridge
+struct DrawVertex
+{
+    int16_t x, y;          // PS1 screen coords (after draw offset)
+    uint8_t r, g, b;       // vertex color
+    uint8_t u, v;           // texture coords (0-255)
+};
+
+// A single draw command (always triangle; quads/rects split by GPU)
+struct DrawCmd
+{
+    DrawVertex v[3];
+    uint16_t clut;          // CLUT location in VRAM
+    uint16_t texpage;       // texture page info (X base, Y base, depth, semi mode)
+    uint8_t flags;          // bit0=textured, bit1=semi_transparent, bit2=raw_texture
+    uint8_t semi_mode;      // semi-transparency mode 0-3
+    uint8_t tex_depth;      // 0=4bit, 1=8bit, 2=15bit direct
+    uint8_t _pad;
+};
+
+// Per-frame draw command list (double-buffered for GPU / UE5)
+struct FrameDrawList
+{
+    std::vector<DrawCmd> cmds;
+    uint32_t frame_id{0};
+
+    FrameDrawList() { cmds.reserve(4096); }
+    void clear() { cmds.clear(); }
+    void push(const DrawCmd& c) { cmds.push_back(c); }
 };
 
 // Per-frame GPU statistics
@@ -66,6 +125,26 @@ class Gpu
     const DrawEnv& draw_env() const { return draw_env_; }
     const FrameStats& frame_stats() const { return frame_stats_; }
     const uint16_t* vram() const { return vram_.get(); }
+    const DisplayConfig& display_config() const { return display_; }
+
+    /// Get the ready draw list (previous frame's commands).
+    /// WARNING: Not thread-safe if called from UE5 while emulator is running.
+    /// Prefer copy_ready_draw_list() for thread-safe access.
+    const FrameDrawList& ready_draw_list() const { return draw_lists_[1 - draw_active_]; }
+
+    /// Thread-safe copy of the ready draw list. Use this from UE5.
+    /// The mutex ensures the list isn't being swapped/cleared during copy.
+    void copy_ready_draw_list(FrameDrawList& out) const
+    {
+        std::lock_guard<std::mutex> lock(draw_list_mutex_);
+        out = draw_lists_[1 - draw_active_];
+    }
+
+    uint32_t vram_frame_count() const { return vram_frame_; }
+
+    /// Monotonically increasing counter bumped on every VRAM write (fill, CPU→VRAM, VRAM→VRAM).
+    /// UE5 can compare against its own copy to skip texture uploads when nothing changed.
+    uint32_t vram_write_seq() const { return vram_write_seq_; }
 
   private:
     void dump_u32(uint32_t port, uint32_t v);
@@ -86,6 +165,13 @@ class Gpu
     void gp0_cpu_to_vram_data(uint32_t v);
     void gp0_vram_to_cpu_start();
     void gp0_env_command();
+
+    // Draw command helpers (push to per-frame list for UE5)
+    void push_triangle(
+        int16_t x0, int16_t y0, uint8_t r0, uint8_t g0, uint8_t b0, uint8_t u0, uint8_t v0,
+        int16_t x1, int16_t y1, uint8_t r1, uint8_t g1, uint8_t b1, uint8_t u1, uint8_t v1,
+        int16_t x2, int16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
+        uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth);
 
     // GP1 command processing
     void gp1_write(uint32_t v);
@@ -137,6 +223,10 @@ class Gpu
     uint32_t polyline_color_{0};
     bool polyline_gouraud_{false};
     bool polyline_semi_{false};
+    bool polyline_has_prev_{false};
+    int16_t polyline_prev_x_{0}, polyline_prev_y_{0};
+    uint8_t polyline_prev_r_{0}, polyline_prev_g_{0}, polyline_prev_b_{0};
+    int polyline_vertex_phase_{0}; // 0=expect color (if gouraud) or XY, 1=expect XY after color
 
     // Draw environment
     DrawEnv draw_env_{};
@@ -144,6 +234,18 @@ class Gpu
     // Frame statistics
     FrameStats frame_stats_{};
     uint32_t frame_count_{0};
+    uint32_t vram_frame_{0};
+
+    // Display configuration (GP1)
+    DisplayConfig display_{};
+
+    // Double-buffered draw command lists for UE5 bridge
+    FrameDrawList draw_lists_[2];
+    int draw_active_{0};
+    mutable std::mutex draw_list_mutex_; // Protects draw list swap/access
+
+    // VRAM write tracking (bumped on fill, cpu→vram, vram→vram)
+    uint32_t vram_write_seq_{0};
 
     uint32_t vblank_div_{0};
     bool in_vblank_{false};

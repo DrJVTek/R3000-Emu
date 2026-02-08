@@ -2,6 +2,7 @@
 #include "../log/emu_log.h"
 
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
@@ -49,6 +50,23 @@ static void gpu_log(
     va_start(args, fmt);
     flog::vlogf(combined, c, lvl, "GPU", fmt, args);
     va_end(args);
+}
+
+// PS1 vertex X/Y use 11-bit signed (bits 0-10 and 16-26). Upper bits are
+// "usually sign-extension" per spec; we must sign-extend for correctness.
+static int16_t sign_extend_11(int32_t v)
+{
+    v &= 0xFFFF;
+    int32_t lo = v & 0x7FF;
+    if (lo & 0x400)
+        lo |= ~0x7FF;  // sign extend 11 -> 32
+    return (int16_t)lo;
+}
+
+// Pass through 8-bit color values directly
+static uint8_t color8(uint8_t v)
+{
+    return v;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +177,27 @@ Gpu::Gpu(rlog::Logger* logger)
 }
 
 // ---------------------------------------------------------------------------
+// Push a triangle draw command to the active frame list (for UE5 bridge)
+// ---------------------------------------------------------------------------
+void Gpu::push_triangle(
+    int16_t x0, int16_t y0, uint8_t r0, uint8_t g0, uint8_t b0, uint8_t u0, uint8_t v0,
+    int16_t x1, int16_t y1, uint8_t r1, uint8_t g1, uint8_t b1, uint8_t u1, uint8_t v1,
+    int16_t x2, int16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
+    uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth)
+{
+    DrawCmd cmd{};
+    cmd.v[0] = {x0, y0, r0, g0, b0, u0, v0};
+    cmd.v[1] = {x1, y1, r1, g1, b1, u1, v1};
+    cmd.v[2] = {x2, y2, r2, g2, b2, u2, v2};
+    cmd.clut = clut;
+    cmd.texpage = texpage;
+    cmd.flags = flags;
+    cmd.semi_mode = semi_mode;
+    cmd.tex_depth = tex_depth;
+    draw_lists_[draw_active_].push(cmd);
+}
+
+// ---------------------------------------------------------------------------
 // VBlank
 // ---------------------------------------------------------------------------
 int Gpu::tick_vblank(uint32_t cycles)
@@ -172,6 +211,20 @@ int Gpu::tick_vblank(uint32_t cycles)
     {
         vblank_div_ = 0;
         in_vblank_ = false;
+
+        // Toggle interlace field bit (GPUSTAT bit 13) each frame when interlace is enabled
+        // Some games poll this to detect even/odd fields
+        if (display_.interlace)
+            status_ ^= (1u << 13);
+
+        // Swap draw lists: current becomes ready for UE5, new list cleared
+        // Lock mutex to prevent race with UE5 reading ready_draw_list()
+        {
+            std::lock_guard<std::mutex> lock(draw_list_mutex_);
+            draw_active_ = 1 - draw_active_;
+            draw_lists_[draw_active_].clear();
+        }
+        vram_frame_++;
 
         // Log frame stats
         frame_count_++;
@@ -189,6 +242,12 @@ int Gpu::tick_vblank(uint32_t cycles)
                 "%u v2v, %u c2v, %u v2c, %u env | %u words",
                 frame_count_, s.triangles, s.quads, s.rects, s.lines, s.fills,
                 s.vram_to_vram, s.cpu_to_vram, s.vram_to_cpu, s.env_cmds, s.total_words);
+            emu::logf(emu::LogLevel::debug, "GPU", "  DRAWENV clip=(%u,%u)-(%u,%u) ofs=(%d,%d) | "
+                "DISP start=(%u,%u) wh=(%u,%u) | draw_list=%zu tris",
+                draw_env_.clip_x1, draw_env_.clip_y1, draw_env_.clip_x2, draw_env_.clip_y2,
+                (int)draw_env_.offset_x, (int)draw_env_.offset_y,
+                display_.display_x, display_.display_y, display_.width(), display_.height(),
+                draw_lists_[1 - draw_active_].cmds.size());
         }
         frame_stats_.reset();
 
@@ -345,10 +404,78 @@ void Gpu::gp0_write(uint32_t v)
         if (is_term)
         {
             gp0_state_ = Gp0State::idle;
-            // Polyline already counted on start
+            polyline_has_prev_ = false;
             return;
         }
-        // Otherwise it's another vertex (or color+vertex) - just consume
+
+        // Parse vertex data based on current phase
+        uint8_t cur_r = polyline_prev_r_, cur_g = polyline_prev_g_, cur_b = polyline_prev_b_;
+        int16_t cur_x = 0, cur_y = 0;
+
+        if (polyline_gouraud_ && polyline_vertex_phase_ == 0 && polyline_has_prev_)
+        {
+            // Gouraud: expecting color word for next vertex
+            cur_r = color8((uint8_t)(v & 0xFF));
+            cur_g = color8((uint8_t)((v >> 8) & 0xFF));
+            cur_b = color8((uint8_t)((v >> 16) & 0xFF));
+            polyline_prev_r_ = cur_r;
+            polyline_prev_g_ = cur_g;
+            polyline_prev_b_ = cur_b;
+            polyline_vertex_phase_ = 1; // Next is XY
+            return;
+        }
+
+        // Expecting XY word
+        cur_x = sign_extend_11(v);
+        cur_y = sign_extend_11((int32_t)(v >> 16));
+
+        // Apply drawing offset
+        cur_x = (int16_t)(cur_x + draw_env_.offset_x);
+        cur_y = (int16_t)(cur_y + draw_env_.offset_y);
+
+        // If we have a previous vertex, draw a line segment
+        if (polyline_has_prev_)
+        {
+            // Draw line as thin quad (same as gp0_line)
+            int16_t x0 = polyline_prev_x_, y0 = polyline_prev_y_;
+            int16_t x1 = cur_x, y1 = cur_y;
+            uint8_t r0 = polyline_gouraud_ ? polyline_prev_r_ : cur_r;
+            uint8_t g0 = polyline_gouraud_ ? polyline_prev_g_ : cur_g;
+            uint8_t b0 = polyline_gouraud_ ? polyline_prev_b_ : cur_b;
+
+            int16_t dx = (int16_t)(x1 - x0);
+            int16_t dy = (int16_t)(y1 - y0);
+            int16_t px, py;
+            if (dx == 0 && dy == 0) { px = 1; py = 0; }
+            else if (std::abs(dx) >= std::abs(dy)) { px = 0; py = 1; }
+            else { px = 1; py = 0; }
+
+            uint16_t tp = (uint16_t)(draw_env_.texpage_raw & 0xFFFF);
+            uint8_t semi_mode = (uint8_t)((tp >> 5) & 3);
+            uint8_t flags = polyline_semi_ ? (uint8_t)2 : (uint8_t)0;
+
+            push_triangle(
+                (int16_t)(x0 - px), (int16_t)(y0 - py), r0, g0, b0, 0, 0,
+                (int16_t)(x0 + px), (int16_t)(y0 + py), r0, g0, b0, 0, 0,
+                (int16_t)(x1 + px), (int16_t)(y1 + py), cur_r, cur_g, cur_b, 0, 0,
+                0, tp, flags, semi_mode, 0);
+            push_triangle(
+                (int16_t)(x0 - px), (int16_t)(y0 - py), r0, g0, b0, 0, 0,
+                (int16_t)(x1 + px), (int16_t)(y1 + py), cur_r, cur_g, cur_b, 0, 0,
+                (int16_t)(x1 - px), (int16_t)(y1 - py), cur_r, cur_g, cur_b, 0, 0,
+                0, tp, flags, semi_mode, 0);
+        }
+
+        // Store current vertex as previous for next segment
+        polyline_prev_x_ = cur_x;
+        polyline_prev_y_ = cur_y;
+        if (!polyline_gouraud_)
+        {
+            // Flat shading keeps same color
+        }
+        polyline_has_prev_ = true;
+        polyline_vertex_phase_ = 0; // Next is color (gouraud) or XY (flat)
+
         return;
     }
 
@@ -399,6 +526,12 @@ void Gpu::gp0_start_command(uint32_t cmd_word)
         polyline_gouraud_ = (cmd & 0x10) != 0;
         polyline_semi_ = (cmd & 0x02) != 0;
         polyline_color_ = cmd_word & 0x00FFFFFFu;
+        polyline_has_prev_ = false;
+        polyline_vertex_phase_ = 0; // Next word is XY (flat) or color (gouraud after first)
+        // Store initial color for flat shading
+        polyline_prev_r_ = color8((uint8_t)(cmd_word & 0xFF));
+        polyline_prev_g_ = color8((uint8_t)((cmd_word >> 8) & 0xFF));
+        polyline_prev_b_ = color8((uint8_t)((cmd_word >> 16) & 0xFF));
         frame_stats_.lines++;
 
         emu::logf(emu::LogLevel::trace, "GPU", "GP0 POLYLINE%s%s color=%06X",
@@ -524,11 +657,12 @@ void Gpu::gp0_fill_rect()
     }
 
     frame_stats_.fills++;
+    vram_write_seq_++;
     emu::logf(emu::LogLevel::trace, "GPU", "GP0 FILL (%u,%u) %ux%u color=%06X", x, y, w, h, color);
 }
 
 // ---------------------------------------------------------------------------
-// GP0(20h-3Fh) Polygon
+// GP0(20h-3Fh) Polygon → parse vertices and push draw commands for UE5
 // ---------------------------------------------------------------------------
 void Gpu::gp0_polygon()
 {
@@ -537,71 +671,182 @@ void Gpu::gp0_polygon()
     const bool quad     = (cmd & 0x08) != 0;
     const bool textured = (cmd & 0x04) != 0;
     const bool semi     = (cmd & 0x02) != 0;
-    const int verts = quad ? 4 : 3;
+    const int nverts = quad ? 4 : 3;
 
     if (quad) frame_stats_.quads++;
     else      frame_stats_.triangles++;
 
-    // Parse vertex positions for logging
-    // Layout depends on flags - extract first vertex XY at minimum
-    const uint32_t color0 = cmd_buf_[0] & 0x00FFFFFFu;
+    // Parse all vertex data from command buffer
+    int16_t vx[4], vy[4];
+    uint8_t cr[4], cg[4], cb[4];
+    uint8_t tu[4] = {}, tv[4] = {};
+    uint16_t clut = 0, texpage_attr = 0;
 
-    // Build log string
-    char buf[256];
-    int pos = std::snprintf(buf, sizeof(buf), "GP0 %s%s%s%s c=%06X",
-        quad ? "QUAD" : "TRI",
-        gouraud ? "_GOURAUD" : "_FLAT",
-        textured ? "_TEX" : "",
-        semi ? "_SEMI" : "",
-        color0);
+    // First vertex color from command word (PS1 uses 5-bit, expand to 8-bit)
+    cr[0] = color8((uint8_t)(cmd_buf_[0] & 0xFF));
+    cg[0] = color8((uint8_t)((cmd_buf_[0] >> 8) & 0xFF));
+    cb[0] = color8((uint8_t)((cmd_buf_[0] >> 16) & 0xFF));
 
-    // Parse vertices for compact log
-    int idx = 1; // Start after cmd word
-    for (int v = 0; v < verts && idx < cmd_buf_pos_; ++v)
+    const int expected_words = 1 + gp0_param_count(cmd);
+    if (cmd_buf_pos_ < expected_words)
     {
-        if (v > 0 && gouraud && idx < cmd_buf_pos_)
-            idx++; // Skip color word for gouraud vertices > 0
-
-        if (idx < cmd_buf_pos_)
-        {
-            int16_t vx = (int16_t)(cmd_buf_[idx] & 0xFFFF);
-            int16_t vy = (int16_t)(cmd_buf_[idx] >> 16);
-            pos += std::snprintf(buf + pos, sizeof(buf) - pos, " v%d=(%d,%d)", v, vx, vy);
-            idx++;
-        }
-
-        if (textured && idx < cmd_buf_pos_)
-            idx++; // Skip UV word
+        emu::logf(emu::LogLevel::warn, "GPU", "GP0 polygon cmd=0x%02X: insufficient words %d < %d",
+            cmd, cmd_buf_pos_, expected_words);
+        return;
     }
 
-    emu::logf(emu::LogLevel::trace, "GPU", "%s", buf);
+    int idx = 1;
+    for (int i = 0; i < nverts; ++i)
+    {
+        // Gouraud: each vertex after the first has its own color word
+        if (i > 0 && gouraud)
+        {
+            cr[i] = color8((uint8_t)(cmd_buf_[idx] & 0xFF));
+            cg[i] = color8((uint8_t)((cmd_buf_[idx] >> 8) & 0xFF));
+            cb[i] = color8((uint8_t)((cmd_buf_[idx] >> 16) & 0xFF));
+            idx++;
+        }
+        else if (i > 0)
+        {
+            cr[i] = cr[0]; cg[i] = cg[0]; cb[i] = cb[0];
+        }
+
+        // Vertex position (PS1: 11-bit signed X/Y; sign-extend for correctness)
+        vx[i] = sign_extend_11(cmd_buf_[idx]);
+        vy[i] = sign_extend_11((int32_t)(cmd_buf_[idx] >> 16));
+        idx++;
+
+        // Textured: UV + palette/texpage word per vertex
+        if (textured)
+        {
+            tu[i] = (uint8_t)(cmd_buf_[idx] & 0xFF);
+            tv[i] = (uint8_t)((cmd_buf_[idx] >> 8) & 0xFF);
+            if (i == 0) clut = (uint16_t)((cmd_buf_[idx] >> 16) & 0xFFFF);
+            if (i == 1) texpage_attr = (uint16_t)((cmd_buf_[idx] >> 16) & 0xFFFF);
+            idx++;
+        }
+    }
+
+    // Apply drawing offset
+    for (int i = 0; i < nverts; ++i)
+    {
+        vx[i] = (int16_t)(vx[i] + draw_env_.offset_x);
+        vy[i] = (int16_t)(vy[i] + draw_env_.offset_y);
+    }
+
+    // Determine texpage (from polygon attribute if textured, else from draw env)
+    uint16_t tp = textured ? texpage_attr : (uint16_t)(draw_env_.texpage_raw & 0xFFFF);
+    uint8_t semi_mode = (uint8_t)((tp >> 5) & 3);
+    uint8_t tex_depth = (uint8_t)((tp >> 7) & 3);
+    uint8_t flags = 0;
+    if (textured) flags |= 1;
+    if (semi)     flags |= 2;
+
+    // Push first triangle (v0, v1, v2)
+    push_triangle(
+        vx[0], vy[0], cr[0], cg[0], cb[0], tu[0], tv[0],
+        vx[1], vy[1], cr[1], cg[1], cb[1], tu[1], tv[1],
+        vx[2], vy[2], cr[2], cg[2], cb[2], tu[2], tv[2],
+        clut, tp, flags, semi_mode, tex_depth);
+
+    // For quads: second triangle (v1, v3, v2)
+    // PS1 quad vertex order: v0=top-left, v1=top-right, v2=bottom-left, v3=bottom-right
+    // Triangulation: (v0,v1,v2) + (v1,v3,v2) forms the quad correctly
+    if (quad)
+    {
+        push_triangle(
+            vx[1], vy[1], cr[1], cg[1], cb[1], tu[1], tv[1],
+            vx[3], vy[3], cr[3], cg[3], cb[3], tu[3], tv[3],
+            vx[2], vy[2], cr[2], cg[2], cb[2], tu[2], tv[2],
+            clut, tp, flags, semi_mode, tex_depth);
+    }
+
+    if (quad)
+        emu::logf(emu::LogLevel::trace, "GPU", "GP0 QUAD%s%s%s v0=(%d,%d)#%02X%02X%02X v1=(%d,%d)#%02X%02X%02X v2=(%d,%d)#%02X%02X%02X v3=(%d,%d)#%02X%02X%02X ofs=(%d,%d)",
+            gouraud ? "_GOURAUD" : "_FLAT", textured ? "_TEX" : "", semi ? "_SEMI" : "",
+            (int)vx[0], (int)vy[0], cr[0], cg[0], cb[0],
+            (int)vx[1], (int)vy[1], cr[1], cg[1], cb[1],
+            (int)vx[2], (int)vy[2], cr[2], cg[2], cb[2],
+            (int)vx[3], (int)vy[3], cr[3], cg[3], cb[3],
+            (int)draw_env_.offset_x, (int)draw_env_.offset_y);
+    else
+        emu::logf(emu::LogLevel::trace, "GPU", "GP0 TRI%s%s%s v0=(%d,%d)#%02X%02X%02X v1=(%d,%d)#%02X%02X%02X v2=(%d,%d)#%02X%02X%02X ofs=(%d,%d)",
+            gouraud ? "_GOURAUD" : "_FLAT", textured ? "_TEX" : "", semi ? "_SEMI" : "",
+            (int)vx[0], (int)vy[0], cr[0], cg[0], cb[0],
+            (int)vx[1], (int)vy[1], cr[1], cg[1], cb[1],
+            (int)vx[2], (int)vy[2], cr[2], cg[2], cb[2],
+            (int)draw_env_.offset_x, (int)draw_env_.offset_y);
 }
 
 // ---------------------------------------------------------------------------
-// GP0(40h-5Fh) Line (single)
+// GP0(40h-5Fh) Line (single) → push as thin quad (2 triangles) for UE5
 // ---------------------------------------------------------------------------
 void Gpu::gp0_line()
 {
     const uint8_t cmd = (uint8_t)(cmd_buf_[0] >> 24);
     const bool gouraud = (cmd & 0x10) != 0;
     const bool semi    = (cmd & 0x02) != 0;
-    const uint32_t color = cmd_buf_[0] & 0x00FFFFFFu;
 
     frame_stats_.lines++;
 
-    int16_t x0 = (int16_t)(cmd_buf_[1] & 0xFFFF);
-    int16_t y0 = (int16_t)(cmd_buf_[1] >> 16);
-    int idx = gouraud ? 3 : 2;
-    int16_t x1 = (idx < cmd_buf_pos_) ? (int16_t)(cmd_buf_[idx] & 0xFFFF) : 0;
-    int16_t y1 = (idx < cmd_buf_pos_) ? (int16_t)(cmd_buf_[idx] >> 16) : 0;
+    uint8_t r0 = color8((uint8_t)(cmd_buf_[0] & 0xFF));
+    uint8_t g0 = color8((uint8_t)((cmd_buf_[0] >> 8) & 0xFF));
+    uint8_t b0 = color8((uint8_t)((cmd_buf_[0] >> 16) & 0xFF));
 
-    emu::logf(emu::LogLevel::trace, "GPU", "GP0 LINE%s%s (%d,%d)-(%d,%d) c=%06X",
+    int16_t x0 = sign_extend_11(cmd_buf_[1]);
+    int16_t y0 = sign_extend_11((int32_t)(cmd_buf_[1] >> 16));
+
+    uint8_t r1 = r0, g1 = g0, b1 = b0;
+    int idx = 2;
+    if (gouraud)
+    {
+        r1 = color8((uint8_t)(cmd_buf_[idx] & 0xFF));
+        g1 = color8((uint8_t)((cmd_buf_[idx] >> 8) & 0xFF));
+        b1 = color8((uint8_t)((cmd_buf_[idx] >> 16) & 0xFF));
+        idx++;
+    }
+    int16_t x1 = (idx < cmd_buf_pos_) ? sign_extend_11(cmd_buf_[idx]) : x0;
+    int16_t y1 = (idx < cmd_buf_pos_) ? sign_extend_11((int32_t)(cmd_buf_[idx] >> 16)) : y0;
+
+    // Apply drawing offset
+    x0 = (int16_t)(x0 + draw_env_.offset_x);
+    y0 = (int16_t)(y0 + draw_env_.offset_y);
+    x1 = (int16_t)(x1 + draw_env_.offset_x);
+    y1 = (int16_t)(y1 + draw_env_.offset_y);
+
+    // Expand line to a thin quad (1px wide) for mesh rendering
+    // Compute perpendicular offset
+    int16_t dx = (int16_t)(x1 - x0);
+    int16_t dy = (int16_t)(y1 - y0);
+    int16_t px, py;
+    if (dx == 0 && dy == 0) { px = 1; py = 0; }
+    else if (std::abs(dx) >= std::abs(dy)) { px = 0; py = 1; }
+    else { px = 1; py = 0; }
+
+    uint16_t tp = (uint16_t)(draw_env_.texpage_raw & 0xFFFF);
+    uint8_t semi_mode = (uint8_t)((tp >> 5) & 3);
+    uint8_t flags = semi ? (uint8_t)2 : (uint8_t)0;
+
+    // Triangle 1: (x0-px, y0-py) (x0+px, y0+py) (x1+px, y1+py)
+    push_triangle(
+        (int16_t)(x0 - px), (int16_t)(y0 - py), r0, g0, b0, 0, 0,
+        (int16_t)(x0 + px), (int16_t)(y0 + py), r0, g0, b0, 0, 0,
+        (int16_t)(x1 + px), (int16_t)(y1 + py), r1, g1, b1, 0, 0,
+        0, tp, flags, semi_mode, 0);
+    // Triangle 2: (x0-px, y0-py) (x1+px, y1+py) (x1-px, y1-py)
+    push_triangle(
+        (int16_t)(x0 - px), (int16_t)(y0 - py), r0, g0, b0, 0, 0,
+        (int16_t)(x1 + px), (int16_t)(y1 + py), r1, g1, b1, 0, 0,
+        (int16_t)(x1 - px), (int16_t)(y1 - py), r1, g1, b1, 0, 0,
+        0, tp, flags, semi_mode, 0);
+
+    emu::logf(emu::LogLevel::trace, "GPU", "GP0 LINE%s%s (%d,%d)-(%d,%d) c=%02X%02X%02X ofs=(%d,%d)",
         gouraud ? "_GOURAUD" : "_FLAT", semi ? "_SEMI" : "",
-        x0, y0, x1, y1, color);
+        x0, y0, x1, y1, r0, g0, b0, (int)draw_env_.offset_x, (int)draw_env_.offset_y);
 }
 
 // ---------------------------------------------------------------------------
-// GP0(60h-7Fh) Rectangle
+// GP0(60h-7Fh) Rectangle → push as 2 triangles for UE5
 // ---------------------------------------------------------------------------
 void Gpu::gp0_rect()
 {
@@ -609,24 +854,38 @@ void Gpu::gp0_rect()
     const int size_code = (cmd >> 3) & 3;
     const bool textured = (cmd & 0x04) != 0;
     const bool semi     = (cmd & 0x02) != 0;
-    const uint32_t color = cmd_buf_[0] & 0x00FFFFFFu;
+    const bool raw      = (cmd & 0x01) != 0; // raw texture (no color modulation)
 
     frame_stats_.rects++;
 
-    int16_t x = (int16_t)(cmd_buf_[1] & 0xFFFF);
-    int16_t y = (int16_t)(cmd_buf_[1] >> 16);
+    uint8_t r = color8((uint8_t)(cmd_buf_[0] & 0xFF));
+    uint8_t g = color8((uint8_t)((cmd_buf_[0] >> 8) & 0xFF));
+    uint8_t b = color8((uint8_t)((cmd_buf_[0] >> 16) & 0xFF));
 
-    int w = 0, h = 0;
+    int16_t x = sign_extend_11(cmd_buf_[1]);
+    int16_t y = sign_extend_11((int32_t)(cmd_buf_[1] >> 16));
+
+    uint8_t u0 = 0, v0 = 0;
+    uint16_t clut = 0;
+    int idx = 2;
+    if (textured)
+    {
+        u0 = (uint8_t)(cmd_buf_[idx] & 0xFF);
+        v0 = (uint8_t)((cmd_buf_[idx] >> 8) & 0xFF);
+        clut = (uint16_t)((cmd_buf_[idx] >> 16) & 0xFFFF);
+        idx++;
+    }
+
+    int16_t w = 0, h = 0;
     const char* size_name = "";
     switch (size_code)
     {
-        case 0: // Variable
+        case 0:
         {
-            int wh_idx = textured ? 3 : 2;
-            if (wh_idx < cmd_buf_pos_)
+            if (idx < cmd_buf_pos_)
             {
-                w = cmd_buf_[wh_idx] & 0xFFFF;
-                h = cmd_buf_[wh_idx] >> 16;
+                w = (int16_t)(cmd_buf_[idx] & 0xFFFF);
+                h = (int16_t)(cmd_buf_[idx] >> 16);
             }
             size_name = "VAR";
             break;
@@ -636,9 +895,45 @@ void Gpu::gp0_rect()
         case 3: w = 16; h = 16; size_name = "16x16"; break;
     }
 
-    emu::logf(emu::LogLevel::trace, "GPU", "GP0 RECT_%s%s%s (%d,%d) %dx%d c=%06X",
+    if (w <= 0 || h <= 0)
+        return; // degenerate rect
+
+    // Apply drawing offset
+    x = (int16_t)(x + draw_env_.offset_x);
+    y = (int16_t)(y + draw_env_.offset_y);
+
+    uint16_t tp = (uint16_t)(draw_env_.texpage_raw & 0xFFFF);
+    uint8_t semi_mode = (uint8_t)((tp >> 5) & 3);
+    uint8_t tex_depth = (uint8_t)((tp >> 7) & 3);
+    uint8_t flags = 0;
+    if (textured) flags |= 1;
+    if (semi)     flags |= 2;
+    if (raw)      flags |= 4;
+
+    // Rectangle corners
+    int16_t x1 = (int16_t)(x + w);
+    int16_t y1 = (int16_t)(y + h);
+    // UV wrap-around: add full size then mask to 8-bit (PS1 texture coords are 8-bit)
+    // Must add full w/h first, not truncate w/h to 8-bit before adding
+    uint8_t u1 = (uint8_t)((int32_t)u0 + w);
+    uint8_t v1 = (uint8_t)((int32_t)v0 + h);
+
+    // Triangle 1: top-left, top-right, bottom-left
+    push_triangle(
+        x,  y,  r, g, b, u0, v0,
+        x1, y,  r, g, b, u1, v0,
+        x,  y1, r, g, b, u0, v1,
+        clut, tp, flags, semi_mode, tex_depth);
+    // Triangle 2: top-right, bottom-right, bottom-left
+    push_triangle(
+        x1, y,  r, g, b, u1, v0,
+        x1, y1, r, g, b, u1, v1,
+        x,  y1, r, g, b, u0, v1,
+        clut, tp, flags, semi_mode, tex_depth);
+
+    emu::logf(emu::LogLevel::trace, "GPU", "GP0 RECT_%s%s%s TL=(%d,%d) %dx%d c=%02X%02X%02X ofs=(%d,%d)",
         size_name, textured ? "_TEX" : "", semi ? "_SEMI" : "",
-        x, y, w, h, color);
+        (int)x, (int)y, (int)w, (int)h, r, g, b, (int)draw_env_.offset_x, (int)draw_env_.offset_y);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +968,7 @@ void Gpu::gp0_vram_to_vram()
     }
 
     frame_stats_.vram_to_vram++;
+    vram_write_seq_++;
     emu::logf(emu::LogLevel::debug, "GPU", "GP0 VRAM->VRAM (%u,%u)->(%u,%u) %ux%u",
         sx, sy, dx, dy, w, h);
 }
@@ -731,6 +1027,8 @@ void Gpu::gp0_cpu_to_vram_data(uint32_t v)
 
     if (cpu_vram_words_remaining_ > 0)
         cpu_vram_words_remaining_--;
+
+    vram_write_seq_++;
 
     if (cpu_vram_words_remaining_ == 0 || cpu_vram_row_ >= cpu_vram_h_)
         gp0_state_ = Gp0State::idle;
@@ -851,6 +1149,7 @@ void Gpu::gp1_write(uint32_t v)
             read_vram_col_ = read_vram_row_ = 0;
             cpu_vram_words_remaining_ = 0;
             draw_env_ = DrawEnv{};
+            display_ = DisplayConfig{};
             emu::logf(emu::LogLevel::info, "GPU", "GP1 RESET");
             break;
 
@@ -870,6 +1169,7 @@ void Gpu::gp1_write(uint32_t v)
             const uint32_t off = v & 1u;
             if (off) status_ |= (1u << 23);
             else     status_ &= ~(1u << 23);
+            display_.display_enabled = (off == 0);
             emu::logf(emu::LogLevel::info, "GPU", "GP1 DISPLAY %s", off ? "OFF" : "ON");
             break;
         }
@@ -881,25 +1181,28 @@ void Gpu::gp1_write(uint32_t v)
 
         case 0x05: // Start of display area
         {
-            uint32_t dx = v & 0x3FF;
-            uint32_t dy = (v >> 10) & 0x1FF;
-            emu::logf(emu::LogLevel::trace, "GPU", "GP1 DISPLAY_START (%u,%u)", dx, dy);
+            display_.display_x = (uint16_t)(v & 0x3FF);
+            display_.display_y = (uint16_t)((v >> 10) & 0x1FF);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP1 DISPLAY_START (%u,%u)",
+                display_.display_x, display_.display_y);
             break;
         }
 
         case 0x06: // Horizontal display range
         {
-            uint32_t x1 = v & 0xFFF;
-            uint32_t x2 = (v >> 12) & 0xFFF;
-            emu::logf(emu::LogLevel::trace, "GPU", "GP1 H_RANGE %u-%u", x1, x2);
+            display_.h_range_x1 = (uint16_t)(v & 0xFFF);
+            display_.h_range_x2 = (uint16_t)((v >> 12) & 0xFFF);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP1 H_RANGE %u-%u",
+                display_.h_range_x1, display_.h_range_x2);
             break;
         }
 
         case 0x07: // Vertical display range
         {
-            uint32_t y1 = v & 0x3FF;
-            uint32_t y2 = (v >> 10) & 0x3FF;
-            emu::logf(emu::LogLevel::trace, "GPU", "GP1 V_RANGE %u-%u", y1, y2);
+            display_.v_range_y1 = (uint16_t)(v & 0x3FF);
+            display_.v_range_y2 = (uint16_t)((v >> 10) & 0x3FF);
+            emu::logf(emu::LogLevel::trace, "GPU", "GP1 V_RANGE %u-%u",
+                display_.v_range_y1, display_.v_range_y2);
             break;
         }
 
@@ -907,9 +1210,17 @@ void Gpu::gp1_write(uint32_t v)
         {
             // Bits: 0-1=H.res, 2=V.res, 3=video mode, 4=color depth, 5=interlace, 6=H.res2
             status_ = (status_ & ~0x7F4000u) | ((v & 0x3F) << 17) | ((v & 0x40) << 10);
-            emu::logf(emu::LogLevel::debug, "GPU", "GP1 DISPLAY_MODE hres=%u vres=%u video=%s depth=%u interlace=%u",
-                v & 3, (v >> 2) & 1, (v & 8) ? "PAL" : "NTSC",
-                (v >> 4) & 1, (v >> 5) & 1);
+            display_.h_res = (uint8_t)(v & 3);
+            if (v & 0x40) display_.h_res = 4; // 368 mode
+            display_.v_res = (uint8_t)((v >> 2) & 1);
+            display_.is_pal = (v & 8) != 0;
+            display_.color_24bit = (v & 0x10) != 0;
+            display_.interlace = (v & 0x20) != 0;
+            emu::logf(emu::LogLevel::debug, "GPU", "GP1 DISPLAY_MODE hres=%u(%u) vres=%u video=%s depth=%u interlace=%u",
+                display_.h_res, display_.width(), display_.v_res,
+                display_.is_pal ? "PAL" : "NTSC",
+                display_.color_24bit ? 24 : 15,
+                display_.interlace ? 1 : 0);
             break;
         }
 

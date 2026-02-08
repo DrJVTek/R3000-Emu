@@ -68,6 +68,16 @@ class Cdrom
         garbage_setloc_user_ = user;
     }
 
+    // IRQ callback: called when CDROM IRQ state changes (like DuckStation's push model).
+    // The callback receives the new irq_line() state (0 or 1).
+    // This allows immediate notification to the bus for edge detection.
+    using IrqCallback = void(*)(int irq_state, void* user);
+    void set_irq_callback(IrqCallback cb, void* user)
+    {
+        irq_callback_ = cb;
+        irq_callback_user_ = user;
+    }
+
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).
     // Retourne false si pas de disque ou secteur illisible.
     bool read_sector_2048(uint32_t lba, uint8_t out[2048]);
@@ -142,6 +152,10 @@ class Cdrom
     // Debug callback for garbage SetLoc
     GarbageSetLocCallback garbage_setloc_cb_{nullptr};
     void* garbage_setloc_user_{nullptr};
+
+    // IRQ callback for push-model notification
+    IrqCallback irq_callback_{nullptr};
+    void* irq_callback_user_{nullptr};
 
     // Registres CDROM (modèle minimal, mais avec sémantique réelle).
     uint8_t index_{0};   // écrit via 0x1F801800

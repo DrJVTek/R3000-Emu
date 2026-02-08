@@ -303,10 +303,78 @@ Tracer les LW $ra, XXX($sp) avant le crash pour voir d'où vient 0xFFFFFFFF
 - Pause envoyée correctement
 - IRQ1/IRQ2 délivrées normalement
 
-### À tester :
-1. Rebuild UE5 plugin avec code nettoyé
-2. Tester UE5 en comparant avec CLI au même nombre de steps
-3. Vérifier si les 278 triangles apparaissent en UE5 à ~frame 264
+---
+
+## !! CAUSE RACINE TROUVÉE !! (2026-02-08)
+
+### Différence CLI vs UE5 :
+- **CLI** : Utilise `--hle` → `hle_vectors=1` → exceptions interceptées à 0x80000080
+- **UE5** : `bHleVectors=false` par défaut → `hle_vectors=0` → BIOS réel gère les exceptions
+
+### Symptôme :
+Quand `hle_vectors=0`, le CPU boucle infiniment dans le kernel exception handler :
+```
+PC samples: 0x00001EDC, 0x00001F08, 0x000005E8, 0x000005FC
+i_stat=0x00000000, i_mask=0x0000000D
+```
+Le handler dispatche les callbacks VBlank mais le jeu reste dans une boucle d'attente VSync.
+
+### Analyse DMA :
+Les logs montrent que DMA3/DMA4 ne génèrent PAS d'IRQ :
+```
+DMA3 finish: DICR=0x4C000000 flags=0x4C en=0x00 master_en=0 force=0 flag_set=0 irq_fired=0
+```
+Le jeu a `i_mask` bit 3 (DMA) activé mais `master_en=0` dans DICR → pas d'IRQ DMA.
+
+---
+
+## ✅ FIX APPLIQUÉ (2026-02-08)
+
+### Fix HLE (ACTIF) :
+Fichiers modifiés :
+- `integrations/ue5/R3000Emu/Source/R3000EmuRuntime/Private/R3000EmuComponent.cpp`
+- `integrations/ue5/R3000Emu/Source/R3000EmuRuntime/Public/R3000EmuComponent.h`
+
+```cpp
+// R3000EmuComponent.cpp - InitEmulator()
+emu::Core::InitOptions Opt{};
+// BIOS boot requires HLE vectors - our hardware emulation isn't accurate enough
+// for the real BIOS exception handler to work correctly without HLE interception.
+Opt.hle_vectors = 1;
+```
+
+```cpp
+// R3000EmuComponent.h
+// [DEPRECATED] HLE vectors are now always enabled for BIOS boot.
+// Our hardware emulation isn't accurate enough for the real BIOS exception
+// handler to work correctly without HLE interception. This setting is ignored.
+UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (DeprecatedProperty))
+bool bHleVectors{true};
+```
+
+### Statut :
+- ✅ CLI : Fonctionne (testé avec `--hle --max-steps=5000000`)
+- ⏳ UE5 : En attente de recompilation du plugin par l'utilisateur
+
+### Pour tester en UE5 :
+1. Ouvrir le projet UE5 dans l'éditeur
+2. Recompiler le plugin R3000Emu (automatique ou Build → Rebuild)
+3. Relancer le jeu → devrait fonctionner avec HLE forcé
+
+---
+
+## 📋 FIX NON-HLE (Futur)
+
+Pour que le BIOS réel fonctionne sans HLE, il faudrait :
+1. Désassembler le code BIOS aux adresses 0x00001EDC etc.
+2. Comprendre ce que le handler attend exactement
+3. Corriger notre émulation I_STAT/I_MASK/DICR/timers
+4. Implémenter les IRQs edge-triggered comme DuckStation (SetLineState)
+
+Le BIOS exception handler fait :
+1. Vérifier I_STAT & I_MASK
+2. Dispatcher aux handlers via SysEnqIntRP chains (RAM[0x100+prio*4])
+3. Les handlers du jeu ne s'exécutent pas correctement ou ne mettent pas à jour les compteurs VSync
 
 ---
 

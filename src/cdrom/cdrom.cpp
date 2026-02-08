@@ -840,11 +840,21 @@ void Cdrom::set_irq(uint8_t flags)
     // 1F801803h.Index1 bits0-2 contain response IRQ type (INT1..INT7 as value 1..7).
     // Upper bits 5..7 read as 1.
     const uint8_t old = irq_flags_;
+    const int old_line = irq_line();
     irq_flags_ &= ~0x07u;
     irq_flags_ |= (flags & 0x07u);
+    const int new_line = irq_line();
     // Route to BUS tag so it appears in system.log
-    emu::logf(emu::LogLevel::info, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X",
-        (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_);
+    emu::logf(emu::LogLevel::info, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X line=%d->%d",
+        (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_,
+        old_line, new_line);
+
+    // Push-model notification: immediately notify the bus of IRQ state change.
+    // This mirrors DuckStation's InterruptController::SetLineState approach.
+    if (irq_callback_ && new_line != old_line)
+    {
+        irq_callback_(new_line, irq_callback_user_);
+    }
 }
 
 void Cdrom::stop_reading_with_error(uint8_t reason)
@@ -1501,11 +1511,14 @@ void Cdrom::exec_command(uint8_t cmd)
             {
                 push_resp(status_);
                 queue_cmd_irq(0x03);
-                // Queue INT5 to fire after BIOS ACKs this GetStat INT3
+                // Queue INT5 to fire after BIOS ACKs this GetStat INT3.
+                // INT5 "shell close" = disc is now ready after shell was closed.
+                // PSX-SPX: stat byte WITHOUT error flag, reason = 0x00 (shell closed).
+                // Reason 0x08 means "shell opened" which is WRONG here!
                 pending_irq_type_ = 0x05;
-                pending_irq_resp_ = status_ | 0x01u; // stat with error bit
-                pending_irq_reason_ = 0x08;           // shell open reason
-                pending_irq_delay_ = 50000;            // ~1.5ms after ACK
+                pending_irq_resp_ = status_;  // No error flag (disc is ready)
+                pending_irq_reason_ = 0x00;   // 0x00 = shell closed (not 0x08 = shell opened!)
+                pending_irq_delay_ = 50000;   // ~1.5ms after ACK
                 shell_close_sent_ = 1;
                 emu::logf(emu::LogLevel::info, "BUS",
                     "CD INT5 (shell close) queued after GetStat (delay=%u)", pending_irq_delay_);
@@ -2418,10 +2431,18 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
             else if (index_ == 1)
             {
                 const uint8_t old_enable = irq_enable_;
+                const int old_line = irq_line();
                 irq_enable_ = v & 0x1Fu;
-                emu::logf(emu::LogLevel::info, "CD", "IRQ_ENABLE: old=0x%02X new=0x%02X", old_enable, irq_enable_);
+                const int new_line = irq_line();
+                emu::logf(emu::LogLevel::info, "CD", "IRQ_ENABLE: old=0x%02X new=0x%02X line=%d->%d", old_enable, irq_enable_, old_line, new_line);
                 emu::logf(emu::LogLevel::trace, "CD", "IRQ check: disc=%p irq_en=0x%02X old_en=0x%02X irq_flags=0x%02X shell_close_sent=%d",
                     (void*)disc_, irq_enable_, old_enable, irq_flags_, (int)shell_close_sent_);
+
+                // Push-model notification: notify bus if IRQ line state changed.
+                if (irq_callback_ && new_line != old_line)
+                {
+                    irq_callback_(new_line, irq_callback_user_);
+                }
 
                 // INT5 (Shell Close / Disc Change):
                 // When BIOS enables INT5 (bit 4) and a disc is present, send INT5.
@@ -2475,14 +2496,23 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // - write 07h to reset response bits
                 // - write 1Fh to reset all IRQ bits (0..4)
                 const uint8_t old_flags = irq_flags_ & 0x1Fu;
+                const int old_line = irq_line();
                 const uint8_t m = v & 0x1Fu;
                 irq_flags_ &= (uint8_t)~m;
+                const int new_line = irq_line();
                 cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
                     "IRQ_ACK: write=0x%02X old=0x%02X new=0x%02X status=0x%02X shell_sent=%d disc=%d",
                     v, old_flags, (irq_flags_ & 0x1Fu), status_reg(), (int)shell_close_sent_, disc_ ? 1 : 0);
                 emu::logf(emu::LogLevel::info, "CD",
-                    "IRQ_ACK: write=0x%02X old=0x%02X new=0x%02X read_pend=%d queued=%d",
-                    v, old_flags, (irq_flags_ & 0x1Fu), (int)read_pending_irq1_, (int)queued_cmd_valid_);
+                    "IRQ_ACK: write=0x%02X old=0x%02X new=0x%02X read_pend=%d queued=%d line=%d->%d",
+                    v, old_flags, (irq_flags_ & 0x1Fu), (int)read_pending_irq1_, (int)queued_cmd_valid_,
+                    old_line, new_line);
+
+                // Push-model notification: notify bus that IRQ line went low.
+                if (irq_callback_ && new_line != old_line)
+                {
+                    irq_callback_(new_line, irq_callback_user_);
+                }
 
                 // Special bits:
                 if (v & 0x40u)

@@ -55,7 +55,6 @@ class Bus
 
     uint32_t ram_size() const;
     uint8_t* ram_ptr() { return ram_; }
-    bool has_bios() const { return bios_ != nullptr && bios_size_ != 0; }
 
     // Lecture/écriture RAM/MMIO. Retourne false en cas de fault (et remplit fault).
     bool read_u8(uint32_t addr, uint8_t& out, MemFault& fault);
@@ -72,11 +71,6 @@ class Bus
     // Tick "hardware" minimal (timers/IRQ controller).
     // Modèle très simplifié: on avance d'un certain nombre de cycles (souvent 1/cpu step).
     void tick(uint32_t cycles);
-
-    // Check CDROM IRQ edge and latch into I_STAT bit 2.
-    // Called after every CDROM register access to ensure I_STAT is updated
-    // before the CPU can poll the CDROM again.
-    void check_cdrom_irq_edge();
 
     // Debug: trace ciblé des écritures RAM "sensibles" (vecteurs low RAM, watch address).
     // Objectif: voir si le BIOS installe/écrase réellement les handlers en RAM, ou si tout reste à 0.
@@ -123,6 +117,9 @@ class Bus
     // SPU access
     audio::Spu* spu() const { return spu_; }
 
+    // GPU access (for UE5 display bridge)
+    gpu::Gpu* gpu() const { return gpu_; }
+
     // Enable WAV output for audio debugging
     void enable_wav_output(const char* path);
 
@@ -134,6 +131,7 @@ class Bus
     void sio0_write_data(uint8_t v);
     uint16_t sio0_read_data();
     uint16_t sio0_stat_value() const;
+    void check_cdrom_irq_edge();
 
     uint8_t* ram_{nullptr};
     uint32_t ram_size_{0};
@@ -206,7 +204,7 @@ class Bus
     uint32_t i_stat_{0};
     uint32_t i_mask_{0};
     Timer timers_[3]{};
-    uint32_t timer_prescale_accum_[3]{}; // prescaler accumulator (TMR0=dotclock, TMR1=hblank, TMR2=sysclock/8)
+    uint32_t timer_prescale_accum_[3]{}; // prescaler accumulator (dotclock/hblank)
 
     // SIO0 minimal state (enough for BIOS polling loops)
     uint16_t sio0_data_{0};
