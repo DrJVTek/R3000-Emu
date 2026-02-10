@@ -1,4 +1,687 @@
-# DEBUG: UE5 se bloque après les logos Sony/PlayStation
+# DEBUG: R3000-Emu UE5 Integration
+
+> **⚠️ CLAUDE: RELIRE CES FICHIERS À CHAQUE NOUVELLE SESSION !**
+>
+> 1. **`CLAUDE.md`** (racine projet) - Config, chemins, préférences
+> 2. **Ce fichier** (`docs/DEBUG_UE5_STUCK.md`) - Historique debug complet
+>
+> **L'utilisateur préfère le mode NON-HLE (bHleVectors=false).**
+
+---
+
+## 📌 ÉTAT ACTUEL (2026-02-10) - VERSION v8: FORCE ALL EVENTS READY
+
+### ✅ FIX v8 APPLIQUÉ: RESCUE MODE - FORCE EVENTS READY (BIDOUILLE)
+
+**Status**: Le jeu Ridge Racer fonctionne maintenant en mode non-HLE !
+
+**Fichier modifié**: `src/r3000/bus.cpp`
+
+**Le problème résolu**:
+- En mode non-HLE, le BIOS exception handler à 0x80000080 ne délivrait pas correctement les événements VSync
+- Le jeu restait bloqué dans la boucle VSync (PC=0x00001Exx) après le logo PlayStation
+- Cause: notre émulation hardware (I_STAT/I_MASK/exception dispatch) n'est pas assez précise
+
+**La solution (BIDOUILLE)**:
+```cpp
+// Après 50 VBlanks sans primitives GPU:
+// Scan event table et force TOUS les événements BUSY → READY
+if (vblank_stuck_count_ >= 50)
+{
+    // Parcourir la table d'événements kernel
+    // Tout événement avec status=0x2000 (BUSY) → status=0x4000 (READY)
+}
+```
+
+**Pourquoi c'est une bidouille**:
+1. Ne corrige pas la cause racine (BIOS handler qui ne marche pas)
+2. Force les événements prêts sans savoir lequel le jeu attend vraiment
+3. Peut causer des effets de bord (événements délivrés trop tôt/tard)
+
+**Un fix propre nécessiterait**:
+1. Comprendre pourquoi le BIOS exception handler échoue
+2. Corriger l'émulation des chaînes SysEnqIntRP
+3. Ou implémenter un dispatch d'événements VBlank correct côté hardware
+
+**Résultat**:
+- ✅ Sony logo: OK
+- ✅ PlayStation logo: OK (2 tri, 2-3 quad)
+- ✅ "Press Start": OK (8 rect)
+- ✅ Galaga mini-jeu: OK (24-62 quads, graphiques)
+- ⚠️ Son Galaga: À investiguer (volume/timing?)
+- ✅ Le jeu progresse jusqu'à frame #1500+
+
+---
+
+### ⚠️ PROBLÈME OUVERT: Son Galaga manquant
+
+**INVESTIGATION (2026-02-10):**
+
+**1. Le SPU GÉNÈRE de l'audio pendant Galaga:**
+```
+[6.914s] KEY_ON voice 0 addr=0x5AB70         ← Galaga sound effect start
+samples=327680 cb_calls=455 ... out=354/390  ← Non-zero output!
+samples=393216 cb_calls=544 ... out=941/1035 ← Audio IS playing
+[10.451s] KEY_ON voice 0 addr=0x77190        ← Another sound
+samples=524288 cb_calls=722 ... out=-717/-717 ← Still generating
+```
+
+**2. Corrélation GPU/SPU confirmée:**
+- GPU Frame 340-370: Galaga rectangles (17→175 rects)
+- SPU KEY_ON at 6.914s ≈ Frame 345 (340/50Hz = 6.8s)
+- **Le son et les graphiques sont synchronisés!**
+
+**3. Audio pipeline vérifié:**
+- `UE audio connected: gain=4.000 muted=0` - Connecté, pas muté
+- `cb=yes` dans les logs SPU - Callback IS configured
+- `cb_calls=455...1882` - Callback IS being called (count increasing)
+- `MAIN_VOL=0x3FFF` (16383) - Volume at full after 0.527s
+
+**4. Timeline audio:**
+| Temps | Événement |
+|-------|-----------|
+| 0.231s | SPU init, muted=1, all voices KEY_ON @0x01000 |
+| 0.232s | muted=0 (unmuted) |
+| 0.527s | MAIN_VOL=0x3FFF (full volume), CD audio bit enabled |
+| 0.719s | KEY_ON voices 0-3 @0x06140 (PlayStation logo jingle) |
+| 1.4-5s | PlayStation logo sounds (voices 4-23) |
+| 6.251s | Full SPU reinit (KEY_OFF all, KEY_ON all, KEY_OFF all) |
+| 6.252s | SPU enabled, MAIN_VOL=0x3FFF |
+| 6.914s | **KEY_ON voice 0 @0x5AB70** ← Galaga starts! |
+| 10.451s | KEY_ON voice 0 @0x77190 |
+| 16.601s | CD audio enabled (cd=0→1) |
+| 16.615s | KEY_OFF voice 0 |
+
+**5. CD Audio vs SPU:**
+- Galaga uses SPU sound effects (voices 0-23)
+- CD audio (music) doesn't start until 16.6s
+- The game might expect CD-DA music during Galaga?
+
+**HYPOTHÈSES RESTANTES:**
+
+1. **Audio buffer underrun** - UE5 demande des samples plus vite que le SPU les génère
+   - Ring buffer se vide → silence → "out=0/0" dans les logs
+   - Solution: augmenter le buffer ou throttle UE5 audio requests
+
+2. **Le user n'entend pas mais le son JOUE** - Problème UE5/Windows audio
+   - Vérifier que USynthComponent::Start() est appelé
+   - Vérifier les stats: TotalPushedSamples vs TotalGeneratedSamples
+
+3. **Galaga sound effects trop courts** - Les KEY_ON sont brefs
+   - Seulement voice 0 active pendant Galaga (autres voices = silence?)
+   - Les samples à 0x5AB70 et 0x77190 sont-ils des vrais sons?
+
+**À TESTER:**
+
+1. **Test CLI audio** (confirmer que Galaga a du son):
+   ```bash
+   ./build/Debug/r3000_emu.exe --bios=SCPH-7502.bin --cd="Ridge Racer (U).cue" \
+       --wav-output=galaga_audio.wav --max-steps=30000000
+   # Ouvrir galaga_audio.wav dans Audacity → voir si son Galaga est présent
+   ```
+
+2. **Ajouter logs pour stats audio UE5:**
+   ```cpp
+   // Dans TickComponent, log périodique:
+   UE_LOG(LogR3000Emu, Log, TEXT("Audio: pushed=%llu gen=%llu dropped=%llu silence=%llu"),
+       AudioComp_->GetTotalPushed(), AudioComp_->GetTotalGenerated(),
+       AudioComp_->GetTotalDropped(), AudioComp_->GetTotalSilence());
+   ```
+
+3. **Vérifier USynthComponent::Start()** - S'assurer que l'audio joue vraiment
+
+4. **Comparer buffer timing** - Si pushed << generated, c'est un underrun
+
+---
+
+## 🔊 ARCHITECTURE AUDIO UE5
+
+### Pipeline Audio:
+```
+[PS1 SPU] → [R3000AudioComponent Ring Buffer] → [USynthComponent OnGenerateAudio] → [UE5 Audio]
+    ↑                    ↑                                ↑
+   44.1kHz         Lock-free int16[65536]            Float conversion
+   Stereo          Push/Pull ring                    + gain * 4.0
+```
+
+### Fichiers:
+- `src/audio/spu.cpp` - PS1 SPU emulation, calls `audio_callback_` with samples
+- `R3000AudioComponent.cpp` - Ring buffer between SPU and UE5
+- `R3000EmuComponent.cpp:655` - Sets up callback: `Spu->set_audio_callback([Audio](...))`
+
+### Statistiques audio (pour debug):
+```cpp
+// R3000AudioComponent.h
+TotalPushedSamples_      // Samples reçus du SPU
+TotalGeneratedSamples_   // Samples demandés par UE5
+TotalDroppedSamples_     // Samples perdus (overrun)
+TotalSilenceSamples_     // Samples silence (underrun)
+```
+
+### Vérifications:
+1. `UE audio connected: gain=X.XXX muted=N` - Dans system.log au boot
+2. `cb=yes` dans spu.log - Callback configuré
+3. `cb_calls=N` croissant - Callback appelé
+4. `out=L/R` non-zero - Audio généré
+
+---
+
+### ✅ FIX #6 APPLIQUÉ (v6): DÉTECTION DE BLOCAGE VSYNC
+
+**Fichiers modifiés**:
+- `src/r3000/bus.cpp` - Ajout détection de blocage VSync
+- `src/r3000/bus.h` - Nouvelles variables de tracking
+- `src/gpu/gpu.h` - Getters pour frame_count() et last_frame_stats()
+
+**Fonctionnalité ajoutée**:
+Détection automatique quand le jeu est bloqué dans VSync (100+ VBlanks sans primitives).
+
+Quand un blocage est détecté, dump complet de l'état:
+- I_STAT / I_MASK / pending IRQs
+- CPU PC au moment du blocage
+- Table d'événements kernel (adresse, taille)
+- Chaînes SysEnqIntRP (VBlank[0], GPU[1], CDROM[2], DMA[3])
+- PCB / TCB pointers
+- Scan des événements VSync avec leur status (READY/BUSY/ALLOCATED)
+
+**Exemple de sortie**:
+```
+[BUS] ===== VSYNC STUCK DETECTED =====
+[BUS] VBlank #427: stuck for 100 VBlanks (no primitives)
+[BUS] Last real frame: VBlank #327
+[BUS] I_STAT=0x0000 I_MASK=0x000D pending=0x0000
+[BUS] CPU PC=0x00001ED0
+[BUS] Event table ptr=0x801C4000
+[BUS] SysEnqIntRP chains: [0]=0x801C0010 [1]=0x00000000 [2]=0x801B2040 [3]=0x00000000
+[BUS] PCB=0x801FFFF0 TCB=0x801C2000
+[BUS]   Event[4]: cls=0xF2000003 spec=0x0002 status=0x2000 (BUSY)
+[BUS] ===== END STUCK DUMP =====
+```
+
+**Interprétation**:
+- `status=0x2000 (BUSY)` = L'événement VSync n'est PAS marqué ready
+- Le BIOS exception handler devrait appeler DeliverEvent pour le marquer ready
+- Si l'événement reste BUSY, le jeu reste bloqué dans WaitEvent/VSync
+
+---
+
+### 🔴 ROOT CAUSE IDENTIFIÉE: Timing CD en mode wall-clock
+
+**ANALYSE COMPLÈTE DES LOGS (2026-02-10):**
+
+Le problème n'est PAS un bug d'IRQ. C'est un problème de TIMING:
+
+1. **Le jeu désactive VBlank intentionnellement** pendant le chargement CD
+2. **En CLI (vitesse max)**: Le chargement est quasi-instantané, VBlank réactivé vite
+3. **En UE5 (wall-clock à 33.8MHz)**: Le chargement prend du temps RÉEL
+
+**Timeline du problème:**
+```
+Frame #313: i_mask=0x7D (VBlank ON), rendu normal
+            → Le jeu lance un chargement CD
+            → Le jeu écrit i_mask=0x0C (VBlank OFF, seulement CD+DMA)
+Frame #320+: i_mask=0x0C, VBlank désactivé, chargement en cours
+            → Le jeu est dans la boucle BIOS de chargement CD
+            → Pattern: ReadN → Pause → SetLoc → SeekL → ReadN... (répété)
+Frame #437+: clip=(0,0)-(0,0), DMA2 nodes=704 words=0
+            → Le jeu est TOUJOURS en train de charger
+            → VBlank n'est jamais réactivé car le chargement n'est pas fini
+```
+
+**Délais CD qui causent le problème:**
+- `kSpinUpDelay = 20,321,280 cycles` (~600ms) - quand moteur idle
+- `kMinSeekTicks = 400,000 cycles` (~12ms) - seek minimum
+- `kMaxSeekTicks = 2,000,000 cycles` (~60ms) - seek maximum
+- Lecture secteur: 110,000-220,000 cycles (~3-7ms)
+
+**Calcul:** Le jeu charge secteur par secteur avec Pause entre chaque:
+- Chaque cycle: Seek (~20ms) + Read (~6ms) + CPU processing
+- Pour ~100 secteurs: ~2.6 secondes RÉELLES
+- Pendant ce temps, VBlank est désactivé!
+
+**PREUVE dans cdrom.log:**
+```
+[6106 ms] ReadN/S START: LBA=4 motor_spinning=0   ← Moteur arrêté!
+[7065 ms] Async IRQ1 delivered                     ← 959ms de délai!
+...
+[16487 ms] CMD 0x09 (Pause)                        ← Fin du chargement
+```
+→ Le chargement prend **10+ secondes** de temps réel!
+
+**POURQUOI CLI fonctionne:**
+- En CLI, les cycles passent instantanément
+- 20M cycles de spin-up = quelques ms réelles
+- Le chargement finit très vite, VBlank réactivé
+
+### 🎯 SOLUTION PROPOSÉE: Délais CD rapides pour UE5
+
+Option 1: Réduire les délais en mode wall-clock
+Option 2: Forcer VBlank à rester enabled (hack)
+Option 3: Mode "turbo CD" configurable
+
+---
+
+### ✅ FIX #4 CONFIRMÉ: VBlank est désactivé INTENTIONNELLEMENT
+
+Le jeu désactive VBlank dans I_MASK pendant le chargement CD.
+Ce n'est PAS un bug de l'émulateur - c'est le comportement normal.
+
+**Le vrai problème**: Les délais CD réalistes sont trop longs en wall-clock.
+
+### ✅ FIX #5 APPLIQUÉ (v5): FAST CD TIMING
+
+**Fichier modifié**: `src/cdrom/cdrom.cpp`
+
+**Changements**:
+Tous les délais CD divisés par 10x:
+
+| Délai | Original | Fast (v5) |
+|-------|----------|-----------|
+| Spin-up | 20,321,280 (~600ms) | 2,032,128 (~60ms) |
+| Seek min | 400,000 (~12ms) | 40,000 (~1.2ms) |
+| Seek max | 2,000,000 (~60ms) | 200,000 (~6ms) |
+| Seek factor | 135,000/log2 | 13,500/log2 |
+| Rotation | 110,000/220,000 | 11,000/22,000 |
+| Sector read | 110,000/220,000 | 11,000/22,000 |
+
+**Résultat attendu**:
+- Le chargement CD prend ~1 seconde au lieu de ~10+ secondes
+- VBlank réactivé avant timeout
+- Le jeu progresse normalement après le logo
+
+---
+
+### ✅ FIX #4 APPLIQUÉ: Logging I_MASK VBlank disable
+
+Ajout de logs WARNING quand VBlank (bit 0) est retiré de I_MASK:
+```cpp
+if ((old_mask & 0x01) && !(i_mask_ & 0x01))
+{
+    emu::logf(emu::LogLevel::warn, "IRQ",
+        "!!! VBlank DISABLED in I_MASK (0x%04X -> 0x%04X) !!!", ...);
+}
+```
+
+**Fichier modifié**: `src/r3000/bus.cpp` (byte write + word write)
+
+Après rebuild, chercher dans les logs: `VBlank DISABLED`
+
+---
+
+### ✅ FIX #3 APPLIQUÉ: shell_close_sent_ spurious INT5
+
+**Problème CONFIRMÉ**: Le shell close INT5 était envoyé au boot même si le shell n'a jamais été ouvert.
+
+**Symptôme dans les logs**:
+```
+CD set_irq(3): irq_en=0x18 ... last_cmd=0x1E line=0->0  ← ReadTOC IGNORÉ
+CD set_irq(2): irq_en=0x18 ... last_cmd=0x1E line=0->0  ← ReadTOC IGNORÉ
+CD set_irq(3): irq_en=0x18 ... last_cmd=0x1A line=0->0  ← GetID IGNORÉ
+CD set_irq(2): irq_en=0x18 ... last_cmd=0x1A line=0->0  ← GetID IGNORÉ
+[GPU] GP1 RESET                                         ← Jeu reset GPU!
+DMA2 LL: nodes=704 words=0                              ← Pas de primitives
+```
+
+**Cause**:
+- `shell_close_sent_=0` → INT5 (shell close) envoyé au premier GetStat
+- Le BIOS reçoit INT5 et entre dans une boucle de vérification shell
+- Il met `irq_en=0x18` (seulement INT4/INT5 enabled)
+- ReadTOC/GetID envoient INT2/INT3 qui sont **ignorés** (irq_en masque INT1-INT3)
+- Le jeu pense qu'il y a une erreur → GP1 RESET → clip=(0,0)-(0,0)
+
+**PSX-SPX spécification**:
+- INT5 shell close = "the shell was opened and is now closed"
+- Au cold boot avec disc déjà présent, le shell n'a JAMAIS été ouvert
+- Donc shell close INT5 ne devrait PAS être envoyé
+
+**Solution appliquée**:
+```cpp
+// AVANT (BUG):
+shell_close_sent_ = 0;  // → INT5 envoyé au boot
+
+// APRÈS (FIX):
+shell_close_sent_ = 1;  // → Pas d'INT5 au boot
+```
+
+**Fichier modifié**: `src/cdrom/cdrom.cpp` ligne 649
+
+### ✅ FIX #2 APPLIQUÉ: irq_line() formule incorrecte
+
+**Problème CONFIRMÉ**: La fonction `irq_line()` utilisait une formule incorrecte:
+```cpp
+// AVANT (FAUX):
+return ((irq_flags_ & irq_enable_ & 0x1Fu) != 0) ? 1 : 0;
+```
+
+**Pourquoi c'est faux** (PSX-SPX specification):
+- `irq_flags_` bits 0-2 contient une **VALEUR** 1-7 pour INT1-INT7 (pas un bitmask!)
+- `irq_enable_` bits 0-4 sont des **BITS INDIVIDUELS** (bit 0=INT1, bit 1=INT2, etc.)
+
+**Exemple concret du bug**:
+- INT3 pending: `irq_flags_` = 0x03 (valeur 3)
+- INT3 enabled: `irq_enable_` = 0x04 (bit 2)
+- Code faux: `0x03 & 0x04 = 0x00` → ligne=0 → **IRQ JAMAIS DÉLIVRÉ!**
+- Code correct: type=3, enable_bit = 1<<(3-1) = 0x04, `0x04 & 0x04 = 0x04` → ligne=1 ✅
+
+**Solution appliquée**:
+```cpp
+int Cdrom::irq_line() const
+{
+    const uint8_t irq_type = irq_flags_ & 0x07u;  // IRQ type 1-7
+    if (irq_type == 0) return 0;                  // No IRQ pending
+    if (irq_type > 5) return 0;                   // INT6/INT7 undefined
+    const uint8_t enable_bit = (uint8_t)(1u << (irq_type - 1));
+    return (irq_enable_ & enable_bit) ? 1 : 0;
+}
+```
+
+**Fichier modifié**: `src/cdrom/cdrom.cpp` ligne 909-923
+
+### ✅ TEST CLI RÉUSSI (2026-02-10)
+
+Avec le fix irq_line():
+```
+CD set_irq(3): ... line=0->1  ← INT3 déclenche maintenant!
+CD set_irq(5): ... line=0->1  ← INT5 aussi!
+DMA2 LL: nodes=1032 words=37  ← Jeu progresse!
+```
+
+### ✅ FIX #1 APPLIQUÉ: MINIMUM_INTERRUPT_DELAY (DuckStation)
+
+**Problème identifié**: Les IRQs CDROM pouvaient être délivrés trop rapidement après acquittement,
+causant des séquences IRQ qui confondaient le BIOS/jeu.
+
+**Solution implémentée**:
+- Ajout de `cycles_since_irq_ack_` dans cdrom.h
+- Constante `kMinInterruptDelay = 1000` cycles (comme DuckStation)
+- Après ACK d'un IRQ, le prochain ne peut être délivré qu'après 1000 cycles
+- Implémenté dans `Cdrom::tick()` et lors de l'écriture IRQ_ACK
+
+**Fichiers modifiés**:
+- `src/cdrom/cdrom.h`: Ajout compteur `cycles_since_irq_ack_` et constante
+- `src/cdrom/cdrom.cpp`: Incrément dans tick(), reset lors de ACK, vérification avant délivrance
+
+### ✅ TEST CLI RÉUSSI (2026-02-10)
+
+**Test Ridge Racer avec SCPH1001.BIN**:
+```
+DMA2 LL transitions observées:
+- words=5 : PlayStation logo phase (OT presque vide)
+- words=25 : Game starts rendering (primitives)
+- words=37 : Full game rendering (more primitives)
+```
+
+**Progression confirmée**:
+- VBlank #51 atteint (~1 sec)
+- VBlank #101 atteint (~2 sec)
+- VBlank #151 atteint (~3 sec)
+- Jeu passe de logo → game rendering
+
+**Le core émulateur fonctionne correctement !**
+
+### ⏳ PROCHAINE ÉTAPE: REBUILD UE5 (URGENT)
+
+**TROIS FIXES APPLIQUÉS** - Tous doivent être inclus dans le rebuild:
+
+1. **FIX #1**: `MINIMUM_INTERRUPT_DELAY` - timing IRQ
+2. **FIX #2**: `irq_line()` - formule de calcul corrigée
+3. **FIX #3**: `shell_close_sent_ = 1` - pas d'INT5 spurious au boot ← **NOUVEAU**
+
+Le plugin UE5 doit être recompilé pour inclure TOUS les fixes:
+
+**IMPORTANT**: Live Coding NE RECOMPILE PAS les fichiers inclus via `#include`!
+Le plugin utilise `#include "../../src/cdrom/cdrom.cpp"` donc:
+- **Rebuild All** ou **fermer/rouvrir UE5 Editor** sont OBLIGATOIRES
+- Live Coding ne suffit PAS
+
+Étapes:
+1. **Fermer UE5 Editor complètement**
+2. Rouvrir le projet PSXVR
+3. Le plugin sera recompilé automatiquement
+4. OU: Build → Rebuild All (force recompilation)
+5. Vérifier que `shell_sent=1` N'APPARAÎT PAS dans les logs au boot
+
+**Architecture plugin**: Le plugin inclut directement le source:
+```cpp
+// R3000Core_CDROM.cpp
+#include "../../src/cdrom/cdrom.cpp"  // ← Sera recompilé!
+```
+
+**DLL à surveiller**: `integrations/ue5/R3000Emu/Binaries/Win64/UnrealEditor-R3000EmuRuntime.dll`
+doit avoir un timestamp plus récent après rebuild.
+
+---
+
+## 🔧 SYSTÈME DE VERSIONS (IMPORTANT)
+
+**À chaque modification des sources, incrémenter la version !**
+
+Les fichiers suivants ont des marqueurs de version au démarrage:
+
+| Fichier | Log au démarrage | Version actuelle |
+|---------|------------------|------------------|
+| `src/emu/core.cpp` | `[CORE] R3000-Emu core vX` | v6 |
+| `src/r3000/cpu.cpp` | `[CPU] CPU source vX` | v6 |
+| `src/r3000/bus.cpp` | `[BUS] BUS source vX` | **v8** |
+| `src/gpu/gpu.cpp` | `[GPU] GPU source vX` | v6 |
+| `src/cdrom/cdrom.cpp` | `[CD] CDROM source vX` | v6 |
+
+### Historique des versions bus.cpp:
+- **v5**: Fast CD timing (délais réduits 10x)
+- **v6**: VSync stuck detection (dump état quand bloqué)
+- **v7**: VSync rescue (deliver_events_for_class pour VBlank)
+- **v8**: Force ALL events ready (scan table, force BUSY→READY)
+
+**Quand modifier la version**:
+1. Après chaque fix appliqué aux sources
+2. Incrémenter le numéro (v3 → v4 → v5...)
+3. Optionnel: ajouter un tag descriptif (ex: `v4 (timing_fix)`)
+
+**Comment vérifier que le rebuild a fonctionné**:
+1. Chercher dans les logs UE5 : `R3000-Emu core vX`
+2. Si le numéro de version correspond, le code est à jour
+3. Si ancien numéro, le rebuild n'a pas fonctionné
+
+---
+
+## 📌 SESSION PRÉCÉDENTE (2026-02-09) - CLI vs UE5
+
+### 🔍 DÉCOUVERTE MAJEURE (Session 2):
+
+**CLI et UE5 prennent des CHEMINS DE CODE DIFFÉRENTS après le logo !**
+
+#### Comparaison détaillée après logo PlayStation:
+
+| Métrique | CLI | UE5 |
+|----------|-----|-----|
+| OT addresses | 0x121DD4/0x1209B4 | 0x131184/0x153D78 |
+| DMA2 nodes | **1** | **704** |
+| DMA2 words | **6** (primitives!) | **0** (vide!) |
+| Clip region | Valid (600x400+) | **(0,0)-(0,0)** = RIEN |
+| GP1 RESET | Non observé | **Frame 399** |
+| Rendu | ✅ Fonctionne | ❌ Bloqué |
+
+### ❌ CAUSE RACINE IDENTIFIÉE:
+
+**1. UE5 reçoit GP1 RESET à frame 399 (ligne 17150)**
+```
+[GPU] GP1 RESET              ← GPU state effacé!
+[GPU] GP1 DISPLAY OFF
+[GPU] FRAME #399: clip=(0,0)-(0,0)  ← Clip invalide!
+```
+
+**2. Après GP1 RESET, le clip reste (0,0)-(0,0)**
+- Dernière CLIP_BR valide (639,479) à ligne 16120
+- Après: toutes les CLIP_BR sont (0,0)
+- Le jeu ne réinitialise JAMAIS le clip correctement
+
+**3. CDROM IRQs manquants autour de la transition**
+```
+17139: CD set_irq(3) last_cmd=0x1E line=0->0  ← IRQ NOT RAISED!
+17141: CD set_irq(3) last_cmd=0x1A line=0->0  ← IRQ NOT RAISED!
+17143: i_mask=0x0000000C                       ← VBlank désactivé
+```
+Les commandes ReadTOC (0x1E) et GetID (0x1A) ne lèvent pas l'IRQ line.
+
+**4. CLI ne fait PAS de GP1 RESET après le logo**
+- CLI continue avec les mêmes adresses OT (0x121DD4)
+- CLI a des primitives (words=6) → rendu visible
+- CLI progresse: nodes=1025 → 1028 → 1032 avec words croissants
+
+### 🔑 POURQUOI CLI ET UE5 DIVERGENT?
+
+Le jeu détecte quelque chose de différent et prend un autre chemin:
+
+1. **Timing CDROM**: Les IRQs ReadTOC/GetID qui ne lèvent pas `line=0->1`
+   pourraient faire que le jeu pense que le CD n'est pas prêt
+
+2. **I_MASK différent**: Au moment critique, UE5 a I_MASK=0x0000000C
+   (VBlank désactivé) tandis que CLI a I_MASK=0x007D (tous activés)
+
+3. **Le jeu fait un GP1 RESET** en UE5 (ligne 17150) mais PAS en CLI
+   → Suggère que le jeu est dans un état d'erreur/réinitialisation en UE5
+
+### ✅ PREUVE: CLI FONCTIONNE CORRECTEMENT
+
+Test 60 secondes CLI:
+```bash
+./build/Debug/r3000_emu.exe --bios="SCPH-7502.bin" --cd="Ridge Racer (U).cue"
+```
+- VBlank #1 → #251 atteint
+- Progression: nodes=1025 (logo) → nodes=1032 (jeu avec primitives)
+- **words=37** = 37 mots de primitives GPU par frame = RENDU ACTIF!
+
+### 🔬 SESSION 2 - ANALYSE APPROFONDIE (2026-02-09)
+
+#### Les deux modes ont GP1 RESET à VBlank #400!
+
+**Test CLI 3 minutes:**
+```bash
+./build/Debug/r3000_emu.exe --bios="SCPH-7502.bin" --cd="Ridge Racer.cue"
+```
+
+| Événement | CLI | UE5 |
+|-----------|-----|-----|
+| GP1 RESET #1 | Boot | Boot |
+| GP1 RESET #2 | ~VBlank #400 | ~VBlank #400 |
+| Après reset | **Continue!** VBlank #801 | **Bloqué!** |
+| clip=(0,0)-(0,0) | **ZÉRO** | **BEAUCOUP** |
+
+#### UE5: Le jeu SET EXPLICITEMENT clip=(0,0)-(0,0)
+
+```
+17204→[GPU] GP0 ENV CLIP_TL (0,0)
+17205→[GPU] GP0 ENV CLIP_BR (0,0)    ← Le jeu fait ça exprès!
+17206→[GPU] GP0 ENV DRAW_OFFSET (0,0)
+```
+
+Ce n'est **PAS** un bug d'émulation - le jeu envoie ces commandes!
+
+#### Différence clé: Adresse LBA lue après GP1 RESET
+
+| Mode | LBA après GP1 RESET | Résultat |
+|------|---------------------|----------|
+| CLI | **LBA=16** | ✅ Jeu continue |
+| UE5 | LBA autre (?) | ❌ clip=(0,0)-(0,0) |
+
+CLI lit LBA=16 après reset:
+```
+[CD] SetLoc: MSF=00:02:16 -> LBA=16
+```
+
+UE5 ne montre PAS de SetLoc LBA=16 dans les logs!
+
+#### Hypothèse finale:
+
+Le jeu prend un **chemin de code différent** basé sur:
+1. L'état mémoire qui diffère entre CLI et UE5
+2. Une variable ou flag qui n'est pas correctement initialisé
+3. Un timing subtil qui cause une condition de course
+
+Le jeu pense être dans un état d'erreur/réinitialisation en UE5 et:
+- Configure clip=(0,0)-(0,0)
+- Ne charge pas les bons secteurs CD
+- Reste bloqué dans une boucle d'attente
+
+### Prochaines étapes:
+1. [ ] Comparer les secteurs CD lus après GP1 RESET (CLI vs UE5)
+2. [ ] Tracer quelle variable d'état cause le clip=(0,0)
+3. [ ] Vérifier si un flag mémoire diffère (0x80040018 = game code)
+4. [ ] Tester avec DuckStation pour avoir une référence
+
+---
+
+**⚠️ NE PAS TOUCHER À `deliver_events_for_class` POUR VBLANK/CDROM !**
+
+### ❌ RÉGRESSION CAUSÉE PAR CES FIXES (REVERTÉS):
+
+J'ai essayé d'ajouter `deliver_events_for_class()` pour VBlank et CDROM:
+```cpp
+// FIX #1 (REVERT): VBlank - CASSAIT LE LOGO PLAYSTATION
+deliver_events_for_class(ram_, ram_size_, 0xF000'0001u);
+
+// FIX #2 (REVERT): CDROM classe 0xF0000003 - CASSAIT AUSSI
+deliver_events_for_class(bus->ram_, bus->ram_size_, 0xF000'0003u);
+```
+
+**RÉSULTAT:** Régression ! On perdait le logo PlayStation (280 triangles).
+- AVANT les fixes: Sony ✅ + PlayStation ✅ (280 tris)
+- APRÈS les fixes: Sony ✅ + PlayStation ❌ (plus affiché!)
+
+### ✅ REVERT APPLIQUÉ:
+Les fixes ont été retirés. Retour à l'état précédent:
+- Sony logo: ✅
+- PlayStation logo (280 tris): ✅
+- Après PlayStation logo: ❌ (bloqué, 0 primitives)
+
+### 🔑 LEÇON APPRISE:
+**Le BIOS exception handler (0x80000080) gère DÉJÀ la délivrance des événements!**
+
+En appelant `deliver_events_for_class()` nous-mêmes, on DOUBLE-DÉLIVRE les événements,
+ce qui corrompt l'état du système d'événements BIOS et casse le jeu.
+
+La classe `0x28` pour CDROM est correcte et suffisante - c'est ce que le BIOS utilise.
+Ne PAS ajouter `0xF0000003` qui est utilisé seulement en mode HLE.
+
+### Ce qui fonctionne actuellement:
+- ✅ Boot BIOS complet
+- ✅ Logo Sony (son + image)
+- ✅ Logo PlayStation License (280 triangles)
+- ✅ CDROM lecture (données chargées)
+
+### Ce qui ne fonctionne PAS:
+- ❌ Après logo PlayStation: 0 primitives, clip=(0,0)-(0,0)
+- ❌ Galaga (mini-jeu loading) jamais affiché
+- ❌ Le jeu reste bloqué en mode "loading"
+
+### Analyse des logs (2026-02-09):
+
+**Séquence observée dans system.log:**
+1. CDROM lit LBA 4-477 → OK (940KB chargé)
+2. CMD Pause → IRQ3 Complete → OK
+3. DMA4 SPU → audio chargé → OK
+4. Frame #488+: **0 primitives, clip=(0,0)-(0,0)**
+5. CPU alterne entre:
+   - `0x8005699x` = game code (boucle VSync wait)
+   - `0x00001Exx` = BIOS exception handler
+6. VBlank continue: #501 → #551 → ... → #851
+7. `i_stat=0x00000001` (VBlank) apparaît parfois, puis est cleared
+8. **Le jeu ne sort JAMAIS de sa boucle VSync pour rendre Galaga**
+
+**Conclusion:**
+- Les IRQs VBlank ARRIVENT (i_stat=1 visible)
+- Le BIOS exception handler TOURNE (PC=0x00001Exx)
+- MAIS le callback VBlank du jeu ne fait pas ce qu'il devrait
+- Le jeu reste coincé dans sa boucle d'attente VSync
+
+### Questions ouvertes:
+1. **Quelle BIOS?** Certains BIOS ont des comportements différents
+2. **Est-ce que HLE mode fonctionne?** Si oui, le problème est dans l'interaction BIOS/hardware
+3. **Comparer avec DuckStation** pour voir où ça diverge
+
+---
+
+## Historique: UE5 se bloquait après les logos Sony/PlayStation
 
 **RELIRE CE FICHIER À CHAQUE FOIS AVANT DE CONTINUER LE DEBUG**
 
@@ -375,6 +1058,108 @@ Le BIOS exception handler fait :
 1. Vérifier I_STAT & I_MASK
 2. Dispatcher aux handlers via SysEnqIntRP chains (RAM[0x100+prio*4])
 3. Les handlers du jeu ne s'exécutent pas correctement ou ne mettent pas à jour les compteurs VSync
+
+---
+
+---
+
+## ✅ SESSION 2026-02-09 : NON-HLE FONCTIONNE !
+
+### CORRECTION IMPORTANTE :
+**Le mode non-HLE fonctionne maintenant !** L'utilisateur NE VEUT PAS de HLE.
+
+### Modifications apportées cette session :
+
+#### 1. Thread-safety VRAM (gpu.h)
+```cpp
+// Ajouté: copie thread-safe de VRAM pour UE5
+void copy_vram(uint16_t* out, uint32_t& out_seq) const
+{
+    std::lock_guard<std::mutex> lock(draw_list_mutex_);
+    std::memcpy(out, vram_.get(), kVramPixels * sizeof(uint16_t));
+    out_seq = vram_write_seq_;
+}
+
+uint32_t vram_write_seq_locked() const
+{
+    std::lock_guard<std::mutex> lock(draw_list_mutex_);
+    return vram_write_seq_;
+}
+```
+
+#### 2. Thread-safety PutcharCB (R3000EmuComponent)
+```cpp
+// PutcharCB queue les lignes au lieu de broadcast direct
+FScopeLock Lock(&Self->PutcharLock_);
+Self->PutcharPendingLines_.Add(Self->PutcharLineBuf_);
+
+// TickComponent broadcast sur le game thread
+TArray<FString> LinesToBroadcast;
+{
+    FScopeLock Lock(&PutcharLock_);
+    LinesToBroadcast = MoveTemp(PutcharPendingLines_);
+}
+for (const FString& Line : LinesToBroadcast)
+    OnBiosPrint.Broadcast(Line);
+```
+
+#### 3. Respect de bHleVectors (IMPORTANT!)
+```cpp
+// AVANT (bug): Opt.hle_vectors = 1; // Forçait HLE secrètement!
+// APRÈS (fix): Opt.hle_vectors = bHleVectors ? 1 : 0;
+```
+
+### Résultats du test non-HLE (Ridge Racer US) :
+
+| Élément | Résultat |
+|---------|----------|
+| Boot BIOS | ✅ PC=0xBFC00000 → game code |
+| CDROM boot | ✅ 940KB chargé (LBA 4-477) |
+| GPU intro 3D | ✅ 278 triangles (frames 275-284) |
+| "Press Start" | ✅ 8 rectangles (frames 285-313) |
+| VBlank IRQ | ✅ #1 → #951 (continu) |
+| Mode attract | ✅ Charge LBA 478, 238 |
+| Worker exit | ✅ Normal (pas de crash) |
+
+### Séquence observée :
+1. **Frames 36-73** : Logos Sony/PlayStation (fade in/out)
+2. **Frames 75-284** : Intro 3D Ridge Racer (278 tri, 1 quad)
+3. **Frames 285-313** : "Press Start" (8 rect, fade effect)
+4. **Frame 314+** : Mode attract loading (VBlank masqué, CD streaming)
+5. **Frames 437-488** : Écran vide (0 primitives, attente données)
+
+### Comportement attendu :
+- Sans appuyer sur START, le jeu entre en mode démo après ~5 sec
+- Pendant le chargement démo, I_MASK=0x0C (VBlank bit 0 désactivé)
+- C'est **normal** - le jeu masque VBlank pendant le streaming CD
+
+### Question ouverte :
+**Est-ce que l'affichage UE5 montre les triangles/rectangles ?**
+- Si OUI → émulation OK, jeu attend input
+- Si NON → problème côté rendu UE5 (copie VRAM → texture)
+
+---
+
+## Configuration recommandée (UE5 Blueprint) :
+
+| Property | Valeur | Raison |
+|----------|--------|--------|
+| bHleVectors | **false** | Non-HLE préféré par l'utilisateur |
+| bThreadedMode | true | Timing précis via waitable timer |
+| BusTickBatch | 1 | Cycle-accurate |
+| CycleMultiplier | 1 | Timing normal |
+| bFastBoot | false | Boot BIOS complet |
+
+---
+
+## Chemins importants :
+
+| Fichier | Chemin |
+|---------|--------|
+| UE5 Logs | `E:\Projects\github\Live\PSXVR\logs\` |
+| CLI Build | `E:\Projects\github\Live\R3000-Emu\build\Release\r3000emu.exe` |
+| BIOS | Configuré dans Blueprint `BiosPath` |
+| CD Image | `E:\Projects\PSX\roms\Ridge Racer (U).cue` |
 
 ---
 
