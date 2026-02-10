@@ -233,6 +233,13 @@ class Bus
     uint32_t vblank_no_mask_count_{0}; // VBlank frames with I_MASK=0 (for auto-enable workaround)
     uint32_t no_mask_cycles_{0}; // Cycles accumulated with I_MASK=0 (for auto-enable workaround)
 
+    // VBlank stuck detection - tracks when we're stuck in VSync loop
+    uint32_t vblank_total_count_{0};    // Total VBlanks since boot
+    uint32_t vblank_last_frame_{0};     // VBlank count at last real frame (GPU primitives)
+    uint32_t vblank_stuck_count_{0};    // Consecutive VBlanks without real frame progress
+    uint32_t vsync_loop_pc_count_{0};   // Times we've seen PC in 0x00001Exx range
+    int vblank_stuck_logged_{0};        // Only log stuck state once
+
     // ----------------------------
     // SPU (minimal, spec-aligned)
     // ----------------------------

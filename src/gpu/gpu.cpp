@@ -170,6 +170,8 @@ Gpu::Gpu(rlog::Logger* logger)
     : logger_(logger)
     , vram_(std::make_unique<uint16_t[]>(kVramPixels))
 {
+    // Version marker - update when making changes!
+    emu::logf(emu::LogLevel::info, "GPU", "GPU source v6 (vsync_stuck_detect)");
     status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
     vblank_div_ = 0;
@@ -236,19 +238,23 @@ int Gpu::tick_vblank(uint32_t cycles)
         }
 
         const auto& s = frame_stats_;
-        if (s.total_words > 0)
+        // Log at INFO level for frames 280-295 to debug the transition
+        const auto log_level = (frame_count_ >= 280 && frame_count_ <= 295)
+            ? emu::LogLevel::info : emu::LogLevel::debug;
+        if (s.total_words > 0 || (frame_count_ >= 280 && frame_count_ <= 295))
         {
-            emu::logf(emu::LogLevel::debug, "GPU", "FRAME #%u: %u tri, %u quad, %u rect, %u line, %u fill, "
+            emu::logf(log_level, "GPU", "FRAME #%u: %u tri, %u quad, %u rect, %u line, %u fill, "
                 "%u v2v, %u c2v, %u v2c, %u env | %u words",
                 frame_count_, s.triangles, s.quads, s.rects, s.lines, s.fills,
                 s.vram_to_vram, s.cpu_to_vram, s.vram_to_cpu, s.env_cmds, s.total_words);
-            emu::logf(emu::LogLevel::debug, "GPU", "  DRAWENV clip=(%u,%u)-(%u,%u) ofs=(%d,%d) | "
+            emu::logf(log_level, "GPU", "  DRAWENV clip=(%u,%u)-(%u,%u) ofs=(%d,%d) | "
                 "DISP start=(%u,%u) wh=(%u,%u) | draw_list=%zu tris",
                 draw_env_.clip_x1, draw_env_.clip_y1, draw_env_.clip_x2, draw_env_.clip_y2,
                 (int)draw_env_.offset_x, (int)draw_env_.offset_y,
                 display_.display_x, display_.display_y, display_.width(), display_.height(),
                 draw_lists_[1 - draw_active_].cmds.size());
         }
+        prev_frame_stats_ = frame_stats_;  // Save before reset for stuck detection
         frame_stats_.reset();
 
         return 1; // Signal VBlank IRQ

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -108,6 +109,11 @@ struct FrameStats
 class Gpu
 {
   public:
+    // Magic number to detect stale/freed Gpu pointers (Hot Reload issue)
+    static constexpr uint32_t kMagicValid = 0x47505531u;  // "GPU1"
+    uint32_t magic_{kMagicValid};
+    bool is_valid() const { return magic_ == kMagicValid; }
+
     explicit Gpu(rlog::Logger* logger = nullptr);
 
     void set_log_sinks(const flog::Sink& gpu_only, const flog::Sink& combined, const flog::Clock& clock);
@@ -140,7 +146,30 @@ class Gpu
         out = draw_lists_[1 - draw_active_];
     }
 
+    /// Thread-safe copy of VRAM. Use this from UE5 to avoid race conditions.
+    /// @param out Buffer to copy into (must be at least kVramPixels * sizeof(uint16_t) = 1MB)
+    /// @param out_seq Output: the vram_write_seq at copy time (for dirty tracking)
+    void copy_vram(uint16_t* out, uint32_t& out_seq) const
+    {
+        std::lock_guard<std::mutex> lock(draw_list_mutex_);
+        std::memcpy(out, vram_.get(), kVramPixels * sizeof(uint16_t));
+        out_seq = vram_write_seq_;
+    }
+
+    /// Thread-safe check of VRAM write sequence (for dirty tracking without full copy)
+    uint32_t vram_write_seq_locked() const
+    {
+        std::lock_guard<std::mutex> lock(draw_list_mutex_);
+        return vram_write_seq_;
+    }
+
     uint32_t vram_frame_count() const { return vram_frame_; }
+
+    // Total VBlank count since init
+    uint32_t frame_count() const { return frame_count_; }
+
+    // Get previous frame stats (saved before reset, for stuck detection)
+    const FrameStats& prev_frame_stats() const { return prev_frame_stats_; }
 
     /// Monotonically increasing counter bumped on every VRAM write (fill, CPU→VRAM, VRAM→VRAM).
     /// UE5 can compare against its own copy to skip texture uploads when nothing changed.
@@ -233,6 +262,7 @@ class Gpu
 
     // Frame statistics
     FrameStats frame_stats_{};
+    FrameStats prev_frame_stats_{};  // Saved before reset for stuck detection
     uint32_t frame_count_{0};
     uint32_t vram_frame_{0};
 

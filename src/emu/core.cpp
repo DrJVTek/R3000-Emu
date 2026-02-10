@@ -40,6 +40,8 @@ static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nul
 
 Core::Core(rlog::Logger* logger) : logger_(logger), cdrom_(logger), gpu_(logger)
 {
+    // Version marker - update when making changes!
+    emu::logf(emu::LogLevel::info, "CORE", "R3000-Emu core v6 (vsync_stuck_detect)");
 }
 
 Core::~Core() = default;

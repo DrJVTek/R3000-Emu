@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 
+  PS1 logo - DONN?ES R?ELLES des logs GPU (system.log)
+  Frame typique: QUAD_FLAT (fond) + QUAD_GOURAUD + 2x TRI_GOURAUD
+  Coordonn?es PS1: (0,0) haut-gauche, X? droite, Y? bas, 640x512
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="-20 -20 680 540"
+     width="800"
+     height="600"
+     fill-rule="nonzero">
+
+  <!-- Fond gris (QUAD_FLAT) -->
+  <polygon points="0,0 640,0 640,511 0,511" fill="#B5B5B5" stroke="#888" stroke-width="1"/>
+
+  <!-- Logo: QUAD_GOURAUD - losange central -->
+  <!-- v0=(192,256)#B50000 v1=(320,103)#B58C00 v2=(320,409)#B58C00 v3=(448,256)#B50000 -->
+  <!-- Split: Tri1 v0,v1,v2 | Tri2 v1,v2,v3 -->
+  <polygon points="192,256 320,103 320,409" fill="#B50000"/>
+  <polygon points="320,103 320,409 448,256" fill="#B58C00"/>
+
+  <!-- TRI droite: v0=(446,257) v1=(320,106) v2=(320,408) -->
+  <polygon points="446,257 320,106 320,408" fill="#B50000"/>
+
+  <!-- TRI gauche: v0=(194,255) v1=(320,104) v2=(320,406) -->
+  <polygon points="194,255 320,104 320,406" fill="#B50000"/>
+
+  <!-- Note: donnees reelles des logs. Le vrai logo PS1 = ~120 polygones, on n en a que 4 -->
+  <text x="10" y="30" fill="#000" font-size="14">Donnees reelles - 4 tris seulement (logo complet = ~120)</text>
+</svg>

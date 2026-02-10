@@ -169,6 +169,8 @@ static int psx_is_mmio(uint32_t phys_addr)
 
 Cpu::Cpu(Bus& bus, rlog::Logger* logger) : bus_(bus), logger_(logger)
 {
+    // Version marker - update when making changes!
+    emu::logf(emu::LogLevel::info, "CPU", "CPU source v6 (vsync_stuck_detect)");
 }
 
 void Cpu::set_hle_vectors(int enabled)
@@ -1791,35 +1793,19 @@ Cpu::StepResult Cpu::step()
 
         // Check if BIOS has installed real exception handlers via SysEnqIntRP.
         // The CDROM driver uses priority 2 chain at RAM[0x108].
-        // If a handler is registered, let the BIOS code run instead of HLE.
         Bus::MemFault rmf{};
         uint32_t cdrom_chain = 0;
         (void)bus_.read_u32(0x108u, cdrom_chain, rmf); // Priority 2 = CDROM
         const int bios_has_irq_handlers = (cdrom_chain != 0) ? 1 : 0;
 
-        // If BIOS has registered IRQ handlers via SysEnqIntRP, let its code run.
-        // The BIOS exception handler at 0x80000080 will dispatch to the chain.
-        if (bios_has_irq_handlers && code == 0u)
-        {
-            uint32_t w0 = 0;
-            (void)bus_.read_u32(0x80u, w0, rmf); // Read first word at 0x80000080 (phys 0x80)
-            if (w0 != 0)
-            {
-                // Real BIOS exception handler code exists - execute it normally
-                if (log_it && sys_has_clock_)
-                {
-                    flog::logf(sys_io_, sys_clock_, flog::Level::info, "CPU",
-                        "EXC VEC 0x80000080: BIOS handlers present (chain=0x%08X), running BIOS code",
-                        cdrom_chain);
-                }
-                // Don't intercept - skip HLE processing and let normal fetch/execute
-                // continue at PC=0x80000080 where the BIOS exception handler lives.
-                // DO NOT do RFE here - the BIOS handler will do that after processing.
-                goto skip_hle_exception_handling;
-            }
-        }
+        // NOTE: Previously we would skip HLE and let BIOS exception handler run
+        // when bios_has_irq_handlers was set. But our hardware emulation (especially
+        // IRQ timing and I_MASK behavior) isn't accurate enough for the BIOS handler
+        // to work correctly. The CPU would get stuck in the kernel exception loop.
+        // Now we ALWAYS use HLE for IRQ handling, even when BIOS has handlers.
+        // This ensures VBlank/CDROM events are delivered correctly.
 
-        if (code == 0u && !bios_has_irq_handlers)
+        if (code == 0u)
         {
             // Helper: save full CPU context to TCB
             auto save_context_to_tcb = [&]() {
@@ -2003,10 +1989,6 @@ Cpu::StepResult Cpu::step()
         r.instr = 0;
         return r;
     }
-
-skip_hle_exception_handling:
-    // Exception vector en RAM (BEV=0): 0x80000080 (normal, non-fastboot).
-    // When BIOS handlers exist, we jump here to let normal execution proceed.
 
     // -----------------------------
     // 1) FETCH

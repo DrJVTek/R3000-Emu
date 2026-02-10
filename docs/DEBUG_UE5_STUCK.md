@@ -134,6 +134,52 @@ samples=524288 cb_calls=722 ... out=-717/-717 ← Still generating
 
 ---
 
+### ✅ FIX SPU APPLIQUÉ (v9): force_off() quand SPU désactivé
+
+**Problème identifié (comparaison DuckStation):**
+Quand le jeu fait un SPU init, il écrit SPUCNT=0 (disable). DuckStation force alors
+TOUTES les voix off immédiatement. Notre code NE FAISAIT PAS ça.
+
+**DuckStation:**
+```cpp
+if (!new_value.enable && s_state.SPUCNT.enable)
+{
+    for (u32 i = 0; i < NUM_VOICES; i++)
+        s_state.voices[i].ForceOff();
+}
+```
+
+**Fixes appliqués:**
+
+1. **`SpuVoice::force_off()`** (spu_voice.cpp/h):
+   ```cpp
+   void SpuVoice::force_off()
+   {
+       env_phase_ = ENV_OFF;
+       env_level_ = 0;
+   }
+   ```
+   Contrairement à `key_off()` qui démarre la phase RELEASE (fade out),
+   `force_off()` arrête immédiatement la voix.
+
+2. **Détection transition enable dans SPUCNT** (spu.cpp):
+   ```cpp
+   const bool old_enable = (old >> 15) & 1;
+   const bool new_enable = (val >> 15) & 1;
+   if (old_enable && !new_enable)
+   {
+       for (int i = 0; i < kNumVoices; i++)
+           voices_[i].force_off();
+   }
+   ```
+
+**Résultat attendu:**
+- Quand le jeu réinitialise le SPU (SPUCNT 0xC000→0x0000→0xC000),
+  les anciennes voix sont correctement arrêtées avant le nouveau init.
+- Le son Galaga devrait maintenant jouer correctement.
+
+---
+
 ## 🔊 ARCHITECTURE AUDIO UE5
 
 ### Pipeline Audio:
@@ -462,7 +508,7 @@ Les fichiers suivants ont des marqueurs de version au démarrage:
 |---------|------------------|------------------|
 | `src/emu/core.cpp` | `[CORE] R3000-Emu core vX` | v6 |
 | `src/r3000/cpu.cpp` | `[CPU] CPU source vX` | v6 |
-| `src/r3000/bus.cpp` | `[BUS] BUS source vX` | **v8** |
+| `src/r3000/bus.cpp` | `[BUS] BUS source vX` | **v9** |
 | `src/gpu/gpu.cpp` | `[GPU] GPU source vX` | v6 |
 | `src/cdrom/cdrom.cpp` | `[CD] CDROM source vX` | v6 |
 
@@ -471,6 +517,7 @@ Les fichiers suivants ont des marqueurs de version au démarrage:
 - **v6**: VSync stuck detection (dump état quand bloqué)
 - **v7**: VSync rescue (deliver_events_for_class pour VBlank)
 - **v8**: Force ALL events ready (scan table, force BUSY→READY)
+- **v9**: Log rescued events (log class/spec pour identifier le bon événement)
 
 **Quand modifier la version**:
 1. Après chaque fix appliqué aux sources

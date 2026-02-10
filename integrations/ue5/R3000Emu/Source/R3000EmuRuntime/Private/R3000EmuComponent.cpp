@@ -410,11 +410,10 @@ bool UR3000EmuComponent::BootBiosInternal()
     emu::Core::InitOptions Opt{};
     Opt.pretty = bTraceASM ? 1 : 0;
     Opt.trace_io = bTraceIO ? 1 : 0;
-    // BIOS boot requires HLE vectors - our hardware emulation isn't accurate enough
-    // for the real BIOS exception handler to work correctly without HLE interception.
-    // The BIOS exception handler loops infinitely waiting for conditions that our
-    // current IRQ/timer emulation doesn't satisfy precisely.
-    Opt.hle_vectors = 1;
+    // HLE vectors: intercept BIOS exception handler and syscalls.
+    // When OFF, the real BIOS exception handler runs (requires accurate HW emulation).
+    // User can toggle via bHleVectors property in Blueprint.
+    Opt.hle_vectors = bHleVectors ? 1 : 0;
     Opt.loop_detectors = bLoopDetectors ? 1 : 0;
     Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
 
@@ -733,6 +732,20 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+    // Process pending putchar lines from worker thread (must broadcast on game thread)
+    {
+        TArray<FString> LinesToBroadcast;
+        {
+            FScopeLock Lock(&PutcharLock_);
+            LinesToBroadcast = MoveTemp(PutcharPendingLines_);
+            PutcharPendingLines_.Reset();
+        }
+        for (const FString& Line : LinesToBroadcast)
+        {
+            OnBiosPrint.Broadcast(Line);
+        }
+    }
+
     if (!bRunning || !Core_)
     {
         CyclesLastFrame_.Store(0);
@@ -1043,11 +1056,15 @@ void UR3000EmuComponent::PutcharCB(char Ch, void* User)
     if (!Self)
         return;
 
+    // NOTE: This callback runs on the WORKER THREAD during Core::step().
+    // UE5 delegates are NOT thread-safe, so we queue completed lines here
+    // and broadcast them from TickComponent (game thread).
     if (Ch == '\n' || Ch == '\r')
     {
         if (!Self->PutcharLineBuf_.IsEmpty())
         {
-            Self->OnBiosPrint.Broadcast(Self->PutcharLineBuf_);
+            FScopeLock Lock(&Self->PutcharLock_);
+            Self->PutcharPendingLines_.Add(Self->PutcharLineBuf_);
             Self->PutcharLineBuf_.Reset();
         }
     }

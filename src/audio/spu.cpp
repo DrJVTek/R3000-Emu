@@ -144,6 +144,18 @@ void Spu::write_reg(uint32_t offset, uint16_t val)
                 irq_flag_ = false;
             }
 
+            // DuckStation: When SPU is disabled, force all voices off immediately
+            // This is critical for proper SPU init behavior!
+            const bool old_enable = (old >> 15) & 1;
+            const bool new_enable = (val >> 15) & 1;
+            if (old_enable && !new_enable)
+            {
+                emu::logf(emu::LogLevel::info, "SPU", "[%7.3fs] SPU DISABLED - forcing all voices OFF",
+                    total_samples_ / 44100.0);
+                for (int i = 0; i < kNumVoices; i++)
+                    voices_[i].force_off();
+            }
+
             // Log at warn level when cd bit changes (bit 0) - critical for debugging audio issues
             if ((val & 1) != (old & 1))
                 emu::logf(emu::LogLevel::warn, "SPU", "[%7.3fs] SPUCNT CD-bit change: 0x%04X->0x%04X cd=%d->%d",

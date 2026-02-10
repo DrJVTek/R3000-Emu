@@ -570,6 +570,9 @@ void Cdrom::set_log_sinks(const flog::Sink& cd_only, const flog::Sink& combined,
     clock_ = clock;
     has_clock_ = 1;
 
+    // Version marker to verify rebuild - update this when making changes!
+    emu::logf(emu::LogLevel::info, "CD", "CDROM source v6 (vsync_stuck_detect)");
+
     cd_log(
         log_cd_,
         log_io_,
@@ -644,9 +647,12 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
     // PSX-SPX: status bit 1 = motor on
     status_ = 0x02u; // Motor spinning
 
-    // Shell close INT5 will be queued after GetStat (cmd 0x01), which is when
-    // the BIOS installs its CDROM event handlers. Sending it too early can be missed.
-    shell_close_sent_ = 0;
+    // PSX-SPX: Shell close INT5 should only be sent when the shell transitions
+    // from open to closed. At cold boot with disc already present, the shell was
+    // never opened, so no shell close event should be sent.
+    // Set shell_close_sent_=1 to suppress the spurious INT5 that was causing
+    // games to enter a shell-check loop (irq_en=0x18) and miss ReadTOC/GetID responses.
+    shell_close_sent_ = 1;
 
     return true;
 }
@@ -845,8 +851,9 @@ void Cdrom::set_irq(uint8_t flags)
     irq_flags_ |= (flags & 0x07u);
     const int new_line = irq_line();
     // Route to BUS tag so it appears in system.log
-    emu::logf(emu::LogLevel::info, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X line=%d->%d",
-        (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_,
+    emu::logf(emu::LogLevel::info, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X irq_en=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X line=%d->%d",
+        (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (unsigned)irq_enable_,
+        (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_,
         old_line, new_line);
 
     // Push-model notification: immediately notify the bus of IRQ state change.
@@ -908,10 +915,18 @@ uint8_t Cdrom::status_reg() const
 
 int Cdrom::irq_line() const
 {
-    // PSX-SPX: The CDROM controller's /IRQ line is active when
-    // (IRQ_Flag AND IRQ_Enable) is non-zero. The line feeds into
-    // the interrupt controller's I_STAT bit 2 via edge detection.
-    return ((irq_flags_ & irq_enable_ & 0x1Fu) != 0) ? 1 : 0;
+    // PSX-SPX: IRQ_Flag bits 0-2 contain a VALUE 1-7 for INT1-INT7 (not a bitmask).
+    // IRQ_Enable bits 0-4 are individual enable bits (bit 0=INT1, bit 1=INT2, etc.).
+    // The /IRQ line is active when the pending IRQ type is enabled.
+    const uint8_t irq_type = irq_flags_ & 0x07u;  // IRQ type 1-7
+    if (irq_type == 0)
+        return 0;  // No IRQ pending
+    // Map IRQ type (1-5) to enable bit: INT1 -> bit 0, INT2 -> bit 1, etc.
+    // INT6/INT7 are undefined on real hardware; we ignore them (return 0).
+    if (irq_type > 5)
+        return 0;
+    const uint8_t enable_bit = (uint8_t)(1u << (irq_type - 1));
+    return (irq_enable_ & enable_bit) ? 1 : 0;
 }
 
 void Cdrom::try_fill_data_fifo()
@@ -1033,9 +1048,12 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
     // 157 LBA: ~1,712,543 ticks = ~51 ms
     // Speed change (spin-up): 20,321,280 ticks = ~600 ms
 
-    constexpr uint32_t kSpinUpDelay = 20321280u;  // ~600ms at 33.8MHz
-    constexpr uint32_t kMinSeekTicks = 400000u;   // ~12ms minimum seek
-    constexpr uint32_t kMaxSeekTicks = 2000000u;  // ~60ms maximum seek (full stroke)
+    // FAST CD TIMING: Reduced by 10x for wall-clock mode compatibility
+    // Original realistic values caused VBlank timeout in wall-clock mode
+    // because the game disables VBlank during CD loading
+    constexpr uint32_t kSpinUpDelay = 2032128u;   // ~60ms (was ~600ms)
+    constexpr uint32_t kMinSeekTicks = 40000u;    // ~1.2ms (was ~12ms)
+    constexpr uint32_t kMaxSeekTicks = 200000u;   // ~6ms (was ~60ms)
 
     uint32_t total = 0;
 
@@ -1052,8 +1070,9 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
 
     if (dist == 0)
     {
-        // No seek needed, just rotational latency (~half rotation = ~6.7ms single, ~3.3ms double)
-        const uint32_t rot_delay = (mode_ & 0x80u) ? 110000u : 220000u;
+        // No seek needed, just rotational latency
+        // FAST CD TIMING: Reduced by 10x (original: 110000/220000)
+        const uint32_t rot_delay = (mode_ & 0x80u) ? 11000u : 22000u;
         total += rot_delay;
     }
     else if (dist <= 2)
@@ -1073,9 +1092,10 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
             log2_dist++;
         }
 
-        // Scale: ~14ms base + ~4ms per doubling of distance, max ~60ms
-        // At 33.8MHz: 1ms = 33868 ticks
-        const uint32_t seek_ticks = kMinSeekTicks + log2_dist * 135000u;
+        // FAST CD TIMING: Reduced by 10x
+        // Original: ~14ms base + ~4ms per doubling, max ~60ms
+        // Fast: ~1.2ms base + ~0.4ms per doubling, max ~6ms
+        const uint32_t seek_ticks = kMinSeekTicks + log2_dist * 13500u;
         total += (seek_ticks > kMaxSeekTicks) ? kMaxSeekTicks : seek_ticks;
     }
 
@@ -2514,6 +2534,13 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     irq_callback_(new_line, irq_callback_user_);
                 }
 
+                // DuckStation MINIMUM_INTERRUPT_DELAY: reset counter when IRQ is acked.
+                // New IRQs cannot be delivered until kMinInterruptDelay cycles pass.
+                if (old_flags != 0 && (irq_flags_ & 0x1Fu) == 0)
+                {
+                    cycles_since_irq_ack_ = 0;
+                }
+
                 // Special bits:
                 if (v & 0x40u)
                 {
@@ -2555,10 +2582,10 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     pending_irq_type_ = 0x01; // INT1 (next sector ready)
                     pending_irq_resp_ = status_;
                     pending_irq_reason_ = 0xFFu; // marker: advance sector on delivery
-                    // Real PS1 read timing: ~6.7ms per sector (single speed) or ~3.3ms (double speed)
-                    // At ~33MHz CPU: single=~220000 cycles, double=~110000 cycles
-                    // mode_ bit 7 = double speed
-                    pending_irq_delay_ = (mode_ & 0x80u) ? 110000u : 220000u;
+                    // FAST CD TIMING: Reduced by 10x for wall-clock mode
+                    // Original: single=~220000 cycles (~6.7ms), double=~110000 cycles (~3.3ms)
+                    // Fast: single=~22000 cycles (~0.65ms), double=~11000 cycles (~0.33ms)
+                    pending_irq_delay_ = (mode_ & 0x80u) ? 11000u : 22000u;
                     emu::logf(emu::LogLevel::info, "CD",
                         "ReadN continuous: queued next INT1, current LBA=%u delay=%u", loc_lba_, pending_irq_delay_);
                 }
@@ -2627,8 +2654,18 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
 
 void Cdrom::tick(uint32_t cycles)
 {
-    // Deliver command response IRQ after delay (like DuckStation MINIMUM_INTERRUPT_DELAY).
+    // Track cycles since last IRQ ack (DuckStation MINIMUM_INTERRUPT_DELAY).
+    // New IRQs cannot be delivered until kMinInterruptDelay cycles have passed.
+    if (cycles_since_irq_ack_ < kMinInterruptDelay)
+    {
+        cycles_since_irq_ack_ += cycles;
+    }
+
+    // Deliver command response IRQ after delay.
     // Response data is already in the FIFO; this just sets irq_flags.
+    // NOTE: MINIMUM_INTERRUPT_DELAY is only applied to async IRQs (INT2),
+    // not to command responses (INT3). The INT3 can fire based on its own
+    // command delay, but must still wait for irq_flags to be clear.
     if (cmd_irq_pending_ != 0)
     {
         if (cmd_irq_delay_ > 0)
@@ -2638,7 +2675,8 @@ void Cdrom::tick(uint32_t cycles)
             else
                 cmd_irq_delay_ -= cycles;
         }
-        if (cmd_irq_delay_ == 0)
+        // Only deliver when irq_flags are clear (previous IRQ was acked)
+        if (cmd_irq_delay_ == 0 && (irq_flags_ & 0x1Fu) == 0u)
         {
             set_irq(cmd_irq_pending_);
             cmd_irq_pending_ = 0;
@@ -2661,8 +2699,10 @@ void Cdrom::tick(uint32_t cycles)
                 pending_irq_delay_ -= cycles;
         }
 
-        // Once delay has elapsed, deliver when irq_flags are clear.
-        if (pending_irq_delay_ == 0 && (irq_flags_ & 0x1Fu) == 0u)
+        // Once delay has elapsed, deliver when irq_flags are clear AND
+        // enough cycles have passed since last IRQ ack (DuckStation MINIMUM_INTERRUPT_DELAY).
+        if (pending_irq_delay_ == 0 && (irq_flags_ & 0x1Fu) == 0u &&
+            cycles_since_irq_ack_ >= kMinInterruptDelay)
         {
             // For continuous ReadN/ReadS: advance sector before delivering INT1
             const uint8_t is_read_advance = (pending_irq_reason_ == 0xFFu) ? 1u : 0u;

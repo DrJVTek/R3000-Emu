@@ -32,6 +32,9 @@ Bus::Bus(
     , gpu_(gpu)
     , logger_(logger)
 {
+    // Version marker - update when making changes!
+    emu::logf(emu::LogLevel::info, "BUS", "BUS source v10 (fix_bounds_check)");
+
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
 
@@ -598,7 +601,22 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     {
         const uint32_t byte_off = phys - kIrqMaskAddr;
         uint32_t shift = byte_off * 8;
+        uint32_t old_mask = i_mask_;
         i_mask_ = (i_mask_ & ~((uint32_t)0xFF << shift)) | ((uint32_t)v << shift);
+        if (old_mask != i_mask_)
+        {
+            emu::logf(emu::LogLevel::info, "IRQ", "I_MASK byte write: 0x%04X -> 0x%04X (off=%u val=0x%02X)",
+                (unsigned)old_mask, (unsigned)i_mask_, (unsigned)byte_off, (unsigned)v);
+            // CRITICAL: Log when VBlank (bit 0) is disabled
+            if ((old_mask & 0x01) && !(i_mask_ & 0x01))
+            {
+                emu::logf(emu::LogLevel::warn, "IRQ", "!!! VBlank DISABLED in I_MASK (0x%04X -> 0x%04X) !!!",
+                    (unsigned)old_mask, (unsigned)i_mask_);
+                // Also log to BUS category to appear in system.log
+                emu::logf(emu::LogLevel::warn, "BUS", "!!! I_MASK VBlank DISABLED (byte): 0x%04X -> 0x%04X !!!",
+                    (unsigned)old_mask, (unsigned)i_mask_);
+            }
+        }
         return true;
     }
 
@@ -692,7 +710,22 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
     }
     if (phys == kIrqMaskAddr)
     {
+        uint32_t old_mask = i_mask_;
         i_mask_ = v;
+        if (old_mask != i_mask_)
+        {
+            emu::logf(emu::LogLevel::info, "IRQ", "I_MASK word write: 0x%04X -> 0x%04X",
+                (unsigned)old_mask, (unsigned)i_mask_);
+            // CRITICAL: Log when VBlank (bit 0) is disabled - this causes VSync timeout!
+            if ((old_mask & 0x01) && !(i_mask_ & 0x01))
+            {
+                emu::logf(emu::LogLevel::warn, "IRQ", "!!! VBlank DISABLED in I_MASK (0x%04X -> 0x%04X) !!!",
+                    (unsigned)old_mask, (unsigned)i_mask_);
+                // Also log to BUS category to appear in system.log
+                emu::logf(emu::LogLevel::warn, "BUS", "!!! I_MASK VBlank DISABLED: 0x%04X -> 0x%04X !!!",
+                    (unsigned)old_mask, (unsigned)i_mask_);
+            }
+        }
         return true;
     }
 
@@ -829,7 +862,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     }
     if (phys == kIrqMaskAddr)
     {
+        uint32_t old_mask = i_mask_;
         i_mask_ = v;
+        if (old_mask != i_mask_)
+        {
+            emu::logf(emu::LogLevel::info, "IRQ", "I_MASK hw write: 0x%04X -> 0x%04X",
+                (unsigned)old_mask, (unsigned)i_mask_);
+        }
         return true;
     }
 
@@ -1420,6 +1459,188 @@ void Bus::tick(uint32_t cycles)
         if (gpu_->tick_vblank(cycles))
         {
             i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
+            ++vblank_total_count_;
+
+            // ===== VBlank STUCK DETECTION =====
+            // Check if GPU is making real frame progress (submitting primitives)
+            // Use prev_frame_stats() which was saved BEFORE the reset
+            const auto& stats = gpu_->prev_frame_stats();
+            const uint32_t real_prims = stats.triangles + stats.quads + stats.rects + stats.lines + stats.fills;
+
+            if (real_prims > 0)
+            {
+                // Real frame progress - reset stuck counter
+                vblank_last_frame_ = vblank_total_count_;
+                vblank_stuck_count_ = 0;
+                vblank_stuck_logged_ = 0;  // Reset so we can log again if it happens later
+            }
+            else
+            {
+                // No primitives - check if we're stuck
+                vblank_stuck_count_++;
+
+                // If stuck for 100 VBlanks (~2 seconds) and not yet logged
+                if (vblank_stuck_count_ >= 100 && !vblank_stuck_logged_)
+                {
+                    vblank_stuck_logged_ = 1;
+
+                    // Read kernel event table for diagnosis
+                    const uint32_t evt_ptr_off = 0x0120 & (ram_size_ - 1);
+                    const uint32_t evt_ptr = (uint32_t)ram_[evt_ptr_off] |
+                                             ((uint32_t)ram_[evt_ptr_off + 1] << 8) |
+                                             ((uint32_t)ram_[evt_ptr_off + 2] << 16) |
+                                             ((uint32_t)ram_[evt_ptr_off + 3] << 24);
+
+                    // Read SysEnqIntRP chain pointers (priority 0-3)
+                    uint32_t chain_ptrs[4] = {0};
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        const uint32_t chain_off = (0x0100 + i * 4) & (ram_size_ - 1);
+                        chain_ptrs[i] = (uint32_t)ram_[chain_off] |
+                                        ((uint32_t)ram_[chain_off + 1] << 8) |
+                                        ((uint32_t)ram_[chain_off + 2] << 16) |
+                                        ((uint32_t)ram_[chain_off + 3] << 24);
+                    }
+
+                    // Read COP0 Status from TCB if available
+                    const uint32_t pcb_ptr_off = 0x0108 & (ram_size_ - 1);
+                    const uint32_t pcb_ptr = (uint32_t)ram_[pcb_ptr_off] |
+                                             ((uint32_t)ram_[pcb_ptr_off + 1] << 8) |
+                                             ((uint32_t)ram_[pcb_ptr_off + 2] << 16) |
+                                             ((uint32_t)ram_[pcb_ptr_off + 3] << 24);
+                    uint32_t tcb_ptr = 0;
+                    if (pcb_ptr != 0 && (pcb_ptr & (ram_size_ - 1)) + 4 <= ram_size_)
+                    {
+                        const uint32_t pcb_off = pcb_ptr & (ram_size_ - 1);
+                        tcb_ptr = (uint32_t)ram_[pcb_off] |
+                                  ((uint32_t)ram_[pcb_off + 1] << 8) |
+                                  ((uint32_t)ram_[pcb_off + 2] << 16) |
+                                  ((uint32_t)ram_[pcb_off + 3] << 24);
+                    }
+
+                    // Log comprehensive state dump
+                    emu::logf(emu::LogLevel::warn, "BUS", "===== VSYNC STUCK DETECTED =====");
+                    emu::logf(emu::LogLevel::warn, "BUS", "VBlank #%u: stuck for %u VBlanks (no primitives)",
+                        vblank_total_count_, vblank_stuck_count_);
+                    emu::logf(emu::LogLevel::warn, "BUS", "Last real frame: VBlank #%u", vblank_last_frame_);
+                    emu::logf(emu::LogLevel::warn, "BUS", "I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X",
+                        (unsigned)i_stat_, (unsigned)i_mask_, (unsigned)(i_stat_ & i_mask_));
+                    emu::logf(emu::LogLevel::warn, "BUS", "CPU PC=0x%08X", cpu_pc_);
+                    emu::logf(emu::LogLevel::warn, "BUS", "Event table ptr=0x%08X", evt_ptr);
+                    emu::logf(emu::LogLevel::warn, "BUS", "SysEnqIntRP chains: [0]=0x%08X [1]=0x%08X [2]=0x%08X [3]=0x%08X",
+                        chain_ptrs[0], chain_ptrs[1], chain_ptrs[2], chain_ptrs[3]);
+                    emu::logf(emu::LogLevel::warn, "BUS", "PCB=0x%08X TCB=0x%08X", pcb_ptr, tcb_ptr);
+
+                    // Scan event table for VSync-related events
+                    if (evt_ptr != 0)
+                    {
+                        const uint32_t size_off = 0x0124 & (ram_size_ - 1);
+                        const uint32_t tbl_size = (uint32_t)ram_[size_off] |
+                                                  ((uint32_t)ram_[size_off + 1] << 8) |
+                                                  ((uint32_t)ram_[size_off + 2] << 16) |
+                                                  ((uint32_t)ram_[size_off + 3] << 24);
+                        const uint32_t max_entries = (tbl_size > 0) ? (tbl_size / 0x1C) : 16;
+                        const uint32_t base_phys = evt_ptr & (ram_size_ - 1);
+
+                        emu::logf(emu::LogLevel::warn, "BUS", "Event table size=%u max_entries=%u", tbl_size, max_entries);
+
+                        int found_vsync = 0;
+                        for (uint32_t i = 0; i < max_entries && i < 32; ++i)
+                        {
+                            const uint32_t eoff = base_phys + i * 0x1C;
+                            if (eoff + 0x14 > ram_size_)
+                                break;
+
+                            const uint32_t cls = (uint32_t)ram_[eoff] |
+                                                 ((uint32_t)ram_[eoff + 1] << 8) |
+                                                 ((uint32_t)ram_[eoff + 2] << 16) |
+                                                 ((uint32_t)ram_[eoff + 3] << 24);
+                            if (cls == 0)
+                                continue;
+
+                            const uint32_t status = (uint32_t)ram_[eoff + 0x04] |
+                                                    ((uint32_t)ram_[eoff + 0x05] << 8) |
+                                                    ((uint32_t)ram_[eoff + 0x06] << 16) |
+                                                    ((uint32_t)ram_[eoff + 0x07] << 24);
+                            const uint32_t spec = (uint32_t)ram_[eoff + 0x08] |
+                                                  ((uint32_t)ram_[eoff + 0x09] << 8) |
+                                                  ((uint32_t)ram_[eoff + 0x0A] << 16) |
+                                                  ((uint32_t)ram_[eoff + 0x0B] << 24);
+
+                            // Log ALL events to understand what the game uses
+                            const char* st_str = (status == 0x4000u) ? "READY" :
+                                                 (status == 0x2000u) ? "BUSY" :
+                                                 (status == 0x1000u) ? "ALLOCATED" : "???";
+                            emu::logf(emu::LogLevel::warn, "BUS", "  Event[%u]: cls=0x%08X spec=0x%04X status=0x%04X (%s)",
+                                i, cls, spec, status, st_str);
+
+                            // Check for VSync-related classes
+                            if (cls == 0xF2000003u || cls == 0xF0000001u)
+                                found_vsync = 1;
+                        }
+                        if (!found_vsync)
+                        {
+                            emu::logf(emu::LogLevel::warn, "BUS", "  (No VSync events - game may use callbacks instead)");
+                        }
+                    }
+                    emu::logf(emu::LogLevel::warn, "BUS", "===== END STUCK DUMP =====");
+                }
+            }
+
+            // WORKAROUND: In non-HLE mode, the BIOS exception handler's VBlank
+            // event delivery doesn't always work correctly with our hardware emulation.
+            // After being stuck for 50+ VBlanks, force-mark ALL busy events as ready.
+            if (vblank_stuck_count_ >= 50)
+            {
+                // Scan event table and mark ALL busy events as ready
+                const uint32_t evt_ptr_off = 0x0120 & (ram_size_ - 1);
+                const uint32_t evt_ptr = (uint32_t)ram_[evt_ptr_off] |
+                                         ((uint32_t)ram_[evt_ptr_off + 1] << 8) |
+                                         ((uint32_t)ram_[evt_ptr_off + 2] << 16) |
+                                         ((uint32_t)ram_[evt_ptr_off + 3] << 24);
+                if (evt_ptr != 0)
+                {
+                    const uint32_t base_phys = evt_ptr & (ram_size_ - 1);
+                    for (uint32_t i = 0; i < 32; ++i)
+                    {
+                        const uint32_t eoff = base_phys + i * 0x1C;
+                        if (eoff + 0x0C > ram_size_)  // Need 0x0C bytes: status at +4, spec at +8..+B
+                            break;
+
+                        const uint32_t st_off = eoff + 0x04;
+                        const uint32_t status = (uint32_t)ram_[st_off] |
+                                                ((uint32_t)ram_[st_off + 1] << 8) |
+                                                ((uint32_t)ram_[st_off + 2] << 16) |
+                                                ((uint32_t)ram_[st_off + 3] << 24);
+
+                        // If event is BUSY (0x2000), mark it READY (0x4000)
+                        if (status == 0x2000u)
+                        {
+                            // Read class and spec for logging (to identify which event is the key one)
+                            const uint32_t cls_off = eoff + 0x00;
+                            const uint32_t spec_off = eoff + 0x08;
+                            const uint32_t evt_class = (uint32_t)ram_[cls_off] |
+                                                       ((uint32_t)ram_[cls_off + 1] << 8) |
+                                                       ((uint32_t)ram_[cls_off + 2] << 16) |
+                                                       ((uint32_t)ram_[cls_off + 3] << 24);
+                            const uint32_t evt_spec = (uint32_t)ram_[spec_off] |
+                                                      ((uint32_t)ram_[spec_off + 1] << 8) |
+                                                      ((uint32_t)ram_[spec_off + 2] << 16) |
+                                                      ((uint32_t)ram_[spec_off + 3] << 24);
+
+                            emu::logf(emu::LogLevel::warn, "BUS",
+                                "RESCUE: Event[%u] cls=0x%08X spec=0x%04X BUSY->READY",
+                                i, evt_class, evt_spec);
+
+                            const uint32_t new_status = 0x4000u;
+                            ram_[st_off]     = (uint8_t)(new_status & 0xFF);
+                            ram_[st_off + 1] = (uint8_t)((new_status >> 8) & 0xFF);
+                            ram_[st_off + 2] = (uint8_t)((new_status >> 16) & 0xFF);
+                            ram_[st_off + 3] = (uint8_t)((new_status >> 24) & 0xFF);
+                        }
+                    }
+                }
+            }
 
             // Workaround: some BIOS ROMs (e.g. SCPH-7502) never write I_MASK
             // to non-zero — all ROM write sites store r0. The kernel's

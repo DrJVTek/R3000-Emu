@@ -127,6 +127,14 @@ void SpuVoice::key_off()
     }
 }
 
+void SpuVoice::force_off()
+{
+    // Immediate stop - like DuckStation's ForceOff()
+    // Used when SPU is globally disabled (SPUCNT.enable = 0)
+    env_phase_ = ENV_OFF;
+    env_level_ = 0;
+}
+
 int16_t SpuVoice::tick(const uint8_t* spu_ram, uint32_t ram_mask)
 {
     if (env_phase_ == ENV_OFF)

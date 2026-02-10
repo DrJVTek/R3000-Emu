@@ -1,0 +1,2 @@
+[INFO] CDROM: disc inserted (files=1 tracks=14 first_sector=2352)
+[INFO] R3000 run start (PC=0xBFC00000)

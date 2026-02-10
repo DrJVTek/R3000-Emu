@@ -113,11 +113,12 @@ class UR3000EmuComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     bool bFastBoot{false};
 
-    // [DEPRECATED] HLE vectors are now always enabled for BIOS boot.
-    // Our hardware emulation isn't accurate enough for the real BIOS exception
-    // handler to work correctly without HLE interception. This setting is ignored.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (DeprecatedProperty))
-    bool bHleVectors{true};
+    // HLE vectors: intercept BIOS exception handler (0x80000080) and syscalls (A0/B0/C0).
+    // ON = HLE handles IRQs, VSync events, CDROM callbacks (simpler but less accurate)
+    // OFF = Real BIOS exception handler runs (more accurate but needs precise HW emulation)
+    // Try OFF first - if boot hangs, switch to ON.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
+    bool bHleVectors{false};
 
     // Bus tick batching: tick hardware every N CPU steps instead of every step.
     // 1 = cycle-accurate (recommended with threaded mode), 32 = fast, 64 = faster but less accurate.
@@ -222,7 +223,10 @@ class UR3000EmuComponent : public UActorComponent
     emu::Log EmuLog_{};
 
     // BIOS putchar line buffer → fires OnBiosPrint on newline.
+    // PutcharCB runs on worker thread, so we queue lines and broadcast from game thread.
     FString PutcharLineBuf_{};
+    TArray<FString> PutcharPendingLines_{};
+    FCriticalSection PutcharLock_{};
     static void PutcharCB(char Ch, void* User);
 
     uint64 NextPcSampleAt_{0};

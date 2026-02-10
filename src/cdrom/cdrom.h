@@ -253,6 +253,12 @@ class Cdrom
 
     uint8_t last_cmd_{0};             // last command executed (for debug)
 
+    // DuckStation-style MINIMUM_INTERRUPT_DELAY: cycles since last IRQ ack.
+    // New IRQs cannot be delivered until at least 1000 cycles after ack.
+    // This prevents rapid-fire IRQ sequences that confuse the BIOS state machine.
+    static constexpr uint32_t kMinInterruptDelay = 1000;
+    uint32_t cycles_since_irq_ack_{kMinInterruptDelay}; // start ready to deliver
+
     // Trace counters (per-instance, not static, so they reset between PIE sessions).
     int mmio_rd_trace_{0};
     uint32_t data_read_count_{0};

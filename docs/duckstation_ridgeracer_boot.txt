@@ -1,0 +1,1305 @@
+[    0.2553] I/Host: Loaded translation file for language fr
+[    0.2563] I/Host: Using system locale for fr.
+[    0.2593] V/MemMap: Base address: 0x7ff78fcf0000
+[    0.2594] V/MemMap: Acceptable address range: 0x7ff712cf0000 - 0x7ff80ccf0000
+[    0.2594] V/MemMap: Trying 0x7ff793cf0000 (displacement 0x4000000)
+[    0.2595] I/MemMap: Allocated JIT buffer of size 50331648 at 0x7ff793cf0000 (0x4000000 bytes / 64 MB away)
+[    0.2797] I/Bus: Allocating shared memory map.
+[    0.2810] V/Bus: RAM is mapped at 0x250dd4a0000.
+[    0.2811] V/Bus: BIOS is mapped at 0x250d4500000.
+[    0.2814] V/Bus: LUTs are mapped at 0x250de4a0000.
+[    0.3155] I/Bus: Fastmem base: 0x250e44a0000
+[    0.3157] V/System: Memory allocation took 56.4438 ms.
+[    0.4263] E(ReloadMemcardTimestampCache): Failed to open memory card cache for read: errno 2: No such file or directory
+[    0.7172] I/SDL: Using Controller DB from resources.
+[    0.7181] I/SDL: Enhanced controller reports are disabled.
+[    0.7185] I/SDL: XBox HIDAPI is disabled.
+[    0.7187] I/SDL: RawInput is disabled, DirectInput is enabled, XInput is enabled, WGI is disabled, GameInput is disabled.
+[    0.7552] V/GameList: Scanning E:\Projects\PSX\roms (recursively)
+[    0.9165] I/GameDatabase: Database load of 10764 entries took 161ms.
+[    0.9252] V/Achievements: Loaded 3159 entries from cached hash database
+[    1.1195] D/HTTPDownloader: Started HTTP request for 'https://api.github.com/repos/stenzek/duckstation/tags'
+[    1.1810] E(LoadAchievementGameBadges): Failed to load cache: errno 2: No such file or directory
+[    1.3750] D/HTTPDownloader: Status code 200, content-length is 0
+[    1.3756] D/HTTPDownloader: End of request 'https://api.github.com/repos/stenzek/duckstation/tags', 11703 bytes received
+[    1.3794] V/HTTPDownloader: Request for 'https://api.github.com/repos/stenzek/duckstation/tags' complete, returned status code 200 and 11703 bytes
+[    1.3801] I/Host: Current SHA: eda65a6ae25b157c4ea8f95d626909ffb0eb2c17
+[    1.3807] I/Host: Latest SHA: eda65a6ae25b157c4ea8f95d626909ffb0eb2c17
+[    1.3812] I/Host: Last Checked SHA:
+[    1.3816] I/Host: No update needed.
+[    1.3826] V/Host: All HTTP requests done.
+[    1.7679] I/SDL: 863 controller mappings are loaded.
+[    1.7686] I/System: DuckStation for Windows (x64)
+[    1.7696] I/System: Version: 0.1-10819-geda65a6ae [dev]
+[    1.7699] I/System: SCM Timestamp: 2026-02-05T13:00:24+10:00
+[    1.7702] I/System: Host CPU: AMD Ryzen 9 7950X3D
+[    1.7703] I/System: CPU has 32 logical processor(s) and 16 core(s) across 1 cluster(s).
+[    1.7707] D/Host: Starting background controller polling timer with interval 1000 ms
+[   17.2913] I/System: Boot Path: E:\Projects\PSX\roms\Ridge Racer (U).cue
+[   17.2919] I/System: Loading CD image 'Ridge Racer (U).cue'...
+[   17.2953] I/System: Auto-detected console NTSC-U region for 'E:\Projects\PSX\roms\Ridge Racer (U).cue' (region NTSC-U)
+[   17.2957] D/System: Executable path: 'SCUS-943.00'
+[   17.2967] D/System: Hash for 'SCUS-943.00' - DDEB97F221669D13
+[   17.2969] I/System: No game settings found (tried 'SCUS-94300.ini')
+[   17.2971] D/System: Applying settings...
+[   17.2974] D/VideoThread: Setting run idle reason 'OSDMessagesActive' to true
+[   17.2977] I/System: Console Region: PAL (Europe, Australia)
+[   17.3244] D/BIOS: Hash for BIOS 'Sony PlayStation SCPH-7502 BIOS v4.1 (1997-12-16)(Sony)(EU).bin': b9d9a0286c33dc6b7237bb13cd46fdee
+[   17.3634] I/System: Using BIOS: SCPH-7002, 7502, 9002 (v4.1 12-16-97 E)
+[   17.3644] I/CDROMAsyncReader: Read thread started with readahead of 8 sectors
+[   17.3657] I/CDROM: Inserting new media, disc region: NTSC-U, console region: PAL
+[   17.3660] D/CDROMAsyncReader: Cancelling readahead
+[   17.3664] D/CDROM: Starting motor
+[   17.3665] V/System: Video frame rate changed from 60.00 to 59.27 fps
+[   17.3667] D/CPU: GTE aspect ratio correction is disabled.
+[   17.3668] I/VideoThread: Reconfiguring video thread.
+[   17.3670] D/VideoThread: Updating game info on GPU thread: SCUS-94300/Ridge Racer
+[   17.3671] I/VideoThread: Trying to create a D3D11 GPU device...
+[   17.3701] D/Host: acquireRenderWindow() fullscreen=false exclusive_fullscreen=false, render_to_main=true
+[   17.4643] I/Host: Window size: 1286x569 (Qt 857x379), scale: 1.5, refresh rate 60 hz
+[   17.4686] I/GPUDevice: Main render window is 1286x569.
+[   17.8115] I/GPUDevice: NVIDIA GPU detected.
+[   17.8120] I/GPUDevice: D3D Adapter: NVIDIA GeForce RTX 4090
+[   17.8127] I/GPUDevice: Max device feature level: D3D_FEATURE_LEVEL_12_1
+[   17.8128] I/GPUDevice: Driver type set to NVIDIAProprietary.
+[   17.8129] V/GPUDevice: Creating a 1286x569 flip-discard windowed swap chain
+[   17.8214] V/GPUDevice: Swap chain buffer size: 1286x569
+[   17.8228] I/GPUDevice: Render API: D3D11 Version 1110
+[   17.8233] I/GPUDevice: Graphics Driver Info:
+[   17.8233] I/GPUDevice: D3D_FEATURE_LEVEL_11_1 (Shader Model 50)
+[   17.8233] I/GPUDevice: VID: 0x10DE PID: 0x2684
+[   17.8233] I/GPUDevice: NVIDIA GeForce RTX 4090
+[   17.8233] I/GPUDevice: Driver Version: 32.0.15.9186
+[   17.8584] D/GPUDevice: Read 38 entries from 'd3d11_shaders.idx'
+[   20.5620] D/ImGuiManager: Loading font data took 2702.9328 ms
+[   20.5661] D/ImGuiManager: Creating font atlas took 3.4709 ms
+[   20.5893] D/FullscreenUI: Uploaded texture resource 'images/placeholder.png' (487x354)
+[   20.5902] D/VideoThread: GPU thread now running idle
+[   20.5906] I/VideoThread: GPU device created in 3223.48ms
+[   20.5909] V/GPU: Presentation format is RGBA8
+[   20.5917] I/GPU_SW: Using SIMD software rasterizer implementation.
+[   20.5918] I/GPU_HW: Resolution Scale: 1 (1024x512), maximum 16
+[   20.5920] I/GPU_HW: Multisampling: 1x
+[   20.5921] I/GPU_HW: Dithering: True Color
+[   20.5923] I/GPU_HW: Deinterlacing: Progressive (Optimal)
+[   20.5924] I/GPU_HW: Force round texture coordinates: Disabled
+[   20.5924] I/GPU_HW: Texture Filtering: Nearest-Neighbor/Nearest-Neighbor
+[   20.5926] I/GPU_HW: Dual-source blending: Supported
+[   20.5927] I/GPU_HW: Clamping UVs: NO
+[   20.5928] I/GPU_HW: Depth buffer: NO
+[   20.5929] I/GPU_HW: Downsampling: Disabled
+[   20.5931] I/GPU_HW: Wireframe rendering: Disabled
+[   20.5932] I/GPU_HW: Line detection: Disabled
+[   20.5933] I/GPU_HW: Using software renderer for readbacks: NO
+[   20.5934] I/GPU_HW: Separate sprite shaders: NO
+[   20.5937] I/GPU_HW: Shader blending allowed: NO
+[   20.5938] I/GPU_HW: Shader blending preferred: NO
+[   20.5939] I/GPU_HW: Use ROV for shader blending: NO
+[   20.5941] I/GPU_HW: Write mask as depth: YES
+[   20.5942] I/GPU_HW: Depth buffer is needed in D16.
+[   20.5943] I/GPU_HW: Using ROV depth: NO
+[   20.5944] I/GPU_HW: Using real depth buffer: YES
+[   20.5945] I/GPU_HW: Using feedback loops: NO
+[   20.5946] I/GPU_HW: Compiling 3 vertex shaders, 200 fragment shaders, and 414 pipelines.
+[   20.5980] I/GPU_HW: Compiling resolution dependent pipelines took 0.23 ms.
+[   20.5982] I/GPU_HW: Pipeline creation took 3.23 ms.
+[   20.5991] I/GPU_HW: Created HW framebuffer of 1024x512
+[   20.5995] D/VideoThread: Setting run idle reason 'NoGPUBackend' to false
+[   20.5997] D/VideoThread: GPU thread now NOT running idle
+[   20.5999] I/VideoThread: GPU backend created in 8.98ms
+[   20.6000] I/SPU: Creating 'Cubeb' audio stream, sample rate = 44100, buffer = 50, latency = 20, stretching = TimeStretch
+[   20.6002] D/AudioStream: Allocated buffer of 35328 frames for buffer of 50 ms [stretch TimeStretch, target size 2240].
+[   20.6005] I/AudioStream: Creating Cubeb context with default driver...
+[   20.6462] D/AudioStream: cubeb_wasapi.cpp:1978:default device period: 100000, minimum device period: 100000
+[   20.6469] D/AudioStream: cubeb_wasapi.cpp:1982:Minimum latency in frames: 441
+[   20.6483] D/AudioStream: Output latency: 20 ms (441 audio frames)
+[   20.6487] D/AudioStream: cubeb_wasapi.cpp:2711:(000002509DF41D40) Setup render: device=0000000000000000
+[   20.6626] D/AudioStream: cubeb_wasapi.cpp:2447:Setup requested=[f=0 r=44100 c=2 l=3] mix=[f=0 r=48000 c=2 l=3]
+[   20.6704] D/AudioStream: cubeb_wasapi.cpp:2214:Got shared mode engine period: default=480 fundamental=480 min=480 max=480
+[   20.6708] D/AudioStream: cubeb_wasapi.cpp:2229:Requested latency 976 was adjusted to 480
+[   20.6712] D/AudioStream: cubeb_wasapi.cpp:2243:Got AUDCLNT_E_INVALID_STREAM_FLAG, removing some flags
+[   20.6876] D/AudioStream: cubeb_wasapi.cpp:2506:Initialized with IAudioClient3
+[   20.6881] D/AudioStream: cubeb_wasapi.cpp:2525:Buffer size is: 1056 for render
+[   20.6881] D/AudioStream:
+[   20.6885] D/AudioStream: cubeb_wasapi.cpp:2762:Target sample rate: 44100
+[   20.6888] D/AudioStream: cubeb_resampler_internal.h:583:Resampling output (48000Hz) to target and input rate of 44100Hz
+[   20.6891] D/AudioStream: cubeb_wasapi.cpp:2964:Follow the system default input or/and output devices
+[   20.6960] D/AudioStream: cubeb_wasapi.cpp:2991:Stream init successful (000002509DF41D40)
+[   20.6967] D/CPU: GTE aspect ratio correction is disabled.
+[   20.6969] I/System: Memory Card 1: E:\Projects\PSX\duckstation\memcards\Ridge Racer (USA)_1.mcd
+[   20.6972] I/Pad: Memory card slot 0: E:\Projects\PSX\duckstation\memcards\Ridge Racer (USA)_1.mcd
+[   20.6974] I/Pad: Memory card slot 1: <unplugged>
+[   20.6975] I/Pad: Memory card slot 2: <unplugged>
+[   20.6978] I/Pad: Memory card slot 3: <unplugged>
+[   20.6979] I/Pad: Memory card slot 4: <unplugged>
+[   20.6981] I/Pad: Memory card slot 5: <unplugged>
+[   20.6982] I/Pad: Memory card slot 6: <unplugged>
+[   20.6984] I/Pad: Memory card slot 7: <unplugged>
+[   20.7009] V/System: Video frame rate changed from 59.27 to 49.75 fps
+[   20.7011] D/CPU: GTE aspect ratio correction is disabled.
+[   20.7015] I/System: Created socket multiplexer.
+[   20.7021] I/GDBServer: GDB server is now listening on 127.0.0.1:2346.
+[   20.7023] D/Host: Stopping background controller polling timer
+[   20.7028] D/Host: Starting background controller polling timer with interval 1000 ms
+[   20.7030] V/System: VSync: Disabled
+[   20.7032] V/System: Present Skip: Disabled
+[   20.7034] V/System: Target speed: 100%
+[   20.7036] V/System: Preset timing: immediate
+[   20.7037] V/System: VSync: Disabled
+[   20.7038] V/System: Present Skip: Disabled
+[   20.7040] I/System: System booted in 3412.73ms
+[   20.7041] D/VideoThread: Setting run idle reason 'SystemPaused' to true
+[   20.7043] D/VideoThread: GPU thread now running idle
+[   20.7044] W(updateBackgroundControllerPollInterval): Changed background polling interval from 1000 ms to 8 ms
+[   20.7046] W(updateBackgroundControllerPollInterval): Changed background polling interval from 8 ms to 1000 ms
+[   20.7047] W(updateBackgroundControllerPollInterval): Changed background polling interval from 1000 ms to 8 ms
+[   20.7049] D/VideoThread: Setting run idle reason 'OSDMessagesActive' to false
+[   20.7050] D/VideoThread: GPU thread now NOT running idle
+[   20.7053] D/ImGuiManager: Create 512x128 ImGui texture
+[   20.7055] W(updateBackgroundControllerPollInterval): Changed background polling interval from 8 ms to 1000 ms
+[   27.1916] D/VideoThread: Setting run idle reason 'SystemPaused' to false
+[   27.1929] D/Host: Stopping background controller polling timer
+[   27.1939] V/System: VSync: Disabled
+[   27.1941] V/System: Present Skip: Disabled
+[   27.1943] D/Bus: Cache control <- 0x00000804
+[   27.1945] D/Bus: Cache control <- 0x00000800
+[   27.1947] D/Bus: Cache control <- 0x0001E988
+[   27.1949] D/CPU: COP0 DCIC <- 00000000 (now 00000000)
+[   27.1950] D/CPU: COP0 BPC <- 00000000
+[   27.1951] D/CPU: COP0 BDA <- 00000000
+[   27.1952] W(ExecuteInstruction): Ignoring write to COP0 register TAR value 0x00000000
+[   27.1954] D/CPU: COP0 BDAM <- 00000000
+[   27.1955] D/CPU: COP0 BPCM <- 00000000
+[   27.1958] V/AudioStream: ___ Stretcher is being reset.
+[   27.1960] D/Bus: BIOS POST status: 0F
+[   27.1962] D/Bus: BIOS POST status: 0E
+[   27.1963] D/Bus: BIOS POST status: 01
+[   27.1965] D/Bus: BIOS POST status: 02
+[   27.2389] V/AudioStream: Underrun compensation done (128 frames buffered)
+[   27.2548] D/Bus: BIOS POST status: 03
+[   27.2551] D/Bus: Cache control <- 0x00000804
+[   27.2553] D/Bus: Cache control <- 0x00000800
+[   27.2556] D/Bus: Cache control <- 0x0001E988
+[   27.2559] D/Bus: BIOS POST status: 04
+[   27.2563] D/Bus: BIOS POST status: 01
+[   27.2565] D/Bus: BIOS POST status: 03
+[   27.2566] D/Bus: BIOS POST status: 04
+[   27.2567] D/Bus: Cache control <- 0x00000804
+[   27.2567] D/Bus: Cache control <- 0x00000800
+[   27.2568] D/Bus: Cache control <- 0x0001E988
+[   27.2569] D/Bus: BIOS POST status: 05
+[   27.2571] D/Bus: BIOS POST status: 06
+[   27.2573] D/Bus: BIOS POST status: 02
+[   27.2574] D/Bus: Cache control <- 0x00000804
+[   27.2575] D/Bus: Cache control <- 0x00000800
+[   27.2576] D/Bus: Cache control <- 0x0001E988
+[   27.2578] D/Bus: Cache control <- 0x00000804
+[   27.2579] D/Bus: Cache control <- 0x00000800
+[   27.2581] D/Bus: Cache control <- 0x0001E988
+[   27.2582] D/Bus: BIOS POST status: 05
+[   27.2585] D/Bus: BIOS POST status: 06
+[   27.2590] D/Bus: BIOS POST status: 07
+[   27.2591] I/Bus: Kernel initialized.
+[   28.2003] V/PerfMon: FPS: 0.00 VPS: 50.70 CPU: 2.29 RNDR: 0.70 GPU: 0.00 Avg: 19.72ms Min: 2.69ms Max: 22.46ms
+[   28.2603] V/AudioStream: === Stretcher is now inactive.
+[   29.2048] V/PerfMon: FPS: 0.00 VPS: 49.77 CPU: 1.83 RNDR: 0.70 GPU: 0.00 Avg: 20.09ms Min: 19.45ms Max: 20.58ms
+[   29.2251] D/Bus: Cache control <- 0x00000804
+[   29.2255] D/Bus: Cache control <- 0x00000800
+[   29.2258] D/Bus: Cache control <- 0x0001E988
+[   29.2456] D/Bus: Cache control <- 0x00000804
+[   29.2459] D/Bus: Cache control <- 0x00000800
+[   29.2461] D/Bus: Cache control <- 0x0001E988
+[   29.4677] D/Bus: Cache control <- 0x00000804
+[   29.4684] D/Bus: Cache control <- 0x00000800
+[   29.4693] D/Bus: Cache control <- 0x0001E988
+[   30.2111] V/PerfMon: FPS: 0.00 VPS: 49.69 CPU: 7.35 RNDR: 0.81 GPU: 0.00 Avg: 20.13ms Min: 17.10ms Max: 22.12ms
+[   30.6328] V/System: Video frame rate changed from 49.75 to 59.27 fps
+[   30.6334] D/CPU: GTE aspect ratio correction is disabled.
+[   30.6348] V/System: Video frame rate changed from 59.27 to 49.75 fps
+[   30.6352] D/CPU: GTE aspect ratio correction is disabled.
+[   31.2199] V/PerfMon: FPS: 12.89 VPS: 49.56 CPU: 6.62 RNDR: 0.85 GPU: 0.00 Avg: 20.18ms Min: 19.42ms Max: 23.46ms
+[   32.2255] V/PerfMon: FPS: 49.72 VPS: 49.72 CPU: 7.11 RNDR: 0.94 GPU: 0.00 Avg: 20.11ms Min: 13.60ms Max: 23.22ms
+[   33.2303] V/PerfMon: FPS: 49.76 VPS: 49.76 CPU: 7.52 RNDR: 0.85 GPU: 0.00 Avg: 20.10ms Min: 19.27ms Max: 20.79ms
+[   34.2353] V/PerfMon: FPS: 49.75 VPS: 49.75 CPU: 7.55 RNDR: 0.83 GPU: 0.00 Avg: 20.10ms Min: 19.27ms Max: 21.43ms
+[   35.0578] D/Bus: BIOS POST status: 00
+[   35.0786] D/Bus: BIOS POST status: 01
+[   35.1188] D/Bus: BIOS POST status: 02
+[   35.1195] D/CDROM: Getstat    Stat=0x02
+[   35.1588] D/CDROM: GetID
+[   35.1990] D/CDROM: Getstat    Stat=0x02
+[   35.2392] D/CDROM: GetID
+[   35.2408] V/PerfMon: FPS: 40.77 VPS: 49.72 CPU: 7.66 RNDR: 0.82 GPU: 0.00 Avg: 20.11ms Min: 18.72ms Max: 21.51ms
+[   35.2993] D/Bus: BIOS POST status: 00
+[   35.3000] D/CDROM: Setloc     00:02:04
+[   35.3011] D/CDROM: SeekL      00:02:04
+[   35.3015] D/CDROM: Seek time for 00:00:07->00:02:04 (147 LBA): 1721932 (50.841 ms) (2N forward)
+[   35.3403] D/CDROM: Logical seek to [00:02:04] complete
+[   35.3414] D/CDROM: Setmode    0x80
+[   35.3423] D/CDROM: Drive is idle, speed change takes 20321280 ticks
+[   35.3427] D/CDROM: ReadN      00:02:04
+[   35.3431] D/CDROM: Seek time for 00:02:02->00:02:04 (2 LBA): 20777976 (613.484 ms) (20295567 for speed change/init) (forward)
+[   35.9637] D/CDROM: DataSector 00:02:04 LBA=154 Mode=2 Submode=0x08 Buffer=1
+[   35.9646] D/CDROM: Pause                  39.21ms
+[   36.0036] D/CDROM: Setloc     00:02:05
+[   36.0044] D/CDROM: SeekL      00:02:05
+[   36.0052] D/CDROM: Seek time for 00:02:02->00:02:05 (3 LBA): 699224 (20.645 ms) (forward)
+[   36.0238] D/CDROM: Logical seek to [00:02:05] complete
+[   36.0243] D/CDROM: Setmode    0x80
+[   36.0248] D/CDROM: ReadN      00:02:05
+[   36.0252] D/CDROM: Seek time for 00:02:03->00:02:05 (2 LBA): 472828 (13.961 ms) (forward)
+[   36.0437] D/CDROM: DataSector 00:02:05 LBA=155 Mode=2 Submode=0x08 Buffer=1
+[   36.0590] D/CDROMAsyncReader: Read LBA 163 took 14.71 msec
+[   36.0629] D/CDROM: DataSector 00:02:06 LBA=156 Mode=2 Submode=0x08 Buffer=2
+[   36.0637] D/CDROM: DataSector 00:02:07 LBA=157 Mode=2 Submode=0x08 Buffer=3
+[   36.0644] D/CDROM: DataSector 00:02:08 LBA=158 Mode=2 Submode=0x08 Buffer=4
+[   36.0832] D/CDROM: DataSector 00:02:09 LBA=159 Mode=2 Submode=0x08 Buffer=5
+[   36.0844] D/CDROM: DataSector 00:02:10 LBA=160 Mode=2 Submode=0x08 Buffer=6
+[   36.0852] D/CDROM: DataSector 00:02:11 LBA=161 Mode=2 Submode=0x08 Buffer=7
+[   36.0855] D/CDROM: Pause                  39.22ms
+[   36.1245] D/CDROM: GetID
+[   36.2450] V/PerfMon: FPS: 0.00 VPS: 49.79 CPU: 8.54 RNDR: 0.77 GPU: 0.00 Avg: 20.08ms Min: 16.99ms Max: 23.04ms
+[   37.2504] V/PerfMon: FPS: 8.95 VPS: 49.73 CPU: 7.41 RNDR: 0.85 GPU: 0.00 Avg: 20.11ms Min: 17.40ms Max: 22.72ms
+[   38.2562] V/PerfMon: FPS: 49.71 VPS: 49.71 CPU: 7.78 RNDR: 0.86 GPU: 0.00 Avg: 20.12ms Min: 18.10ms Max: 21.93ms
+[   38.8173] D/Bus: BIOS POST status: 05
+[   38.8181] D/Bus: BIOS POST status: 08
+[   38.8190] D/CDROM: Init
+[   38.8191] D/CDROM: Seek time for 00:02:07->00:00:00 (157 LBA): 1712543 (50.564 ms) (2N backward)
+[   38.8193] D/CDROM: CDROM init total disc ticks = 25420703 (speed change = 23708160, seek = 1712543)
+[   39.2390] D/CDROM: Init
+[   39.2593] V/PerfMon: FPS: 14.95 VPS: 49.85 CPU: 5.29 RNDR: 0.82 GPU: 0.00 Avg: 20.06ms Min: 17.50ms Max: 21.93ms
+[   40.1240] D/CDROM: Setloc     00:02:16
+[   40.1255] D/CDROM: SeekL      00:02:16
+[   40.1266] D/CDROM: Seek time for 00:00:02->00:02:16 (164 LBA): 1725957 (50.960 ms) (2N forward)
+[   40.1845] D/CDROM: Logical seek to [00:02:16] complete
+[   40.1850] D/CDROM: Setmode    0x80
+[   40.1860] D/CDROM: Drive is idle, speed change takes 20321280 ticks
+[   40.1863] D/CDROM: ReadN      00:02:16
+[   40.1865] D/CDROM: Seek time for 00:02:14->00:02:16 (2 LBA): 20768072 (613.192 ms) (20289795 for speed change/init) (forward)
+[   40.2646] V/PerfMon: FPS: 0.00 VPS: 49.74 CPU: 1.98 RNDR: 0.81 GPU: 0.00 Avg: 20.11ms Min: 17.22ms Max: 23.61ms
+[   40.8070] D/CDROM: DataSector 00:02:16 LBA=166 Mode=2 Submode=0x09 Buffer=1
+[   40.8077] D/CDROM: Pause                  39.01ms
+[   40.8475] D/CDROM: Setloc     00:02:18
+[   40.8478] D/CDROM: SeekL      00:02:18
+[   40.8504] D/CDROM: Seek time for 00:02:14->00:02:18 (4 LBA): 933701 (27.568 ms) (forward)
+[   40.8676] D/CDROM: Logical seek to [00:02:18] complete
+[   40.8681] D/CDROM: Setmode    0x80
+[   40.8685] D/CDROM: ReadN      00:02:18
+[   40.8687] D/CDROM: Seek time for 00:02:16->00:02:18 (2 LBA): 476188 (14.060 ms) (forward)
+[   40.8878] D/CDROM: DataSector 00:02:18 LBA=168 Mode=2 Submode=0x89 Buffer=1
+[   40.8883] D/CDROM: Pause                  39.01ms
+[   40.9480] D/Bus: BIOS POST status: 09
+[   40.9485] D/CDROM: Getstat    Stat=0x02
+[   40.9496] D/CDROM: Setloc     00:02:22
+[   40.9499] D/CDROM: SeekL      00:02:22
+[   40.9501] D/CDROM: Seek time for 00:02:17->00:02:22 (5 LBA): 1162645 (34.328 ms) (forward)
+[   40.9880] D/CDROM: Logical seek to [00:02:22] complete
+[   40.9884] D/CDROM: Setmode    0x80
+[   40.9893] D/CDROM: ReadN      00:02:22
+[   40.9896] D/CDROM: Seek time for 00:02:20->00:02:22 (2 LBA): 479203 (14.149 ms) (forward)
+[   41.0080] D/CDROM: DataSector 00:02:22 LBA=172 Mode=2 Submode=0x89 Buffer=1
+[   41.0085] D/CDROM: Pause                  39.01ms
+[   41.0482] D/CDROM: Getstat    Stat=0x02
+[   41.0486] D/CDROM: Setloc     00:02:23
+[   41.0496] D/CDROM: SeekL      00:02:23
+[   41.0499] D/CDROM: Seek time for 00:02:20->00:02:23 (3 LBA): 710372 (20.974 ms) (forward)
+[   41.0685] D/CDROM: Logical seek to [00:02:23] complete
+[   41.0689] D/CDROM: Setmode    0x80
+[   41.0693] D/CDROM: ReadN      00:02:23
+[   41.0696] D/CDROM: Seek time for 00:02:21->00:02:23 (2 LBA): 472557 (13.953 ms) (forward)
+[   41.0889] D/CDROM: DataSector 00:02:23 LBA=173 Mode=2 Submode=0x89 Buffer=1
+[   41.0898] D/CDROM: Pause                  39.01ms
+[   41.2698] V/PerfMon: FPS: 0.00 VPS: 49.74 CPU: 2.88 RNDR: 0.78 GPU: 0.00 Avg: 20.10ms Min: 17.65ms Max: 23.14ms
+[   42.2747] V/PerfMon: FPS: 0.00 VPS: 49.75 CPU: 1.60 RNDR: 0.81 GPU: 0.00 Avg: 20.10ms Min: 19.42ms Max: 20.88ms
+[   43.1387] D/CDROM: Getstat    Stat=0x02
+[   43.1394] D/CDROM: Getstat    Stat=0x02
+[   43.1401] D/CDROM: Setloc     00:02:24
+[   43.1405] D/CDROM: SeekL      00:02:24
+[   43.1407] D/CDROM: Seek time for 00:02:24->00:02:24 (0 LBA): 1837079 (54.241 ms) (1T back+forward)
+[   43.1791] D/CDROM: Logical seek to [00:02:24] complete
+[   43.1994] D/CDROM: Setmode    0x80
+[   43.1999] D/CDROM: ReadN      00:02:24
+[   43.2001] D/CDROM: Seek time for 00:02:22->00:02:24 (2 LBA): 484669 (14.310 ms) (forward)
+[   43.2192] D/CDROM: DataSector 00:02:24 LBA=174 Mode=2 Submode=0x08 Buffer=1
+[   43.2197] D/CDROM: Pause                  39.01ms
+[   43.2594] D/CDROM: Getstat    Stat=0x02
+[   43.2598] D/CDROM: Setloc     00:02:25
+[   43.2605] D/CDROM: SeekL      00:02:25
+[   43.2608] D/CDROM: Seek time for 00:02:22->00:02:25 (3 LBA): 695369 (20.531 ms) (forward)
+[   43.2795] D/CDROM: Logical seek to [00:02:25] complete
+[   43.2800] D/CDROM: Setmode    0x80
+[   43.2803] D/CDROM: ReadN      00:02:25
+[   43.2806] D/CDROM: Seek time for 00:02:23->00:02:25 (2 LBA): 481099 (14.205 ms) (forward)
+[   43.2812] V/PerfMon: FPS: 0.00 VPS: 49.68 CPU: 1.94 RNDR: 0.86 GPU: 0.00 Avg: 20.13ms Min: 17.91ms Max: 22.33ms
+[   43.3000] D/CDROM: DataSector 00:02:25 LBA=175 Mode=2 Submode=0x08 Buffer=1
+[   43.3008] D/CDROM: DataSector 00:02:26 LBA=176 Mode=2 Submode=0x08 Buffer=2
+[   43.3199] D/CDROM: DataSector 00:02:27 LBA=177 Mode=2 Submode=0x08 Buffer=3
+[   43.3204] D/CDROM: DataSector 00:02:28 LBA=178 Mode=2 Submode=0x08 Buffer=4
+[   43.3207] D/CDROM: DataSector 00:02:29 LBA=179 Mode=2 Submode=0x08 Buffer=5
+[   43.3400] D/CDROM: DataSector 00:02:30 LBA=180 Mode=2 Submode=0x08 Buffer=6
+[   43.3405] D/CDROM: DataSector 00:02:31 LBA=181 Mode=2 Submode=0x08 Buffer=7
+[   43.3409] D/CDROM: DataSector 00:02:32 LBA=182 Mode=2 Submode=0x08 Buffer=0
+[   43.3605] D/CDROM: DataSector 00:02:33 LBA=183 Mode=2 Submode=0x08 Buffer=1
+[   43.3610] D/CDROM: DataSector 00:02:34 LBA=184 Mode=2 Submode=0x08 Buffer=2
+[   43.3620] D/CDROM: DataSector 00:02:35 LBA=185 Mode=2 Submode=0x08 Buffer=3
+[   43.3798] D/CDROM: DataSector 00:02:36 LBA=186 Mode=2 Submode=0x08 Buffer=4
+[   43.3806] D/CDROM: DataSector 00:02:37 LBA=187 Mode=2 Submode=0x08 Buffer=5
+[   43.3810] D/CDROM: DataSector 00:02:38 LBA=188 Mode=2 Submode=0x08 Buffer=6
+[   43.4003] D/CDROM: DataSector 00:02:39 LBA=189 Mode=2 Submode=0x08 Buffer=7
+[   43.4009] D/CDROM: DataSector 00:02:40 LBA=190 Mode=2 Submode=0x08 Buffer=0
+[   43.4013] D/CDROM: DataSector 00:02:41 LBA=191 Mode=2 Submode=0x08 Buffer=1
+[   43.4204] D/CDROM: DataSector 00:02:42 LBA=192 Mode=2 Submode=0x08 Buffer=2
+[   43.4209] D/CDROM: DataSector 00:02:43 LBA=193 Mode=2 Submode=0x08 Buffer=3
+[   43.4213] D/CDROM: DataSector 00:02:44 LBA=194 Mode=2 Submode=0x08 Buffer=4
+[   43.4404] D/CDROM: DataSector 00:02:45 LBA=195 Mode=2 Submode=0x08 Buffer=5
+[   43.4409] D/CDROM: DataSector 00:02:46 LBA=196 Mode=2 Submode=0x08 Buffer=6
+[   43.4417] D/CDROM: DataSector 00:02:47 LBA=197 Mode=2 Submode=0x08 Buffer=7
+[   43.4605] D/CDROM: DataSector 00:02:48 LBA=198 Mode=2 Submode=0x08 Buffer=0
+[   43.4609] D/CDROM: DataSector 00:02:49 LBA=199 Mode=2 Submode=0x08 Buffer=1
+[   43.4614] D/CDROM: DataSector 00:02:50 LBA=200 Mode=2 Submode=0x08 Buffer=2
+[   43.4808] D/CDROM: DataSector 00:02:51 LBA=201 Mode=2 Submode=0x08 Buffer=3
+[   43.4812] D/CDROM: DataSector 00:02:52 LBA=202 Mode=2 Submode=0x08 Buffer=4
+[   43.4816] D/CDROM: DataSector 00:02:53 LBA=203 Mode=2 Submode=0x08 Buffer=5
+[   43.5008] D/CDROM: DataSector 00:02:54 LBA=204 Mode=2 Submode=0x08 Buffer=6
+[   43.5014] D/CDROM: DataSector 00:02:55 LBA=205 Mode=2 Submode=0x08 Buffer=7
+[   43.5023] D/CDROM: DataSector 00:02:56 LBA=206 Mode=2 Submode=0x08 Buffer=0
+[   43.5209] D/CDROM: DataSector 00:02:57 LBA=207 Mode=2 Submode=0x08 Buffer=1
+[   43.5213] D/CDROM: DataSector 00:02:58 LBA=208 Mode=2 Submode=0x08 Buffer=2
+[   43.5219] D/CDROM: DataSector 00:02:59 LBA=209 Mode=2 Submode=0x08 Buffer=3
+[   43.5408] D/CDROM: DataSector 00:02:60 LBA=210 Mode=2 Submode=0x08 Buffer=4
+[   43.5412] D/CDROM: DataSector 00:02:61 LBA=211 Mode=2 Submode=0x08 Buffer=5
+[   43.5417] D/CDROM: DataSector 00:02:62 LBA=212 Mode=2 Submode=0x08 Buffer=6
+[   43.5609] D/CDROM: DataSector 00:02:63 LBA=213 Mode=2 Submode=0x08 Buffer=7
+[   43.5614] D/CDROM: DataSector 00:02:64 LBA=214 Mode=2 Submode=0x08 Buffer=0
+[   43.5623] D/CDROM: DataSector 00:02:65 LBA=215 Mode=2 Submode=0x08 Buffer=1
+[   43.5810] D/CDROM: DataSector 00:02:66 LBA=216 Mode=2 Submode=0x08 Buffer=2
+[   43.5815] D/CDROM: DataSector 00:02:67 LBA=217 Mode=2 Submode=0x08 Buffer=3
+[   43.5819] D/CDROM: DataSector 00:02:68 LBA=218 Mode=2 Submode=0x08 Buffer=4
+[   43.6010] D/CDROM: DataSector 00:02:69 LBA=219 Mode=2 Submode=0x08 Buffer=5
+[   43.6015] D/CDROM: DataSector 00:02:70 LBA=220 Mode=2 Submode=0x08 Buffer=6
+[   43.6019] D/CDROM: DataSector 00:02:71 LBA=221 Mode=2 Submode=0x08 Buffer=7
+[   43.6215] D/CDROM: DataSector 00:02:72 LBA=222 Mode=2 Submode=0x08 Buffer=0
+[   43.6248] D/CDROM: DataSector 00:02:73 LBA=223 Mode=2 Submode=0x08 Buffer=1
+[   43.6259] D/CDROM: DataSector 00:02:74 LBA=224 Mode=2 Submode=0x08 Buffer=2
+[   43.6415] D/CDROM: DataSector 00:03:00 LBA=225 Mode=2 Submode=0x08 Buffer=3
+[   43.6419] D/CDROM: DataSector 00:03:01 LBA=226 Mode=2 Submode=0x08 Buffer=4
+[   43.6423] D/CDROM: DataSector 00:03:02 LBA=227 Mode=2 Submode=0x08 Buffer=5
+[   43.6612] D/CDROM: DataSector 00:03:03 LBA=228 Mode=2 Submode=0x08 Buffer=6
+[   43.6617] D/CDROM: DataSector 00:03:04 LBA=229 Mode=2 Submode=0x08 Buffer=7
+[   43.6621] D/CDROM: DataSector 00:03:05 LBA=230 Mode=2 Submode=0x08 Buffer=0
+[   43.6819] D/CDROM: DataSector 00:03:06 LBA=231 Mode=2 Submode=0x08 Buffer=1
+[   43.6825] D/CDROM: DataSector 00:03:07 LBA=232 Mode=2 Submode=0x08 Buffer=2
+[   43.6833] D/CDROM: DataSector 00:03:08 LBA=233 Mode=2 Submode=0x08 Buffer=3
+[   43.7020] D/CDROM: DataSector 00:03:09 LBA=234 Mode=2 Submode=0x08 Buffer=4
+[   43.7031] D/CDROM: DataSector 00:03:10 LBA=235 Mode=2 Submode=0x08 Buffer=5
+[   43.7038] D/CDROM: DataSector 00:03:11 LBA=236 Mode=2 Submode=0x08 Buffer=6
+[   43.7219] D/CDROM: DataSector 00:03:12 LBA=237 Mode=2 Submode=0x08 Buffer=7
+[   43.7228] D/CDROM: DataSector 00:03:13 LBA=238 Mode=2 Submode=0x08 Buffer=0
+[   43.7234] D/CDROM: DataSector 00:03:14 LBA=239 Mode=2 Submode=0x08 Buffer=1
+[   43.7417] D/CDROM: DataSector 00:03:15 LBA=240 Mode=2 Submode=0x08 Buffer=2
+[   43.7425] D/CDROM: DataSector 00:03:16 LBA=241 Mode=2 Submode=0x08 Buffer=3
+[   43.7434] D/CDROM: DataSector 00:03:17 LBA=242 Mode=2 Submode=0x08 Buffer=4
+[   43.7620] D/CDROM: DataSector 00:03:18 LBA=243 Mode=2 Submode=0x08 Buffer=5
+[   43.7626] D/CDROM: DataSector 00:03:19 LBA=244 Mode=2 Submode=0x08 Buffer=6
+[   43.7631] D/CDROM: DataSector 00:03:20 LBA=245 Mode=2 Submode=0x08 Buffer=7
+[   43.7636] D/CDROM: DataSector 00:03:21 LBA=246 Mode=2 Submode=0x08 Buffer=0
+[   43.7821] D/CDROM: DataSector 00:03:22 LBA=247 Mode=2 Submode=0x08 Buffer=1
+[   43.7827] D/CDROM: DataSector 00:03:23 LBA=248 Mode=2 Submode=0x08 Buffer=2
+[   43.7833] D/CDROM: DataSector 00:03:24 LBA=249 Mode=2 Submode=0x08 Buffer=3
+[   43.8022] D/CDROM: DataSector 00:03:25 LBA=250 Mode=2 Submode=0x08 Buffer=4
+[   43.8027] D/CDROM: DataSector 00:03:26 LBA=251 Mode=2 Submode=0x08 Buffer=5
+[   43.8030] D/CDROM: DataSector 00:03:27 LBA=252 Mode=2 Submode=0x08 Buffer=6
+[   43.8223] D/CDROM: DataSector 00:03:28 LBA=253 Mode=2 Submode=0x08 Buffer=7
+[   43.8228] D/CDROM: DataSector 00:03:29 LBA=254 Mode=2 Submode=0x08 Buffer=0
+[   43.8236] D/CDROM: DataSector 00:03:30 LBA=255 Mode=2 Submode=0x08 Buffer=1
+[   43.8423] D/CDROM: DataSector 00:03:31 LBA=256 Mode=2 Submode=0x08 Buffer=2
+[   43.8428] D/CDROM: DataSector 00:03:32 LBA=257 Mode=2 Submode=0x08 Buffer=3
+[   43.8432] D/CDROM: DataSector 00:03:33 LBA=258 Mode=2 Submode=0x08 Buffer=4
+[   43.8625] D/CDROM: DataSector 00:03:34 LBA=259 Mode=2 Submode=0x08 Buffer=5
+[   43.8632] D/CDROM: DataSector 00:03:35 LBA=260 Mode=2 Submode=0x08 Buffer=6
+[   43.8643] D/CDROM: DataSector 00:03:36 LBA=261 Mode=2 Submode=0x08 Buffer=7
+[   43.8826] D/CDROM: DataSector 00:03:37 LBA=262 Mode=2 Submode=0x08 Buffer=0
+[   43.8832] D/CDROM: DataSector 00:03:38 LBA=263 Mode=2 Submode=0x08 Buffer=1
+[   43.8835] D/CDROM: DataSector 00:03:39 LBA=264 Mode=2 Submode=0x08 Buffer=2
+[   43.9027] D/CDROM: DataSector 00:03:40 LBA=265 Mode=2 Submode=0x08 Buffer=3
+[   43.9032] D/CDROM: DataSector 00:03:41 LBA=266 Mode=2 Submode=0x08 Buffer=4
+[   43.9037] D/CDROM: DataSector 00:03:42 LBA=267 Mode=2 Submode=0x08 Buffer=5
+[   43.9228] D/CDROM: DataSector 00:03:43 LBA=268 Mode=2 Submode=0x08 Buffer=6
+[   43.9232] D/CDROM: DataSector 00:03:44 LBA=269 Mode=2 Submode=0x08 Buffer=7
+[   43.9236] D/CDROM: DataSector 00:03:45 LBA=270 Mode=2 Submode=0x08 Buffer=0
+[   43.9430] D/CDROM: DataSector 00:03:46 LBA=271 Mode=2 Submode=0x08 Buffer=1
+[   43.9443] D/CDROM: DataSector 00:03:47 LBA=272 Mode=2 Submode=0x08 Buffer=2
+[   43.9462] D/CDROM: DataSector 00:03:48 LBA=273 Mode=2 Submode=0x08 Buffer=3
+[   43.9630] D/CDROM: DataSector 00:03:49 LBA=274 Mode=2 Submode=0x08 Buffer=4
+[   43.9634] D/CDROM: DataSector 00:03:50 LBA=275 Mode=2 Submode=0x08 Buffer=5
+[   43.9639] D/CDROM: DataSector 00:03:51 LBA=276 Mode=2 Submode=0x08 Buffer=6
+[   43.9831] D/CDROM: DataSector 00:03:52 LBA=277 Mode=2 Submode=0x08 Buffer=7
+[   43.9837] D/CDROM: DataSector 00:03:53 LBA=278 Mode=2 Submode=0x08 Buffer=0
+[   43.9842] D/CDROM: DataSector 00:03:54 LBA=279 Mode=2 Submode=0x08 Buffer=1
+[   44.0032] D/CDROM: DataSector 00:03:55 LBA=280 Mode=2 Submode=0x08 Buffer=2
+[   44.0040] D/CDROM: DataSector 00:03:56 LBA=281 Mode=2 Submode=0x08 Buffer=3
+[   44.0050] D/CDROM: DataSector 00:03:57 LBA=282 Mode=2 Submode=0x08 Buffer=4
+[   44.0231] D/CDROM: DataSector 00:03:58 LBA=283 Mode=2 Submode=0x08 Buffer=5
+[   44.0238] D/CDROM: DataSector 00:03:59 LBA=284 Mode=2 Submode=0x08 Buffer=6
+[   44.0243] D/CDROM: DataSector 00:03:60 LBA=285 Mode=2 Submode=0x08 Buffer=7
+[   44.0432] D/CDROM: DataSector 00:03:61 LBA=286 Mode=2 Submode=0x08 Buffer=0
+[   44.0436] D/CDROM: DataSector 00:03:62 LBA=287 Mode=2 Submode=0x08 Buffer=1
+[   44.0442] D/CDROM: DataSector 00:03:63 LBA=288 Mode=2 Submode=0x08 Buffer=2
+[   44.0642] D/CDROM: DataSector 00:03:64 LBA=289 Mode=2 Submode=0x08 Buffer=3
+[   44.0650] D/CDROM: DataSector 00:03:65 LBA=290 Mode=2 Submode=0x08 Buffer=4
+[   44.0660] D/CDROM: DataSector 00:03:66 LBA=291 Mode=2 Submode=0x08 Buffer=5
+[   44.0839] D/CDROM: DataSector 00:03:67 LBA=292 Mode=2 Submode=0x08 Buffer=6
+[   44.0845] D/CDROM: DataSector 00:03:68 LBA=293 Mode=2 Submode=0x08 Buffer=7
+[   44.0850] D/CDROM: DataSector 00:03:69 LBA=294 Mode=2 Submode=0x08 Buffer=0
+[   44.1035] D/CDROM: DataSector 00:03:70 LBA=295 Mode=2 Submode=0x08 Buffer=1
+[   44.1041] D/CDROM: DataSector 00:03:71 LBA=296 Mode=2 Submode=0x08 Buffer=2
+[   44.1045] D/CDROM: DataSector 00:03:72 LBA=297 Mode=2 Submode=0x08 Buffer=3
+[   44.1237] D/CDROM: DataSector 00:03:73 LBA=298 Mode=2 Submode=0x08 Buffer=4
+[   44.1240] D/CDROM: DataSector 00:03:74 LBA=299 Mode=2 Submode=0x08 Buffer=5
+[   44.1247] D/CDROM: DataSector 00:04:00 LBA=300 Mode=2 Submode=0x08 Buffer=6
+[   44.1439] D/CDROM: DataSector 00:04:01 LBA=301 Mode=2 Submode=0x08 Buffer=7
+[   44.1451] D/CDROM: DataSector 00:04:02 LBA=302 Mode=2 Submode=0x08 Buffer=0
+[   44.1465] D/CDROM: DataSector 00:04:03 LBA=303 Mode=2 Submode=0x08 Buffer=1
+[   44.1638] D/CDROM: DataSector 00:04:04 LBA=304 Mode=2 Submode=0x08 Buffer=2
+[   44.1644] D/CDROM: DataSector 00:04:05 LBA=305 Mode=2 Submode=0x08 Buffer=3
+[   44.1648] D/CDROM: DataSector 00:04:06 LBA=306 Mode=2 Submode=0x08 Buffer=4
+[   44.1839] D/CDROM: DataSector 00:04:07 LBA=307 Mode=2 Submode=0x08 Buffer=5
+[   44.1845] D/CDROM: DataSector 00:04:08 LBA=308 Mode=2 Submode=0x08 Buffer=6
+[   44.1848] D/CDROM: DataSector 00:04:09 LBA=309 Mode=2 Submode=0x08 Buffer=7
+[   44.2041] D/CDROM: DataSector 00:04:10 LBA=310 Mode=2 Submode=0x08 Buffer=0
+[   44.2044] D/CDROM: DataSector 00:04:11 LBA=311 Mode=2 Submode=0x08 Buffer=1
+[   44.2054] D/CDROM: DataSector 00:04:12 LBA=312 Mode=2 Submode=0x08 Buffer=2
+[   44.2245] D/CDROM: DataSector 00:04:13 LBA=313 Mode=2 Submode=0x08 Buffer=3
+[   44.2252] D/CDROM: DataSector 00:04:14 LBA=314 Mode=2 Submode=0x08 Buffer=4
+[   44.2258] D/CDROM: DataSector 00:04:15 LBA=315 Mode=2 Submode=0x08 Buffer=5
+[   44.2444] D/CDROM: DataSector 00:04:16 LBA=316 Mode=2 Submode=0x08 Buffer=6
+[   44.2449] D/CDROM: DataSector 00:04:17 LBA=317 Mode=2 Submode=0x08 Buffer=7
+[   44.2453] D/CDROM: DataSector 00:04:18 LBA=318 Mode=2 Submode=0x08 Buffer=0
+[   44.2647] D/CDROM: DataSector 00:04:19 LBA=319 Mode=2 Submode=0x08 Buffer=1
+[   44.2652] D/CDROM: DataSector 00:04:20 LBA=320 Mode=2 Submode=0x08 Buffer=2
+[   44.2665] D/CDROM: DataSector 00:04:21 LBA=321 Mode=2 Submode=0x08 Buffer=3
+[   44.2844] D/CDROM: DataSector 00:04:22 LBA=322 Mode=2 Submode=0x08 Buffer=4
+[   44.2851] D/CDROM: DataSector 00:04:23 LBA=323 Mode=2 Submode=0x08 Buffer=5
+[   44.2856] D/CDROM: DataSector 00:04:24 LBA=324 Mode=2 Submode=0x08 Buffer=6
+[   44.2861] V/PerfMon: FPS: 0.00 VPS: 49.76 CPU: 4.15 RNDR: 0.76 GPU: 0.00 Avg: 20.10ms Min: 16.39ms Max: 23.96ms
+[   44.3047] D/CDROM: DataSector 00:04:25 LBA=325 Mode=2 Submode=0x08 Buffer=7
+[   44.3051] D/CDROM: DataSector 00:04:26 LBA=326 Mode=2 Submode=0x08 Buffer=0
+[   44.3056] D/CDROM: DataSector 00:04:27 LBA=327 Mode=2 Submode=0x08 Buffer=1
+[   44.3250] D/CDROM: DataSector 00:04:28 LBA=328 Mode=2 Submode=0x08 Buffer=2
+[   44.3256] D/CDROM: DataSector 00:04:29 LBA=329 Mode=2 Submode=0x08 Buffer=3
+[   44.3262] D/CDROM: DataSector 00:04:30 LBA=330 Mode=2 Submode=0x08 Buffer=4
+[   44.3449] D/CDROM: DataSector 00:04:31 LBA=331 Mode=2 Submode=0x08 Buffer=5
+[   44.3455] D/CDROM: DataSector 00:04:32 LBA=332 Mode=2 Submode=0x08 Buffer=6
+[   44.3459] D/CDROM: DataSector 00:04:33 LBA=333 Mode=2 Submode=0x08 Buffer=7
+[   44.3649] D/CDROM: DataSector 00:04:34 LBA=334 Mode=2 Submode=0x08 Buffer=0
+[   44.3654] D/CDROM: DataSector 00:04:35 LBA=335 Mode=2 Submode=0x08 Buffer=1
+[   44.3658] D/CDROM: DataSector 00:04:36 LBA=336 Mode=2 Submode=0x08 Buffer=2
+[   44.3855] D/CDROM: DataSector 00:04:37 LBA=337 Mode=2 Submode=0x08 Buffer=3
+[   44.3862] D/CDROM: DataSector 00:04:38 LBA=338 Mode=2 Submode=0x08 Buffer=4
+[   44.3871] D/CDROM: DataSector 00:04:39 LBA=339 Mode=2 Submode=0x08 Buffer=5
+[   44.4051] D/CDROM: DataSector 00:04:40 LBA=340 Mode=2 Submode=0x08 Buffer=6
+[   44.4055] D/CDROM: DataSector 00:04:41 LBA=341 Mode=2 Submode=0x08 Buffer=7
+[   44.4059] D/CDROM: DataSector 00:04:42 LBA=342 Mode=2 Submode=0x08 Buffer=0
+[   44.4252] D/CDROM: DataSector 00:04:43 LBA=343 Mode=2 Submode=0x08 Buffer=1
+[   44.4258] D/CDROM: DataSector 00:04:44 LBA=344 Mode=2 Submode=0x08 Buffer=2
+[   44.4261] D/CDROM: DataSector 00:04:45 LBA=345 Mode=2 Submode=0x08 Buffer=3
+[   44.4452] D/CDROM: DataSector 00:04:46 LBA=346 Mode=2 Submode=0x08 Buffer=4
+[   44.4457] D/CDROM: DataSector 00:04:47 LBA=347 Mode=2 Submode=0x08 Buffer=5
+[   44.4461] D/CDROM: DataSector 00:04:48 LBA=348 Mode=2 Submode=0x08 Buffer=6
+[   44.4653] D/CDROM: DataSector 00:04:49 LBA=349 Mode=2 Submode=0x08 Buffer=7
+[   44.4659] D/CDROM: DataSector 00:04:50 LBA=350 Mode=2 Submode=0x08 Buffer=0
+[   44.4668] D/CDROM: DataSector 00:04:51 LBA=351 Mode=2 Submode=0x08 Buffer=1
+[   44.4859] D/CDROM: DataSector 00:04:52 LBA=352 Mode=2 Submode=0x08 Buffer=2
+[   44.4863] D/CDROM: DataSector 00:04:53 LBA=353 Mode=2 Submode=0x08 Buffer=3
+[   44.4868] D/CDROM: DataSector 00:04:54 LBA=354 Mode=2 Submode=0x08 Buffer=4
+[   44.5059] D/CDROM: DataSector 00:04:55 LBA=355 Mode=2 Submode=0x08 Buffer=5
+[   44.5064] D/CDROM: DataSector 00:04:56 LBA=356 Mode=2 Submode=0x08 Buffer=6
+[   44.5068] D/CDROM: DataSector 00:04:57 LBA=357 Mode=2 Submode=0x08 Buffer=7
+[   44.5258] D/CDROM: DataSector 00:04:58 LBA=358 Mode=2 Submode=0x08 Buffer=0
+[   44.5263] D/CDROM: DataSector 00:04:59 LBA=359 Mode=2 Submode=0x08 Buffer=1
+[   44.5269] D/CDROM: DataSector 00:04:60 LBA=360 Mode=2 Submode=0x08 Buffer=2
+[   44.5459] D/CDROM: DataSector 00:04:61 LBA=361 Mode=2 Submode=0x08 Buffer=3
+[   44.5464] D/CDROM: DataSector 00:04:62 LBA=362 Mode=2 Submode=0x08 Buffer=4
+[   44.5468] D/CDROM: DataSector 00:04:63 LBA=363 Mode=2 Submode=0x08 Buffer=5
+[   44.5661] D/CDROM: DataSector 00:04:64 LBA=364 Mode=2 Submode=0x08 Buffer=6
+[   44.5667] D/CDROM: DataSector 00:04:65 LBA=365 Mode=2 Submode=0x08 Buffer=7
+[   44.5671] D/CDROM: DataSector 00:04:66 LBA=366 Mode=2 Submode=0x08 Buffer=0
+[   44.5862] D/CDROM: DataSector 00:04:67 LBA=367 Mode=2 Submode=0x08 Buffer=1
+[   44.5867] D/CDROM: DataSector 00:04:68 LBA=368 Mode=2 Submode=0x08 Buffer=2
+[   44.5871] D/CDROM: DataSector 00:04:69 LBA=369 Mode=2 Submode=0x08 Buffer=3
+[   44.6062] D/CDROM: DataSector 00:04:70 LBA=370 Mode=2 Submode=0x08 Buffer=4
+[   44.6068] D/CDROM: DataSector 00:04:71 LBA=371 Mode=2 Submode=0x08 Buffer=5
+[   44.6072] D/CDROM: DataSector 00:04:72 LBA=372 Mode=2 Submode=0x08 Buffer=6
+[   44.6265] D/CDROM: DataSector 00:04:73 LBA=373 Mode=2 Submode=0x08 Buffer=7
+[   44.6271] D/CDROM: DataSector 00:04:74 LBA=374 Mode=2 Submode=0x08 Buffer=0
+[   44.6276] D/CDROM: DataSector 00:05:00 LBA=375 Mode=2 Submode=0x08 Buffer=1
+[   44.6463] D/CDROM: DataSector 00:05:01 LBA=376 Mode=2 Submode=0x08 Buffer=2
+[   44.6469] D/CDROM: DataSector 00:05:02 LBA=377 Mode=2 Submode=0x08 Buffer=3
+[   44.6473] D/CDROM: DataSector 00:05:03 LBA=378 Mode=2 Submode=0x08 Buffer=4
+[   44.6664] D/CDROM: DataSector 00:05:04 LBA=379 Mode=2 Submode=0x08 Buffer=5
+[   44.6670] D/CDROM: DataSector 00:05:05 LBA=380 Mode=2 Submode=0x08 Buffer=6
+[   44.6676] D/CDROM: DataSector 00:05:06 LBA=381 Mode=2 Submode=0x08 Buffer=7
+[   44.6868] D/CDROM: DataSector 00:05:07 LBA=382 Mode=2 Submode=0x08 Buffer=0
+[   44.6873] D/CDROM: DataSector 00:05:08 LBA=383 Mode=2 Submode=0x08 Buffer=1
+[   44.6877] D/CDROM: DataSector 00:05:09 LBA=384 Mode=2 Submode=0x08 Buffer=2
+[   44.7068] D/CDROM: DataSector 00:05:10 LBA=385 Mode=2 Submode=0x08 Buffer=3
+[   44.7073] D/CDROM: DataSector 00:05:11 LBA=386 Mode=2 Submode=0x08 Buffer=4
+[   44.7081] D/CDROM: DataSector 00:05:12 LBA=387 Mode=2 Submode=0x89 Buffer=5
+[   44.7086] D/CDROM: Pause                  39.01ms
+[   44.7471] D/Bus: Cache control <- 0x00000804
+[   44.7478] D/Bus: Cache control <- 0x00000800
+[   44.7488] D/Bus: Cache control <- 0x0001E988
+[   44.8109] D/Bus: RAM size register set to 0x00000888
+[   44.8276] D/CDROM: Getstat    Stat=0x02
+[   44.8282] D/CDROM: Init
+[   44.8285] D/CDROM: Seek time for 00:05:12->00:00:00 (387 LBA): 3406085 (100.567 ms) (2N backward)
+[   44.8286] D/CDROM: CDROM init total disc ticks = 27114245 (speed change = 23708160, seek = 3406085)
+[   45.2913] V/PerfMon: FPS: 0.00 VPS: 49.74 CPU: 6.46 RNDR: 0.76 GPU: 0.00 Avg: 20.10ms Min: 18.13ms Max: 22.13ms
+[   45.6317] D/Bus: Cache control <- 0x00000804
+[   45.6327] D/Bus: Cache control <- 0x00000800
+[   45.6333] D/Bus: Cache control <- 0x0001E988
+[   45.6715] D/Controller: Unknown data_in = 0x81
+[   45.6719] D/MemoryCard: Reading memory card sector 0
+[   45.7118] D/Controller: Unknown data_in = 0x81
+[   45.7125] I/MemoryCard: Writing memory card sector 63
+[   45.7520] D/Controller: Unknown data_in = 0x81
+[   45.7525] D/MemoryCard: Reading memory card sector 1
+[   45.7921] D/Controller: Unknown data_in = 0x81
+[   45.7925] D/MemoryCard: Reading memory card sector 2
+[   45.8323] D/Controller: Unknown data_in = 0x81
+[   45.8328] D/MemoryCard: Reading memory card sector 3
+[   45.8725] D/Controller: Unknown data_in = 0x81
+[   45.8729] D/MemoryCard: Reading memory card sector 4
+[   45.9128] D/Controller: Unknown data_in = 0x81
+[   45.9133] D/MemoryCard: Reading memory card sector 5
+[   45.9531] D/Controller: Unknown data_in = 0x81
+[   45.9536] D/MemoryCard: Reading memory card sector 6
+[   45.9933] D/Controller: Unknown data_in = 0x81
+[   45.9938] D/MemoryCard: Reading memory card sector 7
+[   46.0333] D/Controller: Unknown data_in = 0x81
+[   46.0337] D/MemoryCard: Reading memory card sector 8
+[   46.0739] D/Controller: Unknown data_in = 0x81
+[   46.0744] D/MemoryCard: Reading memory card sector 9
+[   46.1140] D/Controller: Unknown data_in = 0x81
+[   46.1150] D/MemoryCard: Reading memory card sector 10
+[   46.1543] D/Controller: Unknown data_in = 0x81
+[   46.1548] D/MemoryCard: Reading memory card sector 11
+[   46.1945] D/Controller: Unknown data_in = 0x81
+[   46.1950] D/MemoryCard: Reading memory card sector 12
+[   46.2344] D/Controller: Unknown data_in = 0x81
+[   46.2349] D/MemoryCard: Reading memory card sector 13
+[   46.2747] D/Controller: Unknown data_in = 0x81
+[   46.2752] D/MemoryCard: Reading memory card sector 14
+[   46.2949] V/PerfMon: FPS: 0.00 VPS: 49.82 CPU: 4.27 RNDR: 0.77 GPU: 0.00 Avg: 20.07ms Min: 18.01ms Max: 22.17ms
+[   46.3149] D/Controller: Unknown data_in = 0x81
+[   46.3153] D/MemoryCard: Reading memory card sector 15
+[   46.3553] D/Controller: Unknown data_in = 0x81
+[   46.3557] D/MemoryCard: Reading memory card sector 16
+[   46.3955] D/Controller: Unknown data_in = 0x81
+[   46.3962] D/MemoryCard: Reading memory card sector 17
+[   46.4356] D/Controller: Unknown data_in = 0x81
+[   46.4361] D/MemoryCard: Reading memory card sector 18
+[   46.4760] D/Controller: Unknown data_in = 0x81
+[   46.4769] D/MemoryCard: Reading memory card sector 19
+[   46.5161] D/Controller: Unknown data_in = 0x81
+[   46.5166] D/MemoryCard: Reading memory card sector 20
+[   46.5563] D/Controller: Unknown data_in = 0x81
+[   46.5568] D/MemoryCard: Reading memory card sector 21
+[   46.5963] D/Controller: Unknown data_in = 0x81
+[   46.5967] D/MemoryCard: Reading memory card sector 22
+[   46.6366] D/Controller: Unknown data_in = 0x81
+[   46.6373] D/MemoryCard: Reading memory card sector 23
+[   46.6767] D/Controller: Unknown data_in = 0x81
+[   46.6771] D/MemoryCard: Reading memory card sector 24
+[   46.7171] D/Controller: Unknown data_in = 0x81
+[   46.7177] D/MemoryCard: Reading memory card sector 25
+[   46.7572] D/Controller: Unknown data_in = 0x81
+[   46.7578] D/MemoryCard: Reading memory card sector 26
+[   46.7978] D/Controller: Unknown data_in = 0x81
+[   46.7989] D/MemoryCard: Reading memory card sector 27
+[   46.8374] D/Controller: Unknown data_in = 0x81
+[   46.8379] D/MemoryCard: Reading memory card sector 28
+[   46.8777] D/Controller: Unknown data_in = 0x81
+[   46.8781] D/MemoryCard: Reading memory card sector 29
+[   46.9182] D/Controller: Unknown data_in = 0x81
+[   46.9187] D/MemoryCard: Reading memory card sector 30
+[   46.9583] D/Controller: Unknown data_in = 0x81
+[   46.9590] D/MemoryCard: Reading memory card sector 31
+[   46.9985] D/Controller: Unknown data_in = 0x81
+[   46.9991] D/MemoryCard: Reading memory card sector 32
+[   47.0383] D/Controller: Unknown data_in = 0x81
+[   47.0387] D/MemoryCard: Reading memory card sector 33
+[   47.0789] D/Controller: Unknown data_in = 0x81
+[   47.0793] D/MemoryCard: Reading memory card sector 34
+[   47.1190] D/Controller: Unknown data_in = 0x81
+[   47.1195] D/MemoryCard: Reading memory card sector 35
+[   47.1595] D/SPU: Unknown SPU register write: offset 0x19C (address 0x1F801D9C) value 0x0000
+[   47.1599] D/SPU: Unknown SPU register write: offset 0x19E (address 0x1F801D9E) value 0x0000
+[   47.1606] D/CDROM: Setloc     00:02:16
+[   47.1609] D/CDROM: Setmode    0x80
+[   47.1611] D/CDROM: Drive is idle, speed change takes 20321280 ticks
+[   47.1613] D/CDROM: ReadN      00:02:16
+[   47.1614] D/CDROM: Seek time for 00:00:05->00:02:16 (161 LBA): 22004800 (649.707 ms) (20292633 for speed change/init) (2N forward)
+[   47.3014] V/PerfMon: FPS: 0.00 VPS: 49.67 CPU: 3.28 RNDR: 0.75 GPU: 0.00 Avg: 20.13ms Min: 17.25ms Max: 23.06ms
+[   47.8033] D/CDROM: Logical seek to [00:02:16] complete, now reading
+[   47.8226] D/CDROM: DataSector 00:02:16 LBA=166 Mode=2 Submode=0x09 Buffer=1
+[   47.8230] D/CDROM: Pause                  39.13ms
+[   47.8633] D/CDROM: Setloc     00:02:18
+[   47.8638] D/CDROM: Setmode    0x80
+[   47.8651] D/CDROM: ReadN      00:02:18
+[   47.8652] D/CDROM: Seek time for 00:02:14->00:02:18 (4 LBA): 929500 (27.444 ms) (forward)
+[   47.8837] D/CDROM: Logical seek to [00:02:18] complete, now reading
+[   47.8846] D/CDROM: DataSector 00:02:18 LBA=168 Mode=2 Submode=0x89 Buffer=1
+[   47.8852] D/CDROM: Pause                  39.13ms
+[   47.9244] D/CDROM: Setloc     00:02:22
+[   47.9432] D/CDROM: Setmode    0x80
+[   47.9436] D/CDROM: ReadN      00:02:22
+[   47.9439] D/CDROM: Seek time for 00:02:16->00:02:22 (6 LBA): 1371761 (40.502 ms) (forward)
+[   47.9835] D/CDROM: Logical seek to [00:02:22] complete, now reading
+[   47.9843] D/CDROM: DataSector 00:02:22 LBA=172 Mode=2 Submode=0x89 Buffer=1
+[   47.9847] D/CDROM: Pause                  39.13ms
+[   48.0237] V/System: Video frame rate changed from 49.75 to 59.27 fps
+[   48.0241] D/CPU: GTE aspect ratio correction is disabled.
+[   48.0255] D/CDROM: Setloc     00:08:28
+[   48.0412] D/CDROM: Setmode    0x80
+[   48.0416] D/CDROM: ReadN      00:08:28
+[   48.0419] D/CDROM: Seek time for 00:02:21->00:08:28 (457 LBA): 3404182 (100.511 ms) (2N forward)
+[   48.1424] D/CDROM: Logical seek to [00:08:28] complete, now reading
+[   48.1434] D/CDROM: DataSector 00:08:28 LBA=628 Mode=2 Submode=0x08 Buffer=1
+[   48.1444] D/CDROM: DataSector 00:08:29 LBA=629 Mode=2 Submode=0x08 Buffer=2
+[   48.1596] D/CDROM: DataSector 00:08:30 LBA=630 Mode=2 Submode=0x08 Buffer=3
+[   48.1604] D/CDROM: DataSector 00:08:31 LBA=631 Mode=2 Submode=0x08 Buffer=4
+[   48.1763] D/CDROM: DataSector 00:08:32 LBA=632 Mode=2 Submode=0x08 Buffer=5
+[   48.1770] D/CDROM: DataSector 00:08:33 LBA=633 Mode=2 Submode=0x08 Buffer=6
+[   48.1776] D/CDROM: DataSector 00:08:34 LBA=634 Mode=2 Submode=0x08 Buffer=7
+[   48.1935] D/CDROM: DataSector 00:08:35 LBA=635 Mode=2 Submode=0x08 Buffer=0
+[   48.1943] D/CDROM: DataSector 00:08:36 LBA=636 Mode=2 Submode=0x08 Buffer=1
+[   48.2099] D/CDROM: DataSector 00:08:37 LBA=637 Mode=2 Submode=0x08 Buffer=2
+[   48.2106] D/CDROM: DataSector 00:08:38 LBA=638 Mode=2 Submode=0x08 Buffer=3
+[   48.2113] D/CDROM: DataSector 00:08:39 LBA=639 Mode=2 Submode=0x08 Buffer=4
+[   48.2275] D/CDROM: DataSector 00:08:40 LBA=640 Mode=2 Submode=0x08 Buffer=5
+[   48.2288] D/CDROM: DataSector 00:08:41 LBA=641 Mode=2 Submode=0x08 Buffer=6
+[   48.2438] D/CDROM: DataSector 00:08:42 LBA=642 Mode=2 Submode=0x08 Buffer=7
+[   48.2446] D/CDROM: DataSector 00:08:43 LBA=643 Mode=2 Submode=0x89 Buffer=0
+[   48.2449] D/CDROM: Pause                  39.12ms
+[   48.2944] D/CDROM: Setloc     00:05:13
+[   48.3115] D/CDROM: Setmode    0x80
+[   48.3120] D/CDROM: ReadN      00:05:13
+[   48.3124] D/CDROM: Seek time for 00:08:44->00:05:13 (256 LBA): 1718876 (50.751 ms) (2N backward)
+[   48.3135] V/PerfMon: FPS: 17.78 VPS: 52.37 CPU: 7.52 RNDR: 0.82 GPU: 0.00 Avg: 19.10ms Min: 15.71ms Max: 22.70ms
+[   48.3622] D/CDROM: Logical seek to [00:05:13] complete, now reading
+[   48.3630] D/CDROM: DataSector 00:05:13 LBA=388 Mode=2 Submode=0x08 Buffer=1
+[   48.3636] D/CDROM: DataSector 00:05:14 LBA=389 Mode=2 Submode=0x08 Buffer=2
+[   48.3790] D/CDROM: DataSector 00:05:15 LBA=390 Mode=2 Submode=0x08 Buffer=3
+[   48.3799] D/CDROM: DataSector 00:05:16 LBA=391 Mode=2 Submode=0x08 Buffer=4
+[   48.3959] D/CDROM: DataSector 00:05:17 LBA=392 Mode=2 Submode=0x08 Buffer=5
+[   48.3967] D/CDROM: DataSector 00:05:18 LBA=393 Mode=2 Submode=0x08 Buffer=6
+[   48.3976] D/CDROM: DataSector 00:05:19 LBA=394 Mode=2 Submode=0x08 Buffer=7
+[   48.4126] D/CDROM: DataSector 00:05:20 LBA=395 Mode=2 Submode=0x08 Buffer=0
+[   48.4134] D/CDROM: DataSector 00:05:21 LBA=396 Mode=2 Submode=0x08 Buffer=1
+[   48.4294] D/CDROM: DataSector 00:05:22 LBA=397 Mode=2 Submode=0x08 Buffer=2
+[   48.4303] D/CDROM: DataSector 00:05:23 LBA=398 Mode=2 Submode=0x08 Buffer=3
+[   48.4310] D/CDROM: DataSector 00:05:24 LBA=399 Mode=2 Submode=0x08 Buffer=4
+[   48.4468] D/CDROM: DataSector 00:05:25 LBA=400 Mode=2 Submode=0x08 Buffer=5
+[   48.4475] D/CDROM: DataSector 00:05:26 LBA=401 Mode=2 Submode=0x08 Buffer=6
+[   48.4631] D/CDROM: DataSector 00:05:27 LBA=402 Mode=2 Submode=0x08 Buffer=7
+[   48.4639] D/CDROM: DataSector 00:05:28 LBA=403 Mode=2 Submode=0x08 Buffer=0
+[   48.4646] D/CDROM: DataSector 00:05:29 LBA=404 Mode=2 Submode=0x08 Buffer=1
+[   48.4803] D/CDROM: DataSector 00:05:30 LBA=405 Mode=2 Submode=0x08 Buffer=2
+[   48.4811] D/CDROM: DataSector 00:05:31 LBA=406 Mode=2 Submode=0x08 Buffer=3
+[   48.4971] D/CDROM: DataSector 00:05:32 LBA=407 Mode=2 Submode=0x08 Buffer=4
+[   48.4979] D/CDROM: DataSector 00:05:33 LBA=408 Mode=2 Submode=0x08 Buffer=5
+[   48.4985] D/CDROM: DataSector 00:05:34 LBA=409 Mode=2 Submode=0x08 Buffer=6
+[   48.5141] D/CDROM: DataSector 00:05:35 LBA=410 Mode=2 Submode=0x08 Buffer=7
+[   48.5149] D/CDROM: DataSector 00:05:36 LBA=411 Mode=2 Submode=0x08 Buffer=0
+[   48.5305] D/CDROM: DataSector 00:05:37 LBA=412 Mode=2 Submode=0x08 Buffer=1
+[   48.5314] D/CDROM: DataSector 00:05:38 LBA=413 Mode=2 Submode=0x08 Buffer=2
+[   48.5321] D/CDROM: DataSector 00:05:39 LBA=414 Mode=2 Submode=0x08 Buffer=3
+[   48.5478] D/CDROM: DataSector 00:05:40 LBA=415 Mode=2 Submode=0x08 Buffer=4
+[   48.5486] D/CDROM: DataSector 00:05:41 LBA=416 Mode=2 Submode=0x08 Buffer=5
+[   48.5492] D/CDROM: DataSector 00:05:42 LBA=417 Mode=2 Submode=0x08 Buffer=6
+[   48.5646] D/CDROM: DataSector 00:05:43 LBA=418 Mode=2 Submode=0x08 Buffer=7
+[   48.5654] D/CDROM: DataSector 00:05:44 LBA=419 Mode=2 Submode=0x08 Buffer=0
+[   48.5817] D/CDROM: DataSector 00:05:45 LBA=420 Mode=2 Submode=0x08 Buffer=1
+[   48.5826] D/CDROM: DataSector 00:05:46 LBA=421 Mode=2 Submode=0x08 Buffer=2
+[   48.5834] D/CDROM: DataSector 00:05:47 LBA=422 Mode=2 Submode=0x08 Buffer=3
+[   48.5988] D/CDROM: DataSector 00:05:48 LBA=423 Mode=2 Submode=0x08 Buffer=4
+[   48.5995] D/CDROM: DataSector 00:05:49 LBA=424 Mode=2 Submode=0x08 Buffer=5
+[   48.6152] D/CDROM: DataSector 00:05:50 LBA=425 Mode=2 Submode=0x08 Buffer=6
+[   48.6161] D/CDROM: DataSector 00:05:51 LBA=426 Mode=2 Submode=0x08 Buffer=7
+[   48.6167] D/CDROM: DataSector 00:05:52 LBA=427 Mode=2 Submode=0x08 Buffer=0
+[   48.6321] D/CDROM: DataSector 00:05:53 LBA=428 Mode=2 Submode=0x08 Buffer=1
+[   48.6329] D/CDROM: DataSector 00:05:54 LBA=429 Mode=2 Submode=0x08 Buffer=2
+[   48.6491] D/CDROM: DataSector 00:05:55 LBA=430 Mode=2 Submode=0x08 Buffer=3
+[   48.6500] D/CDROM: DataSector 00:05:56 LBA=431 Mode=2 Submode=0x08 Buffer=4
+[   48.6507] D/CDROM: DataSector 00:05:57 LBA=432 Mode=2 Submode=0x08 Buffer=5
+[   48.6670] D/CDROM: DataSector 00:05:58 LBA=433 Mode=2 Submode=0x08 Buffer=6
+[   48.6678] D/CDROM: DataSector 00:05:59 LBA=434 Mode=2 Submode=0x08 Buffer=7
+[   48.6825] D/CDROM: DataSector 00:05:60 LBA=435 Mode=2 Submode=0x08 Buffer=0
+[   48.6832] D/CDROM: DataSector 00:05:61 LBA=436 Mode=2 Submode=0x08 Buffer=1
+[   48.6839] D/CDROM: DataSector 00:05:62 LBA=437 Mode=2 Submode=0x08 Buffer=2
+[   48.6997] D/CDROM: DataSector 00:05:63 LBA=438 Mode=2 Submode=0x08 Buffer=3
+[   48.7006] D/CDROM: DataSector 00:05:64 LBA=439 Mode=2 Submode=0x08 Buffer=4
+[   48.7166] D/CDROM: DataSector 00:05:65 LBA=440 Mode=2 Submode=0x08 Buffer=5
+[   48.7176] D/CDROM: DataSector 00:05:66 LBA=441 Mode=2 Submode=0x08 Buffer=6
+[   48.7186] D/CDROM: DataSector 00:05:67 LBA=442 Mode=2 Submode=0x08 Buffer=7
+[   48.7332] D/CDROM: DataSector 00:05:68 LBA=443 Mode=2 Submode=0x08 Buffer=0
+[   48.7343] D/CDROM: DataSector 00:05:69 LBA=444 Mode=2 Submode=0x08 Buffer=1
+[   48.7506] D/CDROM: DataSector 00:05:70 LBA=445 Mode=2 Submode=0x08 Buffer=2
+[   48.7518] D/CDROM: DataSector 00:05:71 LBA=446 Mode=2 Submode=0x08 Buffer=3
+[   48.7526] D/CDROM: DataSector 00:05:72 LBA=447 Mode=2 Submode=0x08 Buffer=4
+[   48.7674] D/CDROM: DataSector 00:05:73 LBA=448 Mode=2 Submode=0x08 Buffer=5
+[   48.7683] D/CDROM: DataSector 00:05:74 LBA=449 Mode=2 Submode=0x08 Buffer=6
+[   48.7838] D/CDROM: DataSector 00:06:00 LBA=450 Mode=2 Submode=0x08 Buffer=7
+[   48.7849] D/CDROM: DataSector 00:06:01 LBA=451 Mode=2 Submode=0x08 Buffer=0
+[   48.7858] D/CDROM: DataSector 00:06:02 LBA=452 Mode=2 Submode=0x08 Buffer=1
+[   48.8010] D/CDROM: DataSector 00:06:03 LBA=453 Mode=2 Submode=0x08 Buffer=2
+[   48.8019] D/CDROM: DataSector 00:06:04 LBA=454 Mode=2 Submode=0x08 Buffer=3
+[   48.8174] D/CDROM: DataSector 00:06:05 LBA=455 Mode=2 Submode=0x08 Buffer=4
+[   48.8183] D/CDROM: DataSector 00:06:06 LBA=456 Mode=2 Submode=0x08 Buffer=5
+[   48.8191] D/CDROM: DataSector 00:06:07 LBA=457 Mode=2 Submode=0x08 Buffer=6
+[   48.8344] D/CDROM: DataSector 00:06:08 LBA=458 Mode=2 Submode=0x08 Buffer=7
+[   48.8354] D/CDROM: DataSector 00:06:09 LBA=459 Mode=2 Submode=0x08 Buffer=0
+[   48.8362] D/CDROM: DataSector 00:06:10 LBA=460 Mode=2 Submode=0x08 Buffer=1
+[   48.8516] D/CDROM: DataSector 00:06:11 LBA=461 Mode=2 Submode=0x08 Buffer=2
+[   48.8525] D/CDROM: DataSector 00:06:12 LBA=462 Mode=2 Submode=0x08 Buffer=3
+[   48.8682] D/CDROM: DataSector 00:06:13 LBA=463 Mode=2 Submode=0x08 Buffer=4
+[   48.8691] D/CDROM: DataSector 00:06:14 LBA=464 Mode=2 Submode=0x08 Buffer=5
+[   48.8698] D/CDROM: DataSector 00:06:15 LBA=465 Mode=2 Submode=0x08 Buffer=6
+[   48.8854] D/CDROM: DataSector 00:06:16 LBA=466 Mode=2 Submode=0x08 Buffer=7
+[   48.8862] D/CDROM: DataSector 00:06:17 LBA=467 Mode=2 Submode=0x08 Buffer=0
+[   48.9019] D/CDROM: DataSector 00:06:18 LBA=468 Mode=2 Submode=0x08 Buffer=1
+[   48.9028] D/CDROM: DataSector 00:06:19 LBA=469 Mode=2 Submode=0x08 Buffer=2
+[   48.9034] D/CDROM: DataSector 00:06:20 LBA=470 Mode=2 Submode=0x08 Buffer=3
+[   48.9193] D/CDROM: DataSector 00:06:21 LBA=471 Mode=2 Submode=0x08 Buffer=4
+[   48.9202] D/CDROM: DataSector 00:06:22 LBA=472 Mode=2 Submode=0x08 Buffer=5
+[   48.9360] D/CDROM: DataSector 00:06:23 LBA=473 Mode=2 Submode=0x08 Buffer=6
+[   48.9370] D/CDROM: DataSector 00:06:24 LBA=474 Mode=2 Submode=0x08 Buffer=7
+[   48.9376] D/CDROM: DataSector 00:06:25 LBA=475 Mode=2 Submode=0x08 Buffer=0
+[   48.9528] D/CDROM: DataSector 00:06:26 LBA=476 Mode=2 Submode=0x08 Buffer=1
+[   48.9538] D/CDROM: DataSector 00:06:27 LBA=477 Mode=2 Submode=0x08 Buffer=2
+[   48.9691] D/CDROM: DataSector 00:06:28 LBA=478 Mode=2 Submode=0x08 Buffer=3
+[   48.9699] D/CDROM: DataSector 00:06:29 LBA=479 Mode=2 Submode=0x08 Buffer=4
+[   48.9705] D/CDROM: DataSector 00:06:30 LBA=480 Mode=2 Submode=0x08 Buffer=5
+[   48.9865] D/CDROM: DataSector 00:06:31 LBA=481 Mode=2 Submode=0x08 Buffer=6
+[   48.9873] D/CDROM: DataSector 00:06:32 LBA=482 Mode=2 Submode=0x08 Buffer=7
+[   49.0032] D/CDROM: DataSector 00:06:33 LBA=483 Mode=2 Submode=0x08 Buffer=0
+[   49.0039] D/CDROM: DataSector 00:06:34 LBA=484 Mode=2 Submode=0x08 Buffer=1
+[   49.0047] D/CDROM: DataSector 00:06:35 LBA=485 Mode=2 Submode=0x08 Buffer=2
+[   49.0199] D/CDROM: DataSector 00:06:36 LBA=486 Mode=2 Submode=0x08 Buffer=3
+[   49.0206] D/CDROM: DataSector 00:06:37 LBA=487 Mode=2 Submode=0x08 Buffer=4
+[   49.0370] D/CDROM: DataSector 00:06:38 LBA=488 Mode=2 Submode=0x08 Buffer=5
+[   49.0379] D/CDROM: DataSector 00:06:39 LBA=489 Mode=2 Submode=0x08 Buffer=6
+[   49.0385] D/CDROM: DataSector 00:06:40 LBA=490 Mode=2 Submode=0x08 Buffer=7
+[   49.0537] D/CDROM: DataSector 00:06:41 LBA=491 Mode=2 Submode=0x08 Buffer=0
+[   49.0546] D/CDROM: DataSector 00:06:42 LBA=492 Mode=2 Submode=0x08 Buffer=1
+[   49.0703] D/CDROM: DataSector 00:06:43 LBA=493 Mode=2 Submode=0x08 Buffer=2
+[   49.0711] D/CDROM: DataSector 00:06:44 LBA=494 Mode=2 Submode=0x08 Buffer=3
+[   49.0717] D/CDROM: DataSector 00:06:45 LBA=495 Mode=2 Submode=0x08 Buffer=4
+[   49.0875] D/CDROM: DataSector 00:06:46 LBA=496 Mode=2 Submode=0x08 Buffer=5
+[   49.0884] D/CDROM: DataSector 00:06:47 LBA=497 Mode=2 Submode=0x08 Buffer=6
+[   49.1042] D/CDROM: DataSector 00:06:48 LBA=498 Mode=2 Submode=0x08 Buffer=7
+[   49.1051] D/CDROM: DataSector 00:06:49 LBA=499 Mode=2 Submode=0x08 Buffer=0
+[   49.1060] D/CDROM: DataSector 00:06:50 LBA=500 Mode=2 Submode=0x08 Buffer=1
+[   49.1213] D/CDROM: DataSector 00:06:51 LBA=501 Mode=2 Submode=0x08 Buffer=2
+[   49.1222] D/CDROM: DataSector 00:06:52 LBA=502 Mode=2 Submode=0x08 Buffer=3
+[   49.1228] D/CDROM: DataSector 00:06:53 LBA=503 Mode=2 Submode=0x08 Buffer=4
+[   49.1387] D/CDROM: DataSector 00:06:54 LBA=504 Mode=2 Submode=0x08 Buffer=5
+[   49.1395] D/CDROM: DataSector 00:06:55 LBA=505 Mode=2 Submode=0x08 Buffer=6
+[   49.1548] D/CDROM: DataSector 00:06:56 LBA=506 Mode=2 Submode=0x08 Buffer=7
+[   49.1556] D/CDROM: DataSector 00:06:57 LBA=507 Mode=2 Submode=0x08 Buffer=0
+[   49.1563] D/CDROM: DataSector 00:06:58 LBA=508 Mode=2 Submode=0x08 Buffer=1
+[   49.1720] D/CDROM: DataSector 00:06:59 LBA=509 Mode=2 Submode=0x08 Buffer=2
+[   49.1728] D/CDROM: DataSector 00:06:60 LBA=510 Mode=2 Submode=0x08 Buffer=3
+[   49.1890] D/CDROM: DataSector 00:06:61 LBA=511 Mode=2 Submode=0x08 Buffer=4
+[   49.1897] D/CDROM: DataSector 00:06:62 LBA=512 Mode=2 Submode=0x08 Buffer=5
+[   49.1905] D/CDROM: DataSector 00:06:63 LBA=513 Mode=2 Submode=0x08 Buffer=6
+[   49.2056] D/CDROM: DataSector 00:06:64 LBA=514 Mode=2 Submode=0x08 Buffer=7
+[   49.2064] D/CDROM: DataSector 00:06:65 LBA=515 Mode=2 Submode=0x08 Buffer=0
+[   49.2224] D/CDROM: DataSector 00:06:66 LBA=516 Mode=2 Submode=0x08 Buffer=1
+[   49.2233] D/CDROM: DataSector 00:06:67 LBA=517 Mode=2 Submode=0x08 Buffer=2
+[   49.2243] D/CDROM: DataSector 00:06:68 LBA=518 Mode=2 Submode=0x08 Buffer=3
+[   49.2397] D/CDROM: DataSector 00:06:69 LBA=519 Mode=2 Submode=0x08 Buffer=4
+[   49.2404] D/CDROM: DataSector 00:06:70 LBA=520 Mode=2 Submode=0x08 Buffer=5
+[   49.2560] D/CDROM: DataSector 00:06:71 LBA=521 Mode=2 Submode=0x08 Buffer=6
+[   49.2568] D/CDROM: DataSector 00:06:72 LBA=522 Mode=2 Submode=0x08 Buffer=7
+[   49.2575] D/CDROM: DataSector 00:06:73 LBA=523 Mode=2 Submode=0x08 Buffer=0
+[   49.2733] D/CDROM: DataSector 00:06:74 LBA=524 Mode=2 Submode=0x08 Buffer=1
+[   49.2740] D/CDROM: DataSector 00:07:00 LBA=525 Mode=2 Submode=0x08 Buffer=2
+[   49.2902] D/CDROM: DataSector 00:07:01 LBA=526 Mode=2 Submode=0x08 Buffer=3
+[   49.2917] D/CDROM: DataSector 00:07:02 LBA=527 Mode=2 Submode=0x08 Buffer=4
+[   49.2924] D/CDROM: DataSector 00:07:03 LBA=528 Mode=2 Submode=0x08 Buffer=5
+[   49.3068] D/CDROM: DataSector 00:07:04 LBA=529 Mode=2 Submode=0x08 Buffer=6
+[   49.3076] D/CDROM: DataSector 00:07:05 LBA=530 Mode=2 Submode=0x08 Buffer=7
+[   49.3238] D/CDROM: DataSector 00:07:06 LBA=531 Mode=2 Submode=0x08 Buffer=0
+[   49.3245] D/CDROM: DataSector 00:07:07 LBA=532 Mode=2 Submode=0x08 Buffer=1
+[   49.3252] D/CDROM: DataSector 00:07:08 LBA=533 Mode=2 Submode=0x08 Buffer=2
+[   49.3257] V/PerfMon: FPS: 59.28 VPS: 59.28 CPU: 9.03 RNDR: 0.82 GPU: 0.00 Avg: 16.87ms Min: 14.15ms Max: 18.86ms
+[   49.3406] D/CDROM: DataSector 00:07:09 LBA=534 Mode=2 Submode=0x08 Buffer=3
+[   49.3412] D/CDROM: DataSector 00:07:10 LBA=535 Mode=2 Submode=0x08 Buffer=4
+[   49.3573] D/CDROM: DataSector 00:07:11 LBA=536 Mode=2 Submode=0x08 Buffer=5
+[   49.3580] D/CDROM: DataSector 00:07:12 LBA=537 Mode=2 Submode=0x08 Buffer=6
+[   49.3588] D/CDROM: DataSector 00:07:13 LBA=538 Mode=2 Submode=0x08 Buffer=7
+[   49.3746] D/CDROM: DataSector 00:07:14 LBA=539 Mode=2 Submode=0x08 Buffer=0
+[   49.3755] D/CDROM: DataSector 00:07:15 LBA=540 Mode=2 Submode=0x08 Buffer=1
+[   49.3761] D/CDROM: DataSector 00:07:16 LBA=541 Mode=2 Submode=0x08 Buffer=2
+[   49.3914] D/CDROM: DataSector 00:07:17 LBA=542 Mode=2 Submode=0x08 Buffer=3
+[   49.3921] D/CDROM: DataSector 00:07:18 LBA=543 Mode=2 Submode=0x08 Buffer=4
+[   49.4084] D/CDROM: DataSector 00:07:19 LBA=544 Mode=2 Submode=0x08 Buffer=5
+[   49.4093] D/CDROM: DataSector 00:07:20 LBA=545 Mode=2 Submode=0x08 Buffer=6
+[   49.4104] D/CDROM: DataSector 00:07:21 LBA=546 Mode=2 Submode=0x08 Buffer=7
+[   49.4255] D/CDROM: DataSector 00:07:22 LBA=547 Mode=2 Submode=0x08 Buffer=0
+[   49.4262] D/CDROM: DataSector 00:07:23 LBA=548 Mode=2 Submode=0x08 Buffer=1
+[   49.4419] D/CDROM: DataSector 00:07:24 LBA=549 Mode=2 Submode=0x08 Buffer=2
+[   49.4426] D/CDROM: DataSector 00:07:25 LBA=550 Mode=2 Submode=0x08 Buffer=3
+[   49.4432] D/CDROM: DataSector 00:07:26 LBA=551 Mode=2 Submode=0x08 Buffer=4
+[   49.4588] D/CDROM: DataSector 00:07:27 LBA=552 Mode=2 Submode=0x08 Buffer=5
+[   49.4595] D/CDROM: DataSector 00:07:28 LBA=553 Mode=2 Submode=0x08 Buffer=6
+[   49.4758] D/CDROM: DataSector 00:07:29 LBA=554 Mode=2 Submode=0x08 Buffer=7
+[   49.4767] D/CDROM: DataSector 00:07:30 LBA=555 Mode=2 Submode=0x08 Buffer=0
+[   49.4779] D/CDROM: DataSector 00:07:31 LBA=556 Mode=2 Submode=0x08 Buffer=1
+[   49.4925] D/CDROM: DataSector 00:07:32 LBA=557 Mode=2 Submode=0x08 Buffer=2
+[   49.4933] D/CDROM: DataSector 00:07:33 LBA=558 Mode=2 Submode=0x08 Buffer=3
+[   49.5093] D/CDROM: DataSector 00:07:34 LBA=559 Mode=2 Submode=0x08 Buffer=4
+[   49.5103] D/CDROM: DataSector 00:07:35 LBA=560 Mode=2 Submode=0x08 Buffer=5
+[   49.5110] D/CDROM: DataSector 00:07:36 LBA=561 Mode=2 Submode=0x08 Buffer=6
+[   49.5261] D/CDROM: DataSector 00:07:37 LBA=562 Mode=2 Submode=0x08 Buffer=7
+[   49.5270] D/CDROM: DataSector 00:07:38 LBA=563 Mode=2 Submode=0x08 Buffer=0
+[   49.5430] D/CDROM: DataSector 00:07:39 LBA=564 Mode=2 Submode=0x08 Buffer=1
+[   49.5439] D/CDROM: DataSector 00:07:40 LBA=565 Mode=2 Submode=0x08 Buffer=2
+[   49.5447] D/CDROM: DataSector 00:07:41 LBA=566 Mode=2 Submode=0x08 Buffer=3
+[   49.5599] D/CDROM: DataSector 00:07:42 LBA=567 Mode=2 Submode=0x08 Buffer=4
+[   49.5607] D/CDROM: DataSector 00:07:43 LBA=568 Mode=2 Submode=0x08 Buffer=5
+[   49.5764] D/CDROM: DataSector 00:07:44 LBA=569 Mode=2 Submode=0x08 Buffer=6
+[   49.5772] D/CDROM: DataSector 00:07:45 LBA=570 Mode=2 Submode=0x08 Buffer=7
+[   49.5778] D/CDROM: DataSector 00:07:46 LBA=571 Mode=2 Submode=0x08 Buffer=0
+[   49.5938] D/CDROM: DataSector 00:07:47 LBA=572 Mode=2 Submode=0x08 Buffer=1
+[   49.5946] D/CDROM: DataSector 00:07:48 LBA=573 Mode=2 Submode=0x08 Buffer=2
+[   49.6103] D/CDROM: DataSector 00:07:49 LBA=574 Mode=2 Submode=0x08 Buffer=3
+[   49.6111] D/CDROM: DataSector 00:07:50 LBA=575 Mode=2 Submode=0x08 Buffer=4
+[   49.6117] D/CDROM: DataSector 00:07:51 LBA=576 Mode=2 Submode=0x08 Buffer=5
+[   49.6275] D/CDROM: DataSector 00:07:52 LBA=577 Mode=2 Submode=0x08 Buffer=6
+[   49.6283] D/CDROM: DataSector 00:07:53 LBA=578 Mode=2 Submode=0x08 Buffer=7
+[   49.6447] D/CDROM: DataSector 00:07:54 LBA=579 Mode=2 Submode=0x08 Buffer=0
+[   49.6458] D/CDROM: DataSector 00:07:55 LBA=580 Mode=2 Submode=0x08 Buffer=1
+[   49.6468] D/CDROM: DataSector 00:07:56 LBA=581 Mode=2 Submode=0x08 Buffer=2
+[   49.6611] D/CDROM: DataSector 00:07:57 LBA=582 Mode=2 Submode=0x08 Buffer=3
+[   49.6618] D/CDROM: DataSector 00:07:58 LBA=583 Mode=2 Submode=0x08 Buffer=4
+[   49.6624] D/CDROM: DataSector 00:07:59 LBA=584 Mode=2 Submode=0x08 Buffer=5
+[   49.6782] D/CDROM: DataSector 00:07:60 LBA=585 Mode=2 Submode=0x08 Buffer=6
+[   49.6791] D/CDROM: DataSector 00:07:61 LBA=586 Mode=2 Submode=0x08 Buffer=7
+[   49.6952] D/CDROM: DataSector 00:07:62 LBA=587 Mode=2 Submode=0x08 Buffer=0
+[   49.6960] D/CDROM: DataSector 00:07:63 LBA=588 Mode=2 Submode=0x08 Buffer=1
+[   49.6966] D/CDROM: DataSector 00:07:64 LBA=589 Mode=2 Submode=0x08 Buffer=2
+[   49.7123] D/CDROM: DataSector 00:07:65 LBA=590 Mode=2 Submode=0x08 Buffer=3
+[   49.7133] D/CDROM: DataSector 00:07:66 LBA=591 Mode=2 Submode=0x08 Buffer=4
+[   49.7286] D/CDROM: DataSector 00:07:67 LBA=592 Mode=2 Submode=0x08 Buffer=5
+[   49.7296] D/CDROM: DataSector 00:07:68 LBA=593 Mode=2 Submode=0x08 Buffer=6
+[   49.7303] D/CDROM: DataSector 00:07:69 LBA=594 Mode=2 Submode=0x08 Buffer=7
+[   49.7458] D/CDROM: DataSector 00:07:70 LBA=595 Mode=2 Submode=0x08 Buffer=0
+[   49.7468] D/CDROM: DataSector 00:07:71 LBA=596 Mode=2 Submode=0x08 Buffer=1
+[   49.7623] D/CDROM: DataSector 00:07:72 LBA=597 Mode=2 Submode=0x08 Buffer=2
+[   49.7632] D/CDROM: DataSector 00:07:73 LBA=598 Mode=2 Submode=0x08 Buffer=3
+[   49.7639] D/CDROM: DataSector 00:07:74 LBA=599 Mode=2 Submode=0x08 Buffer=4
+[   49.7800] D/CDROM: DataSector 00:08:00 LBA=600 Mode=2 Submode=0x08 Buffer=5
+[   49.7809] D/CDROM: DataSector 00:08:01 LBA=601 Mode=2 Submode=0x08 Buffer=6
+[   49.7959] D/CDROM: DataSector 00:08:02 LBA=602 Mode=2 Submode=0x08 Buffer=7
+[   49.7966] D/CDROM: DataSector 00:08:03 LBA=603 Mode=2 Submode=0x08 Buffer=0
+[   49.7972] D/CDROM: DataSector 00:08:04 LBA=604 Mode=2 Submode=0x08 Buffer=1
+[   49.8133] D/CDROM: DataSector 00:08:05 LBA=605 Mode=2 Submode=0x08 Buffer=2
+[   49.8140] D/CDROM: DataSector 00:08:06 LBA=606 Mode=2 Submode=0x08 Buffer=3
+[   49.8296] D/CDROM: DataSector 00:08:07 LBA=607 Mode=2 Submode=0x08 Buffer=4
+[   49.8308] D/CDROM: DataSector 00:08:08 LBA=608 Mode=2 Submode=0x08 Buffer=5
+[   49.8315] D/CDROM: DataSector 00:08:09 LBA=609 Mode=2 Submode=0x08 Buffer=6
+[   49.8468] D/CDROM: DataSector 00:08:10 LBA=610 Mode=2 Submode=0x08 Buffer=7
+[   49.8475] D/CDROM: DataSector 00:08:11 LBA=611 Mode=2 Submode=0x08 Buffer=0
+[   49.8637] D/CDROM: DataSector 00:08:12 LBA=612 Mode=2 Submode=0x08 Buffer=1
+[   49.8645] D/CDROM: DataSector 00:08:13 LBA=613 Mode=2 Submode=0x08 Buffer=2
+[   49.8651] D/CDROM: DataSector 00:08:14 LBA=614 Mode=2 Submode=0x08 Buffer=3
+[   49.8809] D/CDROM: DataSector 00:08:15 LBA=615 Mode=2 Submode=0x08 Buffer=4
+[   49.8818] D/CDROM: DataSector 00:08:16 LBA=616 Mode=2 Submode=0x08 Buffer=5
+[   49.8970] D/CDROM: DataSector 00:08:17 LBA=617 Mode=2 Submode=0x08 Buffer=6
+[   49.8978] D/CDROM: DataSector 00:08:18 LBA=618 Mode=2 Submode=0x08 Buffer=7
+[   49.8984] D/CDROM: DataSector 00:08:19 LBA=619 Mode=2 Submode=0x08 Buffer=0
+[   49.9146] D/CDROM: DataSector 00:08:20 LBA=620 Mode=2 Submode=0x08 Buffer=1
+[   49.9152] D/CDROM: DataSector 00:08:21 LBA=621 Mode=2 Submode=0x08 Buffer=2
+[   49.9308] D/CDROM: DataSector 00:08:22 LBA=622 Mode=2 Submode=0x08 Buffer=3
+[   49.9318] D/CDROM: DataSector 00:08:23 LBA=623 Mode=2 Submode=0x08 Buffer=4
+[   49.9324] D/CDROM: DataSector 00:08:24 LBA=624 Mode=2 Submode=0x08 Buffer=5
+[   49.9481] D/CDROM: DataSector 00:08:25 LBA=625 Mode=2 Submode=0x08 Buffer=6
+[   49.9489] D/CDROM: DataSector 00:08:26 LBA=626 Mode=2 Submode=0x08 Buffer=7
+[   49.9495] D/CDROM: DataSector 00:08:27 LBA=627 Mode=2 Submode=0x89 Buffer=0
+[   49.9646] D/CDROM: Pause                  39.13ms
+[   50.0998] D/Bus: Cache control <- 0x00000804
+[   50.1006] D/Bus: Cache control <- 0x00000800
+[   50.1019] D/Bus: Cache control <- 0x0001E988
+[   50.1335] D/CDROM: Setloc     00:08:44
+[   50.1508] D/CDROM: Setmode    0x80
+[   50.1514] D/CDROM: ReadN      00:08:44
+[   50.1522] D/CDROM: Seek time for 00:08:23->00:08:44 (21 LBA): 1721941 (50.842 ms) (2N forward)
+[   50.2008] D/CDROM: Logical seek to [00:08:44] complete, now reading
+[   50.2017] D/CDROM: DataSector 00:08:44 LBA=644 Mode=2 Submode=0x08 Buffer=1
+[   50.2024] D/CDROM: DataSector 00:08:45 LBA=645 Mode=2 Submode=0x08 Buffer=2
+[   50.2180] D/CDROM: DataSector 00:08:46 LBA=646 Mode=2 Submode=0x08 Buffer=3
+[   50.2188] D/CDROM: DataSector 00:08:47 LBA=647 Mode=2 Submode=0x08 Buffer=4
+[   50.2350] D/CDROM: DataSector 00:08:48 LBA=648 Mode=2 Submode=0x08 Buffer=5
+[   50.2358] D/CDROM: DataSector 00:08:49 LBA=649 Mode=2 Submode=0x08 Buffer=6
+[   50.2365] D/CDROM: DataSector 00:08:50 LBA=650 Mode=2 Submode=0x08 Buffer=7
+[   50.2519] D/CDROM: DataSector 00:08:51 LBA=651 Mode=2 Submode=0x89 Buffer=0
+[   50.2523] D/CDROM: Pause                  39.12ms
+[   50.3194] D/CDROM: Setloc     00:08:52
+[   50.3360] D/CDROM: Setmode    0x80
+[   50.3364] D/CDROM: ReadN      00:08:52
+[   50.3367] D/CDROM: Seek time for 00:08:47->00:08:52 (5 LBA): 1148487 (33.910 ms) (forward)
+[   50.3377] V/PerfMon: FPS: 52.37 VPS: 59.29 CPU: 8.77 RNDR: 0.86 GPU: 0.00 Avg: 16.87ms Min: 14.78ms Max: 18.84ms
+[   50.3697] D/CDROM: Logical seek to [00:08:52] complete, now reading
+[   50.3704] D/CDROM: DataSector 00:08:52 LBA=652 Mode=2 Submode=0x08 Buffer=1
+[   50.3713] D/CDROM: DataSector 00:08:53 LBA=653 Mode=2 Submode=0x08 Buffer=2
+[   50.3866] D/CDROM: DataSector 00:08:54 LBA=654 Mode=2 Submode=0x08 Buffer=3
+[   50.3873] D/CDROM: DataSector 00:08:55 LBA=655 Mode=2 Submode=0x08 Buffer=4
+[   50.4032] D/CDROM: DataSector 00:08:56 LBA=656 Mode=2 Submode=0x08 Buffer=5
+[   50.4039] D/CDROM: DataSector 00:08:57 LBA=657 Mode=2 Submode=0x08 Buffer=6
+[   50.4046] D/CDROM: DataSector 00:08:58 LBA=658 Mode=2 Submode=0x08 Buffer=7
+[   50.4204] D/CDROM: DataSector 00:08:59 LBA=659 Mode=2 Submode=0x08 Buffer=0
+[   50.4213] D/CDROM: DataSector 00:08:60 LBA=660 Mode=2 Submode=0x08 Buffer=1
+[   50.4372] D/CDROM: DataSector 00:08:61 LBA=661 Mode=2 Submode=0x08 Buffer=2
+[   50.4378] D/CDROM: DataSector 00:08:62 LBA=662 Mode=2 Submode=0x08 Buffer=3
+[   50.4384] D/CDROM: DataSector 00:08:63 LBA=663 Mode=2 Submode=0x08 Buffer=4
+[   50.4545] D/CDROM: DataSector 00:08:64 LBA=664 Mode=2 Submode=0x08 Buffer=5
+[   50.4553] D/CDROM: DataSector 00:08:65 LBA=665 Mode=2 Submode=0x08 Buffer=6
+[   50.4710] D/CDROM: DataSector 00:08:66 LBA=666 Mode=2 Submode=0x08 Buffer=7
+[   50.4716] D/CDROM: DataSector 00:08:67 LBA=667 Mode=2 Submode=0x08 Buffer=0
+[   50.4723] D/CDROM: DataSector 00:08:68 LBA=668 Mode=2 Submode=0x08 Buffer=1
+[   50.4875] D/CDROM: DataSector 00:08:69 LBA=669 Mode=2 Submode=0x08 Buffer=2
+[   50.4883] D/CDROM: DataSector 00:08:70 LBA=670 Mode=2 Submode=0x08 Buffer=3
+[   50.5047] D/CDROM: DataSector 00:08:71 LBA=671 Mode=2 Submode=0x08 Buffer=4
+[   50.5055] D/CDROM: DataSector 00:08:72 LBA=672 Mode=2 Submode=0x08 Buffer=5
+[   50.5061] D/CDROM: DataSector 00:08:73 LBA=673 Mode=2 Submode=0x08 Buffer=6
+[   50.5214] D/CDROM: DataSector 00:08:74 LBA=674 Mode=2 Submode=0x08 Buffer=7
+[   50.5221] D/CDROM: DataSector 00:09:00 LBA=675 Mode=2 Submode=0x08 Buffer=0
+[   50.5381] D/CDROM: DataSector 00:09:01 LBA=676 Mode=2 Submode=0x08 Buffer=1
+[   50.5388] D/CDROM: DataSector 00:09:02 LBA=677 Mode=2 Submode=0x08 Buffer=2
+[   50.5395] D/CDROM: DataSector 00:09:03 LBA=678 Mode=2 Submode=0x08 Buffer=3
+[   50.5553] D/CDROM: DataSector 00:09:04 LBA=679 Mode=2 Submode=0x08 Buffer=4
+[   50.5559] D/CDROM: DataSector 00:09:05 LBA=680 Mode=2 Submode=0x08 Buffer=5
+[   50.5721] D/CDROM: DataSector 00:09:06 LBA=681 Mode=2 Submode=0x08 Buffer=6
+[   50.5729] D/CDROM: DataSector 00:09:07 LBA=682 Mode=2 Submode=0x08 Buffer=7
+[   50.5736] D/CDROM: DataSector 00:09:08 LBA=683 Mode=2 Submode=0x08 Buffer=0
+[   50.5889] D/CDROM: DataSector 00:09:09 LBA=684 Mode=2 Submode=0x08 Buffer=1
+[   50.5925] D/CDROM: DataSector 00:09:10 LBA=685 Mode=2 Submode=0x08 Buffer=2
+[   50.5935] D/CDROM: DataSector 00:09:11 LBA=686 Mode=2 Submode=0x08 Buffer=3
+[   50.6063] D/CDROM: DataSector 00:09:12 LBA=687 Mode=2 Submode=0x08 Buffer=4
+[   50.6070] D/CDROM: DataSector 00:09:13 LBA=688 Mode=2 Submode=0x08 Buffer=5
+[   50.6229] D/CDROM: DataSector 00:09:14 LBA=689 Mode=2 Submode=0x08 Buffer=6
+[   50.6237] D/CDROM: DataSector 00:09:15 LBA=690 Mode=2 Submode=0x08 Buffer=7
+[   50.6243] D/CDROM: DataSector 00:09:16 LBA=691 Mode=2 Submode=0x08 Buffer=0
+[   50.6397] D/CDROM: DataSector 00:09:17 LBA=692 Mode=2 Submode=0x08 Buffer=1
+[   50.6404] D/CDROM: DataSector 00:09:18 LBA=693 Mode=2 Submode=0x08 Buffer=2
+[   50.6566] D/CDROM: DataSector 00:09:19 LBA=694 Mode=2 Submode=0x08 Buffer=3
+[   50.6574] D/CDROM: DataSector 00:09:20 LBA=695 Mode=2 Submode=0x08 Buffer=4
+[   50.6581] D/CDROM: DataSector 00:09:21 LBA=696 Mode=2 Submode=0x08 Buffer=5
+[   50.6736] D/CDROM: DataSector 00:09:22 LBA=697 Mode=2 Submode=0x08 Buffer=6
+[   50.6743] D/CDROM: DataSector 00:09:23 LBA=698 Mode=2 Submode=0x08 Buffer=7
+[   50.6903] D/CDROM: DataSector 00:09:24 LBA=699 Mode=2 Submode=0x08 Buffer=0
+[   50.6910] D/CDROM: DataSector 00:09:25 LBA=700 Mode=2 Submode=0x08 Buffer=1
+[   50.6917] D/CDROM: DataSector 00:09:26 LBA=701 Mode=2 Submode=0x08 Buffer=2
+[   50.7071] D/CDROM: DataSector 00:09:27 LBA=702 Mode=2 Submode=0x08 Buffer=3
+[   50.7084] D/CDROM: DataSector 00:09:28 LBA=703 Mode=2 Submode=0x08 Buffer=4
+[   50.7241] D/CDROM: DataSector 00:09:29 LBA=704 Mode=2 Submode=0x08 Buffer=5
+[   50.7251] D/CDROM: DataSector 00:09:30 LBA=705 Mode=2 Submode=0x08 Buffer=6
+[   50.7260] D/CDROM: DataSector 00:09:31 LBA=706 Mode=2 Submode=0x08 Buffer=7
+[   50.7411] D/CDROM: DataSector 00:09:32 LBA=707 Mode=2 Submode=0x08 Buffer=0
+[   50.7422] D/CDROM: DataSector 00:09:33 LBA=708 Mode=2 Submode=0x08 Buffer=1
+[   50.7577] D/CDROM: DataSector 00:09:34 LBA=709 Mode=2 Submode=0x08 Buffer=2
+[   50.7587] D/CDROM: DataSector 00:09:35 LBA=710 Mode=2 Submode=0x08 Buffer=3
+[   50.7595] D/CDROM: DataSector 00:09:36 LBA=711 Mode=2 Submode=0x08 Buffer=4
+[   50.7755] D/CDROM: DataSector 00:09:37 LBA=712 Mode=2 Submode=0x08 Buffer=5
+[   50.7762] D/CDROM: DataSector 00:09:38 LBA=713 Mode=2 Submode=0x08 Buffer=6
+[   50.7916] D/CDROM: DataSector 00:09:39 LBA=714 Mode=2 Submode=0x08 Buffer=7
+[   50.7925] D/CDROM: DataSector 00:09:40 LBA=715 Mode=2 Submode=0x08 Buffer=0
+[   50.7936] D/CDROM: DataSector 00:09:41 LBA=716 Mode=2 Submode=0x08 Buffer=1
+[   50.8083] D/CDROM: DataSector 00:09:42 LBA=717 Mode=2 Submode=0x08 Buffer=2
+[   50.8093] D/CDROM: DataSector 00:09:43 LBA=718 Mode=2 Submode=0x08 Buffer=3
+[   50.8251] D/CDROM: DataSector 00:09:44 LBA=719 Mode=2 Submode=0x08 Buffer=4
+[   50.8259] D/CDROM: DataSector 00:09:45 LBA=720 Mode=2 Submode=0x08 Buffer=5
+[   50.8266] D/CDROM: DataSector 00:09:46 LBA=721 Mode=2 Submode=0x08 Buffer=6
+[   50.8421] D/CDROM: DataSector 00:09:47 LBA=722 Mode=2 Submode=0x08 Buffer=7
+[   50.8428] D/CDROM: DataSector 00:09:48 LBA=723 Mode=2 Submode=0x08 Buffer=0
+[   50.8434] D/CDROM: DataSector 00:09:49 LBA=724 Mode=2 Submode=0x08 Buffer=1
+[   50.8594] D/CDROM: DataSector 00:09:50 LBA=725 Mode=2 Submode=0x08 Buffer=2
+[   50.8602] D/CDROM: DataSector 00:09:51 LBA=726 Mode=2 Submode=0x08 Buffer=3
+[   50.8758] D/CDROM: DataSector 00:09:52 LBA=727 Mode=2 Submode=0x08 Buffer=4
+[   50.8765] D/CDROM: DataSector 00:09:53 LBA=728 Mode=2 Submode=0x08 Buffer=5
+[   50.8772] D/CDROM: DataSector 00:09:54 LBA=729 Mode=2 Submode=0x08 Buffer=6
+[   50.8927] D/CDROM: DataSector 00:09:55 LBA=730 Mode=2 Submode=0x08 Buffer=7
+[   50.8935] D/CDROM: DataSector 00:09:56 LBA=731 Mode=2 Submode=0x08 Buffer=0
+[   50.9096] D/CDROM: DataSector 00:09:57 LBA=732 Mode=2 Submode=0x08 Buffer=1
+[   50.9104] D/CDROM: DataSector 00:09:58 LBA=733 Mode=2 Submode=0x08 Buffer=2
+[   50.9110] D/CDROM: DataSector 00:09:59 LBA=734 Mode=2 Submode=0x08 Buffer=3
+[   50.9268] D/CDROM: DataSector 00:09:60 LBA=735 Mode=2 Submode=0x08 Buffer=4
+[   50.9275] D/CDROM: DataSector 00:09:61 LBA=736 Mode=2 Submode=0x08 Buffer=5
+[   50.9432] D/CDROM: DataSector 00:09:62 LBA=737 Mode=2 Submode=0x08 Buffer=6
+[   50.9438] D/CDROM: DataSector 00:09:63 LBA=738 Mode=2 Submode=0x08 Buffer=7
+[   50.9444] D/CDROM: DataSector 00:09:64 LBA=739 Mode=2 Submode=0x08 Buffer=0
+[   50.9613] D/CDROM: DataSector 00:09:65 LBA=740 Mode=2 Submode=0x08 Buffer=1
+[   50.9622] D/CDROM: DataSector 00:09:66 LBA=741 Mode=2 Submode=0x08 Buffer=2
+[   50.9769] D/CDROM: DataSector 00:09:67 LBA=742 Mode=2 Submode=0x08 Buffer=3
+[   50.9777] D/CDROM: DataSector 00:09:68 LBA=743 Mode=2 Submode=0x08 Buffer=4
+[   50.9783] D/CDROM: DataSector 00:09:69 LBA=744 Mode=2 Submode=0x08 Buffer=5
+[   50.9940] D/CDROM: DataSector 00:09:70 LBA=745 Mode=2 Submode=0x08 Buffer=6
+[   50.9949] D/CDROM: DataSector 00:09:71 LBA=746 Mode=2 Submode=0x08 Buffer=7
+[   51.0106] D/CDROM: DataSector 00:09:72 LBA=747 Mode=2 Submode=0x08 Buffer=0
+[   51.0114] D/CDROM: DataSector 00:09:73 LBA=748 Mode=2 Submode=0x08 Buffer=1
+[   51.0121] D/CDROM: DataSector 00:09:74 LBA=749 Mode=2 Submode=0x08 Buffer=2
+[   51.0277] D/CDROM: DataSector 00:10:00 LBA=750 Mode=2 Submode=0x08 Buffer=3
+[   51.0284] D/CDROM: DataSector 00:10:01 LBA=751 Mode=2 Submode=0x08 Buffer=4
+[   51.0446] D/CDROM: DataSector 00:10:02 LBA=752 Mode=2 Submode=0x08 Buffer=5
+[   51.0454] D/CDROM: DataSector 00:10:03 LBA=753 Mode=2 Submode=0x08 Buffer=6
+[   51.0461] D/CDROM: DataSector 00:10:04 LBA=754 Mode=2 Submode=0x08 Buffer=7
+[   51.0613] D/CDROM: DataSector 00:10:05 LBA=755 Mode=2 Submode=0x08 Buffer=0
+[   51.0622] D/CDROM: DataSector 00:10:06 LBA=756 Mode=2 Submode=0x08 Buffer=1
+[   51.0782] D/CDROM: DataSector 00:10:07 LBA=757 Mode=2 Submode=0x08 Buffer=2
+[   51.0789] D/CDROM: DataSector 00:10:08 LBA=758 Mode=2 Submode=0x08 Buffer=3
+[   51.0795] D/CDROM: DataSector 00:10:09 LBA=759 Mode=2 Submode=0x08 Buffer=4
+[   51.0953] D/CDROM: DataSector 00:10:10 LBA=760 Mode=2 Submode=0x08 Buffer=5
+[   51.0962] D/CDROM: DataSector 00:10:11 LBA=761 Mode=2 Submode=0x08 Buffer=6
+[   51.1118] D/CDROM: DataSector 00:10:12 LBA=762 Mode=2 Submode=0x08 Buffer=7
+[   51.1127] D/CDROM: DataSector 00:10:13 LBA=763 Mode=2 Submode=0x08 Buffer=0
+[   51.1134] D/CDROM: DataSector 00:10:14 LBA=764 Mode=2 Submode=0x08 Buffer=1
+[   51.1291] D/CDROM: DataSector 00:10:15 LBA=765 Mode=2 Submode=0x08 Buffer=2
+[   51.1303] D/CDROM: DataSector 00:10:16 LBA=766 Mode=2 Submode=0x08 Buffer=3
+[   51.1310] D/CDROM: DataSector 00:10:17 LBA=767 Mode=2 Submode=0x08 Buffer=4
+[   51.1462] D/CDROM: DataSector 00:10:18 LBA=768 Mode=2 Submode=0x08 Buffer=5
+[   51.1471] D/CDROM: DataSector 00:10:19 LBA=769 Mode=2 Submode=0x08 Buffer=6
+[   51.1627] D/CDROM: DataSector 00:10:20 LBA=770 Mode=2 Submode=0x08 Buffer=7
+[   51.1635] D/CDROM: DataSector 00:10:21 LBA=771 Mode=2 Submode=0x08 Buffer=0
+[   51.1642] D/CDROM: DataSector 00:10:22 LBA=772 Mode=2 Submode=0x08 Buffer=1
+[   51.1800] D/CDROM: DataSector 00:10:23 LBA=773 Mode=2 Submode=0x08 Buffer=2
+[   51.1808] D/CDROM: DataSector 00:10:24 LBA=774 Mode=2 Submode=0x08 Buffer=3
+[   51.1963] D/CDROM: DataSector 00:10:25 LBA=775 Mode=2 Submode=0x08 Buffer=4
+[   51.1971] D/CDROM: DataSector 00:10:26 LBA=776 Mode=2 Submode=0x08 Buffer=5
+[   51.1978] D/CDROM: DataSector 00:10:27 LBA=777 Mode=2 Submode=0x08 Buffer=6
+[   51.2135] D/CDROM: DataSector 00:10:28 LBA=778 Mode=2 Submode=0x08 Buffer=7
+[   51.2144] D/CDROM: DataSector 00:10:29 LBA=779 Mode=2 Submode=0x08 Buffer=0
+[   51.2304] D/CDROM: DataSector 00:10:30 LBA=780 Mode=2 Submode=0x08 Buffer=1
+[   51.2311] D/CDROM: DataSector 00:10:31 LBA=781 Mode=2 Submode=0x08 Buffer=2
+[   51.2318] D/CDROM: DataSector 00:10:32 LBA=782 Mode=2 Submode=0x08 Buffer=3
+[   51.2471] D/CDROM: DataSector 00:10:33 LBA=783 Mode=2 Submode=0x08 Buffer=4
+[   51.2479] D/CDROM: DataSector 00:10:34 LBA=784 Mode=2 Submode=0x08 Buffer=5
+[   51.2671] D/CDROM: DataSector 00:10:35 LBA=785 Mode=2 Submode=0x08 Buffer=6
+[   51.2681] D/CDROM: DataSector 00:10:36 LBA=786 Mode=2 Submode=0x08 Buffer=7
+[   51.2690] D/CDROM: DataSector 00:10:37 LBA=787 Mode=2 Submode=0x08 Buffer=0
+[   51.2807] D/CDROM: DataSector 00:10:38 LBA=788 Mode=2 Submode=0x08 Buffer=1
+[   51.2813] D/CDROM: DataSector 00:10:39 LBA=789 Mode=2 Submode=0x08 Buffer=2
+[   51.2978] D/CDROM: DataSector 00:10:40 LBA=790 Mode=2 Submode=0x08 Buffer=3
+[   51.2987] D/CDROM: DataSector 00:10:41 LBA=791 Mode=2 Submode=0x08 Buffer=4
+[   51.2995] D/CDROM: DataSector 00:10:42 LBA=792 Mode=2 Submode=0x08 Buffer=5
+[   51.3147] D/CDROM: DataSector 00:10:43 LBA=793 Mode=2 Submode=0x08 Buffer=6
+[   51.3156] D/CDROM: DataSector 00:10:44 LBA=794 Mode=2 Submode=0x08 Buffer=7
+[   51.3311] D/CDROM: DataSector 00:10:45 LBA=795 Mode=2 Submode=0x08 Buffer=0
+[   51.3322] D/CDROM: DataSector 00:10:46 LBA=796 Mode=2 Submode=0x08 Buffer=1
+[   51.3328] D/CDROM: DataSector 00:10:47 LBA=797 Mode=2 Submode=0x08 Buffer=2
+[   51.3483] D/CDROM: DataSector 00:10:48 LBA=798 Mode=2 Submode=0x08 Buffer=3
+[   51.3490] D/CDROM: DataSector 00:10:49 LBA=799 Mode=2 Submode=0x08 Buffer=4
+[   51.3497] V/PerfMon: FPS: 59.29 VPS: 59.29 CPU: 8.42 RNDR: 0.93 GPU: 0.00 Avg: 16.87ms Min: 11.49ms Max: 22.46ms
+[   51.3648] D/CDROM: DataSector 00:10:50 LBA=800 Mode=2 Submode=0x08 Buffer=5
+[   51.3660] D/CDROM: DataSector 00:10:51 LBA=801 Mode=2 Submode=0x08 Buffer=6
+[   51.3666] D/CDROM: DataSector 00:10:52 LBA=802 Mode=2 Submode=0x08 Buffer=7
+[   51.3820] D/CDROM: DataSector 00:10:53 LBA=803 Mode=2 Submode=0x08 Buffer=0
+[   51.3827] D/CDROM: DataSector 00:10:54 LBA=804 Mode=2 Submode=0x08 Buffer=1
+[   51.3834] D/CDROM: DataSector 00:10:55 LBA=805 Mode=2 Submode=0x08 Buffer=2
+[   51.3994] D/CDROM: DataSector 00:10:56 LBA=806 Mode=2 Submode=0x08 Buffer=3
+[   51.4002] D/CDROM: DataSector 00:10:57 LBA=807 Mode=2 Submode=0x08 Buffer=4
+[   51.4155] D/CDROM: DataSector 00:10:58 LBA=808 Mode=2 Submode=0x08 Buffer=5
+[   51.4162] D/CDROM: DataSector 00:10:59 LBA=809 Mode=2 Submode=0x08 Buffer=6
+[   51.4167] D/CDROM: DataSector 00:10:60 LBA=810 Mode=2 Submode=0x08 Buffer=7
+[   51.4331] D/CDROM: DataSector 00:10:61 LBA=811 Mode=2 Submode=0x08 Buffer=0
+[   51.4340] D/CDROM: DataSector 00:10:62 LBA=812 Mode=2 Submode=0x08 Buffer=1
+[   51.4496] D/CDROM: DataSector 00:10:63 LBA=813 Mode=2 Submode=0x08 Buffer=2
+[   51.4506] D/CDROM: DataSector 00:10:64 LBA=814 Mode=2 Submode=0x08 Buffer=3
+[   51.4512] D/CDROM: DataSector 00:10:65 LBA=815 Mode=2 Submode=0x08 Buffer=4
+[   51.4666] D/CDROM: DataSector 00:10:66 LBA=816 Mode=2 Submode=0x08 Buffer=5
+[   51.4674] D/CDROM: DataSector 00:10:67 LBA=817 Mode=2 Submode=0x08 Buffer=6
+[   51.4832] D/CDROM: DataSector 00:10:68 LBA=818 Mode=2 Submode=0x08 Buffer=7
+[   51.4839] D/CDROM: DataSector 00:10:69 LBA=819 Mode=2 Submode=0x08 Buffer=0
+[   51.4845] D/CDROM: DataSector 00:10:70 LBA=820 Mode=2 Submode=0x08 Buffer=1
+[   51.5005] D/CDROM: DataSector 00:10:71 LBA=821 Mode=2 Submode=0x08 Buffer=2
+[   51.5012] D/CDROM: DataSector 00:10:72 LBA=822 Mode=2 Submode=0x08 Buffer=3
+[   51.5168] D/CDROM: DataSector 00:10:73 LBA=823 Mode=2 Submode=0x08 Buffer=4
+[   51.5175] D/CDROM: DataSector 00:10:74 LBA=824 Mode=2 Submode=0x08 Buffer=5
+[   51.5183] D/CDROM: DataSector 00:11:00 LBA=825 Mode=2 Submode=0x08 Buffer=6
+[   51.5340] D/CDROM: DataSector 00:11:01 LBA=826 Mode=2 Submode=0x08 Buffer=7
+[   51.5349] D/CDROM: DataSector 00:11:02 LBA=827 Mode=2 Submode=0x08 Buffer=0
+[   51.5508] D/CDROM: DataSector 00:11:03 LBA=828 Mode=2 Submode=0x08 Buffer=1
+[   51.5515] D/CDROM: DataSector 00:11:04 LBA=829 Mode=2 Submode=0x08 Buffer=2
+[   51.5522] D/CDROM: DataSector 00:11:05 LBA=830 Mode=2 Submode=0x08 Buffer=3
+[   51.5677] D/CDROM: DataSector 00:11:06 LBA=831 Mode=2 Submode=0x08 Buffer=4
+[   51.5683] D/CDROM: DataSector 00:11:07 LBA=832 Mode=2 Submode=0x08 Buffer=5
+[   51.5844] D/CDROM: DataSector 00:11:08 LBA=833 Mode=2 Submode=0x08 Buffer=6
+[   51.5851] D/CDROM: DataSector 00:11:09 LBA=834 Mode=2 Submode=0x08 Buffer=7
+[   51.5857] D/CDROM: DataSector 00:11:10 LBA=835 Mode=2 Submode=0x08 Buffer=0
+[   51.6021] D/CDROM: DataSector 00:11:11 LBA=836 Mode=2 Submode=0x08 Buffer=1
+[   51.6031] D/CDROM: DataSector 00:11:12 LBA=837 Mode=2 Submode=0x08 Buffer=2
+[   51.6180] D/CDROM: DataSector 00:11:13 LBA=838 Mode=2 Submode=0x08 Buffer=3
+[   51.6188] D/CDROM: DataSector 00:11:14 LBA=839 Mode=2 Submode=0x08 Buffer=4
+[   51.6195] D/CDROM: DataSector 00:11:15 LBA=840 Mode=2 Submode=0x08 Buffer=5
+[   51.6352] D/CDROM: DataSector 00:11:16 LBA=841 Mode=2 Submode=0x08 Buffer=6
+[   51.6361] D/CDROM: DataSector 00:11:17 LBA=842 Mode=2 Submode=0x08 Buffer=7
+[   51.6515] D/CDROM: DataSector 00:11:18 LBA=843 Mode=2 Submode=0x08 Buffer=0
+[   51.6524] D/CDROM: DataSector 00:11:19 LBA=844 Mode=2 Submode=0x08 Buffer=1
+[   51.6531] D/CDROM: DataSector 00:11:20 LBA=845 Mode=2 Submode=0x08 Buffer=2
+[   51.6690] D/CDROM: DataSector 00:11:21 LBA=846 Mode=2 Submode=0x08 Buffer=3
+[   51.6699] D/CDROM: DataSector 00:11:22 LBA=847 Mode=2 Submode=0x08 Buffer=4
+[   51.6706] D/CDROM: DataSector 00:11:23 LBA=848 Mode=2 Submode=0x08 Buffer=5
+[   51.6857] D/CDROM: DataSector 00:11:24 LBA=849 Mode=2 Submode=0x08 Buffer=6
+[   51.6864] D/CDROM: DataSector 00:11:25 LBA=850 Mode=2 Submode=0x08 Buffer=7
+[   51.7027] D/CDROM: DataSector 00:11:26 LBA=851 Mode=2 Submode=0x08 Buffer=0
+[   51.7034] D/CDROM: DataSector 00:11:27 LBA=852 Mode=2 Submode=0x08 Buffer=1
+[   51.7040] D/CDROM: DataSector 00:11:28 LBA=853 Mode=2 Submode=0x08 Buffer=2
+[   51.7198] D/CDROM: DataSector 00:11:29 LBA=854 Mode=2 Submode=0x08 Buffer=3
+[   51.7207] D/CDROM: DataSector 00:11:30 LBA=855 Mode=2 Submode=0x08 Buffer=4
+[   51.7365] D/CDROM: DataSector 00:11:31 LBA=856 Mode=2 Submode=0x08 Buffer=5
+[   51.7374] D/CDROM: DataSector 00:11:32 LBA=857 Mode=2 Submode=0x08 Buffer=6
+[   51.7389] D/CDROM: DataSector 00:11:33 LBA=858 Mode=2 Submode=0x08 Buffer=7
+[   51.7536] D/CDROM: DataSector 00:11:34 LBA=859 Mode=2 Submode=0x08 Buffer=0
+[   51.7545] D/CDROM: DataSector 00:11:35 LBA=860 Mode=2 Submode=0x08 Buffer=1
+[   51.7700] D/CDROM: DataSector 00:11:36 LBA=861 Mode=2 Submode=0x08 Buffer=2
+[   51.7709] D/CDROM: DataSector 00:11:37 LBA=862 Mode=2 Submode=0x08 Buffer=3
+[   51.7716] D/CDROM: DataSector 00:11:38 LBA=863 Mode=2 Submode=0x08 Buffer=4
+[   51.7871] D/CDROM: DataSector 00:11:39 LBA=864 Mode=2 Submode=0x08 Buffer=5
+[   51.7879] D/CDROM: DataSector 00:11:40 LBA=865 Mode=2 Submode=0x08 Buffer=6
+[   51.8039] D/CDROM: DataSector 00:11:41 LBA=866 Mode=2 Submode=0x08 Buffer=7
+[   51.8046] D/CDROM: DataSector 00:11:42 LBA=867 Mode=2 Submode=0x08 Buffer=0
+[   51.8052] D/CDROM: DataSector 00:11:43 LBA=868 Mode=2 Submode=0x08 Buffer=1
+[   51.8206] D/CDROM: DataSector 00:11:44 LBA=869 Mode=2 Submode=0x08 Buffer=2
+[   51.8214] D/CDROM: DataSector 00:11:45 LBA=870 Mode=2 Submode=0x08 Buffer=3
+[   51.8377] D/CDROM: DataSector 00:11:46 LBA=871 Mode=2 Submode=0x08 Buffer=4
+[   51.8386] D/CDROM: DataSector 00:11:47 LBA=872 Mode=2 Submode=0x08 Buffer=5
+[   51.8393] D/CDROM: DataSector 00:11:48 LBA=873 Mode=2 Submode=0x08 Buffer=6
+[   51.8546] D/CDROM: DataSector 00:11:49 LBA=874 Mode=2 Submode=0x08 Buffer=7
+[   51.8554] D/CDROM: DataSector 00:11:50 LBA=875 Mode=2 Submode=0x08 Buffer=0
+[   51.8712] D/CDROM: DataSector 00:11:51 LBA=876 Mode=2 Submode=0x08 Buffer=1
+[   51.8720] D/CDROM: DataSector 00:11:52 LBA=877 Mode=2 Submode=0x08 Buffer=2
+[   51.8727] D/CDROM: DataSector 00:11:53 LBA=878 Mode=2 Submode=0x08 Buffer=3
+[   51.8879] D/CDROM: DataSector 00:11:54 LBA=879 Mode=2 Submode=0x08 Buffer=4
+[   51.8889] D/CDROM: DataSector 00:11:55 LBA=880 Mode=2 Submode=0x08 Buffer=5
+[   51.9048] D/CDROM: DataSector 00:11:56 LBA=881 Mode=2 Submode=0x08 Buffer=6
+[   51.9057] D/CDROM: DataSector 00:11:57 LBA=882 Mode=2 Submode=0x08 Buffer=7
+[   51.9069] D/CDROM: DataSector 00:11:58 LBA=883 Mode=2 Submode=0x08 Buffer=0
+[   51.9220] D/CDROM: DataSector 00:11:59 LBA=884 Mode=2 Submode=0x08 Buffer=1
+[   51.9229] D/CDROM: DataSector 00:11:60 LBA=885 Mode=2 Submode=0x08 Buffer=2
+[   51.9387] D/CDROM: DataSector 00:11:61 LBA=886 Mode=2 Submode=0x08 Buffer=3
+[   51.9397] D/CDROM: DataSector 00:11:62 LBA=887 Mode=2 Submode=0x08 Buffer=4
+[   51.9405] D/CDROM: DataSector 00:11:63 LBA=888 Mode=2 Submode=0x08 Buffer=5
+[   51.9559] D/CDROM: DataSector 00:11:64 LBA=889 Mode=2 Submode=0x08 Buffer=6
+[   51.9569] D/CDROM: DataSector 00:11:65 LBA=890 Mode=2 Submode=0x08 Buffer=7
+[   51.9576] D/CDROM: DataSector 00:11:66 LBA=891 Mode=2 Submode=0x08 Buffer=0
+[   51.9727] D/CDROM: DataSector 00:11:67 LBA=892 Mode=2 Submode=0x08 Buffer=1
+[   51.9735] D/CDROM: DataSector 00:11:68 LBA=893 Mode=2 Submode=0x08 Buffer=2
+[   51.9906] D/CDROM: DataSector 00:11:69 LBA=894 Mode=2 Submode=0x08 Buffer=3
+[   51.9916] D/CDROM: DataSector 00:11:70 LBA=895 Mode=2 Submode=0x08 Buffer=4
+[   51.9926] D/CDROM: DataSector 00:11:71 LBA=896 Mode=2 Submode=0x08 Buffer=5
+[   52.0067] D/CDROM: DataSector 00:11:72 LBA=897 Mode=2 Submode=0x08 Buffer=6
+[   52.0077] D/CDROM: DataSector 00:11:73 LBA=898 Mode=2 Submode=0x08 Buffer=7
+[   52.0235] D/CDROM: DataSector 00:11:74 LBA=899 Mode=2 Submode=0x08 Buffer=0
+[   52.0245] D/CDROM: DataSector 00:12:00 LBA=900 Mode=2 Submode=0x08 Buffer=1
+[   52.0253] D/CDROM: DataSector 00:12:01 LBA=901 Mode=2 Submode=0x08 Buffer=2
+[   52.0402] D/CDROM: DataSector 00:12:02 LBA=902 Mode=2 Submode=0x08 Buffer=3
+[   52.0410] D/CDROM: DataSector 00:12:03 LBA=903 Mode=2 Submode=0x08 Buffer=4
+[   52.0566] D/CDROM: DataSector 00:12:04 LBA=904 Mode=2 Submode=0x08 Buffer=5
+[   52.0576] D/CDROM: DataSector 00:12:05 LBA=905 Mode=2 Submode=0x08 Buffer=6
+[   52.0597] D/CDROM: DataSector 00:12:06 LBA=906 Mode=2 Submode=0x08 Buffer=7
+[   52.0765] D/CDROM: DataSector 00:12:07 LBA=907 Mode=2 Submode=0x08 Buffer=0
+[   52.0778] D/CDROM: DataSector 00:12:08 LBA=908 Mode=2 Submode=0x08 Buffer=1
+[   52.0908] D/CDROM: DataSector 00:12:09 LBA=909 Mode=2 Submode=0x08 Buffer=2
+[   52.0915] D/CDROM: DataSector 00:12:10 LBA=910 Mode=2 Submode=0x08 Buffer=3
+[   52.0922] D/CDROM: DataSector 00:12:11 LBA=911 Mode=2 Submode=0x08 Buffer=4
+[   52.1074] D/CDROM: DataSector 00:12:12 LBA=912 Mode=2 Submode=0x08 Buffer=5
+[   52.1081] D/CDROM: DataSector 00:12:13 LBA=913 Mode=2 Submode=0x08 Buffer=6
+[   52.1242] D/CDROM: DataSector 00:12:14 LBA=914 Mode=2 Submode=0x08 Buffer=7
+[   52.1249] D/CDROM: DataSector 00:12:15 LBA=915 Mode=2 Submode=0x08 Buffer=0
+[   52.1256] D/CDROM: DataSector 00:12:16 LBA=916 Mode=2 Submode=0x08 Buffer=1
+[   52.1415] D/CDROM: DataSector 00:12:17 LBA=917 Mode=2 Submode=0x08 Buffer=2
+[   52.1424] D/CDROM: DataSector 00:12:18 LBA=918 Mode=2 Submode=0x08 Buffer=3
+[   52.1580] D/CDROM: DataSector 00:12:19 LBA=919 Mode=2 Submode=0x08 Buffer=4
+[   52.1587] D/CDROM: DataSector 00:12:20 LBA=920 Mode=2 Submode=0x08 Buffer=5
+[   52.1595] D/CDROM: DataSector 00:12:21 LBA=921 Mode=2 Submode=0x08 Buffer=6
+[   52.1759] D/CDROM: DataSector 00:12:22 LBA=922 Mode=2 Submode=0x08 Buffer=7
+[   52.1770] D/CDROM: DataSector 00:12:23 LBA=923 Mode=2 Submode=0x08 Buffer=0
+[   52.1916] D/CDROM: DataSector 00:12:24 LBA=924 Mode=2 Submode=0x08 Buffer=1
+[   52.1923] D/CDROM: DataSector 00:12:25 LBA=925 Mode=2 Submode=0x08 Buffer=2
+[   52.1930] D/CDROM: DataSector 00:12:26 LBA=926 Mode=2 Submode=0x08 Buffer=3
+[   52.2088] D/CDROM: DataSector 00:12:27 LBA=927 Mode=2 Submode=0x08 Buffer=4
+[   52.2095] D/CDROM: DataSector 00:12:28 LBA=928 Mode=2 Submode=0x08 Buffer=5
+[   52.2101] D/CDROM: DataSector 00:12:29 LBA=929 Mode=2 Submode=0x08 Buffer=6
+[   52.2258] D/CDROM: DataSector 00:12:30 LBA=930 Mode=2 Submode=0x08 Buffer=7
+[   52.2267] D/CDROM: DataSector 00:12:31 LBA=931 Mode=2 Submode=0x08 Buffer=0
+[   52.2431] D/CDROM: DataSector 00:12:32 LBA=932 Mode=2 Submode=0x08 Buffer=1
+[   52.2438] D/CDROM: DataSector 00:12:33 LBA=933 Mode=2 Submode=0x08 Buffer=2
+[   52.2443] D/CDROM: DataSector 00:12:34 LBA=934 Mode=2 Submode=0x08 Buffer=3
+[   52.2597] D/CDROM: DataSector 00:12:35 LBA=935 Mode=2 Submode=0x08 Buffer=4
+[   52.2621] D/CDROM: DataSector 00:12:36 LBA=936 Mode=2 Submode=0x08 Buffer=5
+[   52.2763] D/CDROM: DataSector 00:12:37 LBA=937 Mode=2 Submode=0x08 Buffer=6
+[   52.2770] D/CDROM: DataSector 00:12:38 LBA=938 Mode=2 Submode=0x08 Buffer=7
+[   52.2787] D/CDROM: DataSector 00:12:39 LBA=939 Mode=2 Submode=0x08 Buffer=0
+[   52.2930] D/CDROM: DataSector 00:12:40 LBA=940 Mode=2 Submode=0x08 Buffer=1
+[   52.2937] D/CDROM: DataSector 00:12:41 LBA=941 Mode=2 Submode=0x08 Buffer=2
+[   52.3099] D/CDROM: DataSector 00:12:42 LBA=942 Mode=2 Submode=0x08 Buffer=3
+[   52.3108] D/CDROM: DataSector 00:12:43 LBA=943 Mode=2 Submode=0x08 Buffer=4
+[   52.3114] D/CDROM: DataSector 00:12:44 LBA=944 Mode=2 Submode=0x08 Buffer=5
+[   52.3271] D/CDROM: DataSector 00:12:45 LBA=945 Mode=2 Submode=0x08 Buffer=6
+[   52.3279] D/CDROM: DataSector 00:12:46 LBA=946 Mode=2 Submode=0x08 Buffer=7
+[   52.3435] D/CDROM: DataSector 00:12:47 LBA=947 Mode=2 Submode=0x08 Buffer=0
+[   52.3441] D/CDROM: DataSector 00:12:48 LBA=948 Mode=2 Submode=0x08 Buffer=1
+[   52.3448] D/CDROM: DataSector 00:12:49 LBA=949 Mode=2 Submode=0x08 Buffer=2
+[   52.3607] D/CDROM: DataSector 00:12:50 LBA=950 Mode=2 Submode=0x08 Buffer=3
+[   52.3615] D/CDROM: DataSector 00:12:51 LBA=951 Mode=2 Submode=0x08 Buffer=4
+[   52.3622] V/PerfMon: FPS: 59.26 VPS: 59.26 CPU: 8.70 RNDR: 0.92 GPU: 0.00 Avg: 16.87ms Min: 14.04ms Max: 19.69ms
+[   52.3777] D/CDROM: DataSector 00:12:52 LBA=952 Mode=2 Submode=0x08 Buffer=5
+[   52.3800] D/CDROM: DataSector 00:12:53 LBA=953 Mode=2 Submode=0x08 Buffer=6
+[   52.3810] D/CDROM: DataSector 00:12:54 LBA=954 Mode=2 Submode=0x08 Buffer=7
+[   52.3949] D/CDROM: DataSector 00:12:55 LBA=955 Mode=2 Submode=0x08 Buffer=0
+[   52.3976] D/CDROM: DataSector 00:12:56 LBA=956 Mode=2 Submode=0x08 Buffer=1
+[   52.4111] D/CDROM: DataSector 00:12:57 LBA=957 Mode=2 Submode=0x08 Buffer=2
+[   52.4120] D/CDROM: DataSector 00:12:58 LBA=958 Mode=2 Submode=0x08 Buffer=3
+[   52.4129] D/CDROM: DataSector 00:12:59 LBA=959 Mode=2 Submode=0x08 Buffer=4
+[   52.4286] D/CDROM: DataSector 00:12:60 LBA=960 Mode=2 Submode=0x08 Buffer=5
+[   52.4297] D/CDROM: DataSector 00:12:61 LBA=961 Mode=2 Submode=0x08 Buffer=6
+[   52.4447] D/CDROM: DataSector 00:12:62 LBA=962 Mode=2 Submode=0x08 Buffer=7
+[   52.4455] D/CDROM: DataSector 00:12:63 LBA=963 Mode=2 Submode=0x08 Buffer=0
+[   52.4463] D/CDROM: DataSector 00:12:64 LBA=964 Mode=2 Submode=0x08 Buffer=1
+[   52.4617] D/CDROM: DataSector 00:12:65 LBA=965 Mode=2 Submode=0x08 Buffer=2
+[   52.4623] D/CDROM: DataSector 00:12:66 LBA=966 Mode=2 Submode=0x08 Buffer=3
+[   52.4785] D/CDROM: DataSector 00:12:67 LBA=967 Mode=2 Submode=0x08 Buffer=4
+[   52.4792] D/CDROM: DataSector 00:12:68 LBA=968 Mode=2 Submode=0x08 Buffer=5
+[   52.4798] D/CDROM: DataSector 00:12:69 LBA=969 Mode=2 Submode=0x08 Buffer=6
+[   52.4956] D/CDROM: DataSector 00:12:70 LBA=970 Mode=2 Submode=0x08 Buffer=7
+[   52.4964] D/CDROM: DataSector 00:12:71 LBA=971 Mode=2 Submode=0x08 Buffer=0
+[   52.4973] D/CDROM: DataSector 00:12:72 LBA=972 Mode=2 Submode=0x08 Buffer=1
+[   52.5126] D/CDROM: DataSector 00:12:73 LBA=973 Mode=2 Submode=0x08 Buffer=2
+[   52.5133] D/CDROM: DataSector 00:12:74 LBA=974 Mode=2 Submode=0x08 Buffer=3
+[   52.5295] D/CDROM: DataSector 00:13:00 LBA=975 Mode=2 Submode=0x08 Buffer=4
+[   52.5303] D/CDROM: DataSector 00:13:01 LBA=976 Mode=2 Submode=0x08 Buffer=5
+[   52.5310] D/CDROM: DataSector 00:13:02 LBA=977 Mode=2 Submode=0x08 Buffer=6
+[   52.5463] D/CDROM: DataSector 00:13:03 LBA=978 Mode=2 Submode=0x08 Buffer=7
+[   52.5472] D/CDROM: DataSector 00:13:04 LBA=979 Mode=2 Submode=0x08 Buffer=0
+[   52.5629] D/CDROM: DataSector 00:13:05 LBA=980 Mode=2 Submode=0x08 Buffer=1
+[   52.5636] D/CDROM: DataSector 00:13:06 LBA=981 Mode=2 Submode=0x08 Buffer=2
+[   52.5642] D/CDROM: DataSector 00:13:07 LBA=982 Mode=2 Submode=0x08 Buffer=3
+[   52.5802] D/CDROM: DataSector 00:13:08 LBA=983 Mode=2 Submode=0x08 Buffer=4
+[   52.5808] D/CDROM: DataSector 00:13:09 LBA=984 Mode=2 Submode=0x08 Buffer=5
+[   52.5968] D/CDROM: DataSector 00:13:10 LBA=985 Mode=2 Submode=0x08 Buffer=6
+[   52.5976] D/CDROM: DataSector 00:13:11 LBA=986 Mode=2 Submode=0x08 Buffer=7
+[   52.5986] D/CDROM: DataSector 00:13:12 LBA=987 Mode=2 Submode=0x08 Buffer=0
+[   52.6137] D/CDROM: DataSector 00:13:13 LBA=988 Mode=2 Submode=0x08 Buffer=1
+[   52.6145] D/CDROM: DataSector 00:13:14 LBA=989 Mode=2 Submode=0x08 Buffer=2
+[   52.6303] D/CDROM: DataSector 00:13:15 LBA=990 Mode=2 Submode=0x08 Buffer=3
+[   52.6309] D/CDROM: DataSector 00:13:16 LBA=991 Mode=2 Submode=0x08 Buffer=4
+[   52.6315] D/CDROM: DataSector 00:13:17 LBA=992 Mode=2 Submode=0x08 Buffer=5
+[   52.6474] D/CDROM: DataSector 00:13:18 LBA=993 Mode=2 Submode=0x89 Buffer=6
+[   52.6479] D/CDROM: Pause                  39.12ms
+[   53.3740] V/PerfMon: FPS: 59.30 VPS: 59.30 CPU: 7.57 RNDR: 0.97 GPU: 0.00 Avg: 16.86ms Min: 11.56ms Max: 21.73ms
+[   54.3866] V/PerfMon: FPS: 59.25 VPS: 59.25 CPU: 7.27 RNDR: 0.98 GPU: 0.00 Avg: 16.88ms Min: 15.67ms Max: 19.01ms
+[   54.6551] D/VideoThread: Setting run idle reason 'SystemPaused' to true
+[   54.6553] D/Host: Starting background controller polling timer with interval 1000 ms
+[   54.6560] V/System: VSync: Disabled
+[   54.6561] V/System: Present Skip: Disabled

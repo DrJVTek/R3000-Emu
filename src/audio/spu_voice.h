@@ -19,6 +19,10 @@ class SpuVoice
     void key_on();
     void key_off();
 
+    // Force immediate silence (used when SPU is disabled)
+    // Unlike key_off() which starts release phase, this immediately stops the voice.
+    void force_off();
+
     // Generate one sample at 44100 Hz
     // Returns sample with envelope applied (-32768..32767)
     int16_t tick(const uint8_t* spu_ram, uint32_t ram_mask);
