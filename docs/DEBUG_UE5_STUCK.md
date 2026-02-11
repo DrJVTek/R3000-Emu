@@ -9,7 +9,134 @@
 
 ---
 
-## 📌 ÉTAT ACTUEL (2026-02-10) - VERSION v8: FORCE ALL EVENTS READY
+## 📌 ÉTAT ACTUEL (2026-02-11) - VERSION v4: GTE FIXES APPLIQUÉS
+
+**À TESTER:** Relancer UE5 et vérifier si le demo mode fonctionne.
+
+Les logs du dernier test (05:34) montraient:
+- Bounds normaux: `X=[0..320] Y=[15..240]` (plus de -1024 à +1023)
+- 1242 triangles rendus correctement
+- Aucun warning SZ=0 avec v4
+
+DuckStation fonctionne parfaitement → il y a peut-être encore un bug chez nous.
+
+### 🔴 PROBLÈME: Polygons explosés + Menu debug disparu
+
+**Status**: Investigation des "polygons explosés" en mode démo 3D
+
+**Symptômes**:
+1. En mode démo de Ridge Racer, les polygons 3D sont "explosés" (coordonnées énormes)
+2. Le menu debug (grille de déformation) ne s'affiche plus
+3. Les bounds GPU montrent `X=[-1024..1023] Y=[-1024..240] span=1379x1264`
+
+### 🔍 ANALYSE DES LOGS (v3)
+
+Les logs UE5 montrent le problème clairement:
+```
+[GTE] RTPT SZ=0: V1 in=(-120,40,36) mac3=-364996 mac3_shifted=-90 trz=-4 r3x=(5676,4872,3823) sf=12
+```
+
+**Calcul vérifié:**
+```
+mac3 = r31*vx + r32*vy + r33*vz + (trz << 12)
+     = 5676*(-120) + 4872*40 + 3823*36 + (-4*4096)
+     = -681120 + 194880 + 137628 - 16384
+     = -364996 ✓
+```
+
+**Le calcul GTE est CORRECT** mais le résultat mac3 est **négatif** → sz=0 → division overflow.
+
+### 🎯 CAUSE RACINE
+
+Les vertices sont transformés avec une matrice de rotation qui produit des **Z négatifs** (vertices derrière la caméra):
+- `trz=-4` (translation Z très petite)
+- `r31=5676` (composante X→Z importante)
+- Pour vx=-120: la contribution `r31*vx = -681120` domine et rend mac3 négatif
+
+**C'est le comportement attendu du PS1** pour des vertices derrière la caméra!
+
+### 📋 VERSIONS TESTÉES
+
+| Version | Division | SZ depuis | Résultat |
+|---------|----------|-----------|----------|
+| v1 | UNR (buggy) | IR3 | Cassé |
+| v2 | UNR (fixé) | IR3 | Cassé |
+| v3 | UNR (fixé) | MAC3 | Cassé + debug logs |
+| v4 | Simple | MAC3 | **À TESTER** |
+
+**Version actuelle: v4 (simple_div)**
+- Division simple: `(h << 16) / sz`
+- SZ calculé depuis MAC3 (pas IR3)
+- Table UNR conservée mais non utilisée
+
+### ⚠️ FIX APPLIQUÉ: SZ depuis MAC3 (pas IR3)
+
+**Avant (bug):**
+```cpp
+const int32_t ir3 = clamp_s16((int32_t)(mac3 >> shift));
+const uint32_t sz = (uint32_t)clamp_u16(ir3);  // FAUX!
+```
+
+**Après (fix):**
+```cpp
+const int32_t mac3_shifted = (int32_t)(mac3 >> shift);
+const uint32_t sz = (mac3_shifted < 0) ? 0 :
+    ((mac3_shifted > 0xFFFF) ? 0xFFFF : (uint32_t)mac3_shifted);
+```
+
+psx-spx documente:
+- `IR3 = Lm_B3(MAC3 >> sf)` → clamp signé [-0x8000, +0x7FFF]
+- `SZ3 = Lm_D(MAC3 >> sf)` → clamp **unsigned** [0, 0xFFFF]
+
+### 🔧 FICHIERS MODIFIÉS
+
+- `src/gte/gte.cpp`:
+  - Table UNR 257 entrées (conservée)
+  - `gte_divide()` - division simple (v4) ou UNR
+  - RTPS/RTPT - SZ calculé depuis MAC3
+  - Debug logs pour SZ=0
+
+### ✅ RÉSOLU: Menu debug
+
+Le menu debug fonctionne maintenant avec le fix SZ depuis MAC3.
+
+### 🔴 TOUJOURS CASSÉ: Polygons explosés en demo mode
+
+**Cause confirmée:** Les vertices ont des Z négatifs après transformation.
+
+Exemple de log:
+```
+RTPT SZ=0: V1 in=(-120,40,36) mac3=-364996 mac3_shifted=-90 trz=-4 r3x=(5676,4872,3823) sf=12
+```
+
+**Calcul vérifié:**
+```
+mac3 = 5676*(-120) + 4872*40 + 3823*36 + (-4 << 12)
+     = -681120 + 194880 + 137628 - 16384
+     = -364996 ✓
+```
+
+**Le problème:** `trz=-4` donne une contribution `-16384` qui tire TOUS les Z vers le négatif.
+
+**C'est le comportement correct du GTE PS1!** Quand un vertex est derrière la caméra:
+1. mac3 devient négatif
+2. sz = clamp_unsigned(mac3 >> sf) = 0
+3. Division retourne 0x1FFFF (max)
+4. Coordonnées écran = énormes → clampées à ±1024
+5. Polygons "explosés"
+
+### ❓ QUESTION: Est-ce que DuckStation a le même problème?
+
+Si DuckStation affiche correctement le demo mode, il pourrait avoir:
+1. Triangle clipping software (frustum culling)
+2. Gestion spéciale des sz=0
+3. Autre différence d'émulation
+
+**À TESTER:** Lancer Ridge Racer demo mode dans DuckStation et comparer.
+
+---
+
+## 📌 ÉTAT PRÉCÉDENT (2026-02-10) - VERSION v8: FORCE ALL EVENTS READY
 
 ### ✅ FIX v8 APPLIQUÉ: RESCUE MODE - FORCE EVENTS READY (BIDOUILLE)
 

@@ -4,29 +4,11 @@
 #include <cstdlib>
 #include <cstring>
 
-#if defined(_WIN32)
-#include <codecvt>
-#include <locale>
-#include <string>
-#endif
+#include "../util/file_util.h"
 
 namespace loader
 {
-static std::FILE* fopen_utf8(const char* path, const char* mode)
-{
-    if (!path || !mode)
-        return nullptr;
-#if defined(_WIN32)
-    // Allow non-ASCII paths on Windows (UTF-8 -> wide -> _wfopen).
-    // Note: uses std::codecvt for compatibility with clangd setups where std::filesystem isn't available.
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-    const std::wstring wpath = conv.from_bytes(path);
-    const std::wstring wmode = conv.from_bytes(mode);
-    return _wfopen(wpath.c_str(), wmode.c_str());
-#else
-    return std::fopen(path, mode);
-#endif
-}
+using util::fopen_utf8;
 
 static void set_err(char* err, size_t cap, const char* msg)
 {
@@ -94,8 +76,8 @@ static int load_psx_exe(
     const uint32_t t_size = read_u32_le(buf + 0x1C);
     const uint32_t b_addr = read_u32_le(buf + 0x28);
     const uint32_t b_size = read_u32_le(buf + 0x2C);
-    const uint32_t s_addr = read_u32_le(buf + 0x30);
-    const uint32_t s_size = read_u32_le(buf + 0x34);
+    const uint32_t sp_addr = read_u32_le(buf + 0x30);
+    const uint32_t sp_size = read_u32_le(buf + 0x34);
 
     if (t_size > sz - 0x800)
     {
@@ -126,9 +108,9 @@ static int load_psx_exe(
 
     out->entry_pc = pc0;
     out->gp = gp0;
-    out->sp = (s_size != 0) ? (s_addr + s_size) : 0;
+    out->sp = (sp_size != 0) ? (sp_addr + sp_size) : 0;
     out->has_gp = 1;
-    out->has_sp = (s_size != 0) ? 1 : 0;
+    out->has_sp = (sp_size != 0) ? 1 : 0;
     return 1;
 }
 

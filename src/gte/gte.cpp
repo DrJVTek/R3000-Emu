@@ -5,8 +5,73 @@
 namespace gte
 {
 
+// PS1 GTE UNR (Unsigned Newton-Raphson) lookup table for division
+// This table is used for the approximation: 1/x ≈ (2 - x*unr[i]) * unr[i]
+// Indexed by the 8 MSBs of the normalized divisor
+static const uint8_t unr_table[257] = {
+    0xFF, 0xFD, 0xFB, 0xF9, 0xF7, 0xF5, 0xF3, 0xF1, 0xEF, 0xEE, 0xEC, 0xEA, 0xE8, 0xE6, 0xE4, 0xE3,
+    0xE1, 0xDF, 0xDD, 0xDC, 0xDA, 0xD8, 0xD6, 0xD5, 0xD3, 0xD1, 0xD0, 0xCE, 0xCD, 0xCB, 0xC9, 0xC8,
+    0xC6, 0xC5, 0xC3, 0xC1, 0xC0, 0xBE, 0xBD, 0xBB, 0xBA, 0xB8, 0xB7, 0xB5, 0xB4, 0xB2, 0xB1, 0xB0,
+    0xAE, 0xAD, 0xAB, 0xAA, 0xA9, 0xA7, 0xA6, 0xA4, 0xA3, 0xA2, 0xA0, 0x9F, 0x9E, 0x9C, 0x9B, 0x9A,
+    0x99, 0x97, 0x96, 0x95, 0x94, 0x92, 0x91, 0x90, 0x8F, 0x8D, 0x8C, 0x8B, 0x8A, 0x89, 0x87, 0x86,
+    0x85, 0x84, 0x83, 0x82, 0x81, 0x7F, 0x7E, 0x7D, 0x7C, 0x7B, 0x7A, 0x79, 0x78, 0x77, 0x75, 0x74,
+    0x73, 0x72, 0x71, 0x70, 0x6F, 0x6E, 0x6D, 0x6C, 0x6B, 0x6A, 0x69, 0x68, 0x67, 0x66, 0x65, 0x64,
+    0x63, 0x62, 0x61, 0x60, 0x5F, 0x5E, 0x5D, 0x5D, 0x5C, 0x5B, 0x5A, 0x59, 0x58, 0x57, 0x56, 0x55,
+    0x54, 0x53, 0x53, 0x52, 0x51, 0x50, 0x4F, 0x4E, 0x4D, 0x4D, 0x4C, 0x4B, 0x4A, 0x49, 0x48, 0x48,
+    0x47, 0x46, 0x45, 0x44, 0x43, 0x43, 0x42, 0x41, 0x40, 0x40, 0x3F, 0x3E, 0x3D, 0x3D, 0x3C, 0x3B,
+    0x3A, 0x3A, 0x39, 0x38, 0x37, 0x37, 0x36, 0x35, 0x35, 0x34, 0x33, 0x32, 0x32, 0x31, 0x30, 0x30,
+    0x2F, 0x2E, 0x2E, 0x2D, 0x2C, 0x2C, 0x2B, 0x2A, 0x2A, 0x29, 0x28, 0x28, 0x27, 0x26, 0x26, 0x25,
+    0x24, 0x24, 0x23, 0x22, 0x22, 0x21, 0x21, 0x20, 0x1F, 0x1F, 0x1E, 0x1E, 0x1D, 0x1C, 0x1C, 0x1B,
+    0x1B, 0x1A, 0x19, 0x19, 0x18, 0x18, 0x17, 0x17, 0x16, 0x15, 0x15, 0x14, 0x14, 0x13, 0x13, 0x12,
+    0x12, 0x11, 0x10, 0x10, 0x0F, 0x0F, 0x0E, 0x0E, 0x0D, 0x0D, 0x0C, 0x0C, 0x0B, 0x0B, 0x0A, 0x0A,
+    0x09, 0x09, 0x08, 0x08, 0x07, 0x07, 0x06, 0x06, 0x05, 0x05, 0x04, 0x04, 0x03, 0x03, 0x02, 0x02,
+    0x01
+};
+
+// Count leading zeros (32-bit)
+static inline int count_leading_zeros(uint32_t val)
+{
+    if (val == 0) return 32;
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_clz(val);
+#elif defined(_MSC_VER)
+    unsigned long idx;
+    _BitScanReverse(&idx, val);
+    return 31 - idx;
+#else
+    int n = 0;
+    if ((val & 0xFFFF0000) == 0) { n += 16; val <<= 16; }
+    if ((val & 0xFF000000) == 0) { n += 8; val <<= 8; }
+    if ((val & 0xF0000000) == 0) { n += 4; val <<= 4; }
+    if ((val & 0xC0000000) == 0) { n += 2; val <<= 2; }
+    if ((val & 0x80000000) == 0) { n += 1; }
+    return n;
+#endif
+}
+
+// PS1 GTE division - simple integer division (for debugging)
+// TODO: Replace with UNR table for hardware accuracy once working
+// Returns (H * 0x10000) / SZ3, clamped to 0x1FFFF
+static uint32_t gte_divide(uint16_t h, uint16_t sz3)
+{
+    if (sz3 == 0) {
+        return 0x1FFFF;
+    }
+
+    // Simple integer division: (h << 16) / sz3
+    uint32_t quotient = ((uint32_t)h << 16) / (uint32_t)sz3;
+
+    // Clamp to 17-bit max (0x1FFFF)
+    if (quotient > 0x1FFFF) {
+        quotient = 0x1FFFF;
+    }
+
+    return quotient;
+}
+
 Gte::Gte()
 {
+    emu::logf(emu::LogLevel::info, "GTE", "GTE source v4 (simple_div)");
     reset();
 }
 
@@ -140,9 +205,20 @@ int32_t Gte::vz(uint32_t n) const
     return s16(data_[idx]);
 }
 
+// Clamp screen coordinates to [-1024, 1023] as per PS1 hardware
+static int32_t clamp_sxy(int32_t v)
+{
+    if (v < -1024) return -1024;
+    if (v > 1023) return 1023;
+    return v;
+}
+
 void Gte::push_sxy(int32_t sx, int32_t sy)
 {
     // Pipeline interne GTE: SXY0 <= SXY1 <= SXY2 <= SXYP.
+    // Clamp to 11-bit signed range [-1024, 1023] to avoid overflow wrapping
+    sx = clamp_sxy(sx);
+    sy = clamp_sxy(sy);
     data_[D_SXY0] = data_[D_SXY1];
     data_[D_SXY1] = data_[D_SXY2];
     data_[D_SXY2] = data_[D_SXYP];
@@ -245,10 +321,15 @@ void Gte::cmd_rtps(uint32_t cmd)
 
     const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
     const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
-    const int32_t ir3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
 
-    // SZ3 reçoit généralement Z (après saturation). Ici on pousse une valeur positive simple.
-    const uint32_t sz = (uint32_t)clamp_u16(ir3);
+    // SZ3 must be computed from MAC3 >> sf, NOT from IR3!
+    // psx-spx: SZ3 = Lm_D(MAC3 >> sf) where Lm_D clamps to [0, 0xFFFF]
+    // IR3 = Lm_B3(MAC3 >> sf) which clamps to [-0x8000, 0x7FFF] (different!)
+    const int sf = (cmd >> 19) & 1;
+    const int shift = sf ? 12 : 0;
+    const int64_t mac3 = (int32_t)data_[D_MAC3];  // Sign-extend from stored 32-bit
+    const int32_t mac3_shifted = (int32_t)(mac3 >> shift);
+    const uint32_t sz = (mac3_shifted < 0) ? 0 : ((mac3_shifted > 0xFFFF) ? 0xFFFF : (uint32_t)mac3_shifted);
     push_sz(sz);
 
     // Projection: SX = (OFX + IR1*H/SZ3) >> 16 ; SY = (OFY + IR2*H/SZ3) >> 16
@@ -257,20 +338,11 @@ void Gte::cmd_rtps(uint32_t cmd)
     const int64_t ofy = (int32_t)ctrl_[C_OFY];
     const int32_t h = (int32_t)(ctrl_[C_H] & 0xFFFFu);
 
-    int32_t sx, sy;
-    if (sz != 0)
-    {
-        // GTE projection: quotient = H * 0x10000 / SZ3, then SX = (OFX + IR1*quotient) >> 16
-        int64_t quotient = std::min<int64_t>(((int64_t)h << 16) / (int32_t)sz, 0x1FFFF);
-        sx = (int32_t)((ofx + ir1 * quotient) >> 16);
-        sy = (int32_t)((ofy + ir2 * quotient) >> 16);
-    }
-    else
-    {
-        // Division by zero: use max quotient
-        sx = (int32_t)((ofx + ir1 * 0x1FFFF) >> 16);
-        sy = (int32_t)((ofy + ir2 * 0x1FFFF) >> 16);
-    }
+    // Use UNR table-based division (matches real PS1 hardware)
+    uint32_t quotient = gte_divide((uint16_t)h, (uint16_t)sz);
+
+    int32_t sx = (int32_t)((ofx + ir1 * (int64_t)quotient) >> 16);
+    int32_t sy = (int32_t)((ofy + ir2 * (int64_t)quotient) >> 16);
 
     push_sxy(sx, sy);
 }
@@ -283,6 +355,10 @@ void Gte::cmd_rtpt(uint32_t cmd)
 
     const int sf = (cmd >> 19) & 1;
     const int lm = (cmd >> 10) & 1;
+
+    // Debug: log first few RTPT calls
+    static int rtpt_log_count = 0;
+    const bool do_log = (rtpt_log_count++ < 50);
 
     // Rotation matrix
     const int32_t r11 = s16(ctrl_[C_R11R12]);
@@ -305,6 +381,14 @@ void Gte::cmd_rtpt(uint32_t cmd)
 
     const int shift = sf ? 12 : 0;
 
+    if (do_log)
+    {
+        emu::logf(emu::LogLevel::warn, "GTE", "RTPT: H=%d OFX=%lld OFY=%lld sf=%d",
+            h, ofx, ofy, sf);
+        emu::logf(emu::LogLevel::warn, "GTE", "  TR=(%d,%d,%d) R11=%d R22=%d R33=%d",
+            trx, try_, trz, r11, r22, r33);
+    }
+
     // Process all 3 vertices
     uint32_t sxy_results[3];
     uint32_t sz_results[3];
@@ -324,25 +408,51 @@ void Gte::cmd_rtpt(uint32_t cmd)
         const int32_t ir2 = clamp_s16((int32_t)(mac2 >> shift));
         const int32_t ir3 = clamp_s16((int32_t)(mac3 >> shift));
 
-        // Z value for depth sorting
-        const uint32_t sz = (uint32_t)clamp_u16(ir3);
+        // Z value for depth sorting - computed from MAC3 directly, NOT from IR3!
+        // psx-spx: SZ3 = Lm_D(MAC3 >> sf) where Lm_D clamps to unsigned [0, 0xFFFF]
+        // This is DIFFERENT from IR3 which clamps to signed [-0x8000, +0x7FFF]
+        const int32_t mac3_shifted = (int32_t)(mac3 >> shift);
+        const uint32_t sz = (mac3_shifted < 0) ? 0 : ((mac3_shifted > 0xFFFF) ? 0xFFFF : (uint32_t)mac3_shifted);
         sz_results[i] = sz;
 
-        // Projection
-        int32_t sx, sy;
-        if (sz != 0)
+        // Debug: log when sz=0 (will cause division overflow)
+        if (sz == 0)
         {
-            int64_t quotient = std::min<int64_t>(((int64_t)h << 16) / (int32_t)sz, 0x1FFFF);
-            sx = (int32_t)((ofx + ir1 * quotient) >> 16);
-            sy = (int32_t)((ofy + ir2 * quotient) >> 16);
-        }
-        else
-        {
-            sx = (int32_t)((ofx + ir1 * 0x1FFFF) >> 16);
-            sy = (int32_t)((ofy + ir2 * 0x1FFFF) >> 16);
+            static int sz0_log_count = 0;
+            if (sz0_log_count++ < 20)
+            {
+                emu::logf(emu::LogLevel::warn, "GTE", "RTPT SZ=0: V%d in=(%d,%d,%d) mac3=%lld mac3_shifted=%d trz=%d r3x=(%d,%d,%d) sf=%d",
+                    i, vxi, vyi, vzi, (long long)mac3, mac3_shifted, trz, r31, r32, r33, shift);
+            }
         }
 
+        // Projection using UNR table-based division (matches real PS1 hardware)
+        uint32_t quotient = gte_divide((uint16_t)h, (uint16_t)sz);
+        int32_t sx = (int32_t)((ofx + ir1 * (int64_t)quotient) >> 16);
+        int32_t sy = (int32_t)((ofy + ir2 * (int64_t)quotient) >> 16);
+
+        // Clamp to 11-bit signed range [-1024, 1023]
+        const int32_t sx_raw = sx, sy_raw = sy;
+        sx = clamp_sxy(sx);
+        sy = clamp_sxy(sy);
         sxy_results[i] = pack16(sx, sy);
+
+        // Log when clamping occurs (indicates potential rendering issues)
+        if (sx != sx_raw || sy != sy_raw)
+        {
+            static int clamp_log_count = 0;
+            if (clamp_log_count++ < 100)
+            {
+                emu::logf(emu::LogLevel::warn, "GTE", "RTPT CLAMP: V%d in=(%d,%d,%d) sz=%u quotient=%u raw=(%d,%d)->clamped=(%d,%d)",
+                    i, vxi, vyi, vzi, sz, quotient, sx_raw, sy_raw, sx, sy);
+            }
+        }
+
+        if (do_log)
+        {
+            emu::logf(emu::LogLevel::warn, "GTE", "  V%d: in=(%d,%d,%d) ir=(%d,%d,%d) sz=%u sx/sy_raw=(%d,%d) clamped=(%d,%d)",
+                i, vxi, vyi, vzi, ir1, ir2, ir3, sz, sx_raw, sy_raw, sx, sy);
+        }
     }
 
     // Store results directly in correct registers (NOT using push_sxy shift register)
@@ -723,7 +833,7 @@ void Gte::cmd_ncds(uint32_t cmd)
     ir1 = clamp_s16((int32_t)(mac1 >> 12));
     ir2 = clamp_s16((int32_t)(mac2 >> 12));
     ir3 = clamp_s16((int32_t)(mac3 >> 12));
-    if (lm) { ir1 = std::max(0, ir1); ir2 = std::max(0, ir2); ir3 = std::max(0, ir3); }
+    if (lm) { ir1 = (std::max)(0, ir1); ir2 = (std::max)(0, ir2); ir3 = (std::max)(0, ir3); }
 
     // BK + LC * IR -> MAC (lit color before vertex color)
     const int32_t lr1 = s16(ctrl_[C_LR1LR2]);
@@ -745,7 +855,7 @@ void Gte::cmd_ncds(uint32_t cmd)
     ir1 = clamp_s16((int32_t)(mac1 >> 12));
     ir2 = clamp_s16((int32_t)(mac2 >> 12));
     ir3 = clamp_s16((int32_t)(mac3 >> 12));
-    if (lm) { ir1 = std::max(0, ir1); ir2 = std::max(0, ir2); ir3 = std::max(0, ir3); }
+    if (lm) { ir1 = (std::max)(0, ir1); ir2 = (std::max)(0, ir2); ir3 = (std::max)(0, ir3); }
 
     // Step 2: CC - multiply RGBC by IR (color modulation)
     int32_t r, g, b;

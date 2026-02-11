@@ -1,30 +1,14 @@
 #include "gpu.h"
 #include "../log/emu_log.h"
+#include "../util/file_util.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
-#if defined(_WIN32)
-#include <codecvt>
-#include <locale>
-#include <string>
-#endif
-
-static std::FILE* fopen_utf8(const char* path, const char* mode)
-{
-    if (!path || !mode)
-        return nullptr;
-#if defined(_WIN32)
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-    const std::wstring wpath = conv.from_bytes(path);
-    const std::wstring wmode = conv.from_bytes(mode);
-    return _wfopen(wpath.c_str(), wmode.c_str());
-#else
-    return std::fopen(path, mode);
-#endif
-}
+using util::fopen_utf8;
 
 namespace gpu
 {
@@ -720,6 +704,17 @@ void Gpu::gp0_polygon()
         // Vertex position (PS1: 11-bit signed X/Y; sign-extend for correctness)
         vx[i] = sign_extend_11(cmd_buf_[idx]);
         vy[i] = sign_extend_11((int32_t)(cmd_buf_[idx] >> 16));
+
+        // Log when GPU receives clamped boundary values (indicates GTE overflow)
+        if (vx[i] == -1024 || vx[i] == 1023 || vy[i] == -1024 || vy[i] == 1023)
+        {
+            static int gpu_clamp_log = 0;
+            if (gpu_clamp_log++ < 50)
+            {
+                emu::logf(emu::LogLevel::warn, "GPU",
+                    "GP0 vertex %d raw=0x%08X -> (%d,%d) BOUNDARY", i, cmd_buf_[idx], vx[i], vy[i]);
+            }
+        }
         idx++;
 
         // Textured: UV + palette/texpage word per vertex
@@ -919,10 +914,11 @@ void Gpu::gp0_rect()
     // Rectangle corners
     int16_t x1 = (int16_t)(x + w);
     int16_t y1 = (int16_t)(y + h);
-    // UV wrap-around: add full size then mask to 8-bit (PS1 texture coords are 8-bit)
-    // Must add full w/h first, not truncate w/h to 8-bit before adding
-    uint8_t u1 = (uint8_t)((int32_t)u0 + w);
-    uint8_t v1 = (uint8_t)((int32_t)v0 + h);
+    // UV: Don't wrap here! Let the shader do fmod(uv, 256) to avoid
+    // interpolation artifacts when UV crosses 255/0 boundary.
+    // Store as full range values (can exceed 255).
+    uint8_t u1 = static_cast<uint8_t>(std::min((int32_t)u0 + w, 255));
+    uint8_t v1 = static_cast<uint8_t>(std::min((int32_t)v0 + h, 255));
 
     // Triangle 1: top-left, top-right, bottom-left
     push_triangle(

@@ -6,26 +6,9 @@
 #include <cstring>
 
 #include "../log/emu_log.h"
+#include "../util/file_util.h"
 
-#if defined(_WIN32)
-#include <codecvt>
-#include <locale>
-#include <string>
-#endif
-
-static std::FILE* fopen_utf8(const char* path, const char* mode)
-{
-    if (!path || !mode)
-        return nullptr;
-#if defined(_WIN32)
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-    const std::wstring wpath = conv.from_bytes(path);
-    const std::wstring wmode = conv.from_bytes(mode);
-    return _wfopen(wpath.c_str(), wmode.c_str());
-#else
-    return std::fopen(path, mode);
-#endif
-}
+using util::fopen_utf8;
 
 namespace cdrom
 {

@@ -184,6 +184,14 @@ class UR3000EmuComponent : public UActorComponent
     int32 GetCycleMultiplier() const { return CycleMultiplier; }
     int32 GetPcSampleIntervalSteps() const { return PcSampleIntervalSteps; }
 
+    /** Get the GPU component (may be null before core init or if not present on actor). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu")
+    UR3000GpuComponent* GetGpuComponent() const { return GpuComp_; }
+
+    /** Check if the GPU component is ready (bound and valid). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu")
+    bool IsGpuReady() const { return GpuComp_ != nullptr; }
+
     // Thread-safe stats update (called from worker thread)
     void UpdateStepsExecuted(uint64 Steps, uint64 Cycles);
 

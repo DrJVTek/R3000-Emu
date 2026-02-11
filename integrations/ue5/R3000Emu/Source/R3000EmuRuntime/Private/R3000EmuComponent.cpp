@@ -10,13 +10,15 @@
 #include "Misc/Paths.h"
 
 #include <cstring>
-#include <filesystem>
 
 #include "emu/core.h"
 #include "r3000/bus.h"
 #include "r3000/cpu.h"
 #include "audio/spu.h"
 #include "log/filelog.h"
+#include "util/file_util.h"
+
+using util::fopen_utf8;
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -363,22 +365,7 @@ void UR3000EmuComponent::StopWorkerThread()
     }
 }
 
-static std::FILE* fopen_utf8(const char* path, const char* mode)
-{
-    if (!path || !mode)
-        return nullptr;
-#if defined(_WIN32)
-    const std::filesystem::path p = std::filesystem::u8path(path);
-    wchar_t wmode[8] = {};
-    size_t i = 0;
-    for (; mode[i] && i + 1 < (sizeof(wmode) / sizeof(wmode[0])); ++i)
-        wmode[i] = (wchar_t)mode[i];
-    wmode[i] = 0;
-    return _wfopen(p.c_str(), wmode);
-#else
-    return std::fopen(path, mode);
-#endif
-}
+// fopen_utf8 now provided by util/file_util.h
 
 bool UR3000EmuComponent::BootBiosInternal()
 {

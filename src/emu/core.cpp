@@ -475,8 +475,8 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
     const uint32_t t_size = read_u32_le(exe_buf.get() + 0x1C);
     const uint32_t b_addr = read_u32_le(exe_buf.get() + 0x28);
     const uint32_t b_size = read_u32_le(exe_buf.get() + 0x2C);
-    const uint32_t s_addr = read_u32_le(exe_buf.get() + 0x30);
-    const uint32_t s_size = read_u32_le(exe_buf.get() + 0x34);
+    const uint32_t sp_addr = read_u32_le(exe_buf.get() + 0x30);
+    const uint32_t sp_size = read_u32_le(exe_buf.get() + 0x34);
 
     // Convert KSEG0/KSEG1 to physical
     auto virt_to_phys = [](uint32_t v) -> uint32_t {
@@ -494,7 +494,7 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
     std::memcpy(ram_.get() + t_phys, exe_buf.get() + 0x800, t_size);
     emu::logf(emu::LogLevel::info, "CORE", "Loaded text: 0x%08X -> phys 0x%08X (%u bytes)", t_addr, t_phys, t_size);
     emu::logf(emu::LogLevel::info, "CORE", "EXE header: BSS=0x%08X size=%u, SP=0x%08X size=%u",
-        b_addr, b_size, s_addr, s_size);
+        b_addr, b_size, sp_addr, sp_size);
 
     // Zero BSS segment (fast_boot was missing this!)
     if (b_size != 0)
@@ -520,10 +520,10 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
     // 6. Set CPU state
     cpu_->set_pc(pc0);
     cpu_->set_gpr(28, gp0); // GP
-    if (s_size != 0)
-        cpu_->set_gpr(29, s_addr + s_size); // SP = stack base + size
-    else if (s_addr != 0)
-        cpu_->set_gpr(29, s_addr); // SP = s_addr when size=0
+    if (sp_size != 0)
+        cpu_->set_gpr(29, sp_addr + sp_size); // SP = stack base + size
+    else if (sp_addr != 0)
+        cpu_->set_gpr(29, sp_addr); // SP = sp_addr when size=0
     else
         cpu_->set_gpr(29, 0x801F'FF00u); // default SP
 

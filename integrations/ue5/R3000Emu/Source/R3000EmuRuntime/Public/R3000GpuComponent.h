@@ -10,6 +10,22 @@ class UMaterialInstanceDynamic;
 
 namespace gpu { class Gpu; }
 
+/** HD output resolution presets for uniform scaling. */
+UENUM(BlueprintType)
+enum class EHdDefinition : uint8
+{
+    /** 1280x720 (HD 720p) */
+    HD_720p     UMETA(DisplayName = "720p (1280x720)"),
+    /** 1920x1080 (Full HD 1080p) - Default */
+    HD_1080p    UMETA(DisplayName = "1080p (1920x1080)"),
+    /** 2560x1440 (QHD 1440p) */
+    HD_1440p    UMETA(DisplayName = "1440p (2560x1440)"),
+    /** 3840x2160 (4K UHD) */
+    HD_4K       UMETA(DisplayName = "4K (3840x2160)"),
+    /** Custom: use TargetWidth/TargetHeight manually */
+    Custom      UMETA(DisplayName = "Custom")
+};
+
 /**
  * PS1 GPU bridge: renders emulated GPU draw commands as real UE5 geometry.
  * VRAM is uploaded as a texture for the material to sample (texture pages, CLUTs).
@@ -63,8 +79,26 @@ public:
 
     // ------- Rendering settings -------
 
-    /** UE units per PS1 pixel. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "0.01", ClampMax = "100.0"))
+    /** Enable uniform HD scaling: output is always the same size regardless of PS1 resolution.
+     *  When enabled, PixelScale is computed automatically based on HD definition.
+     *  PS1 resolutions (256, 320, 512, 640) are all scaled to fill the target size. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    bool bUniformHdScale{true};
+
+    /** HD output resolution preset. Select a standard resolution or Custom for manual values. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (EditCondition = "bUniformHdScale"))
+    EHdDefinition HdDefinition{EHdDefinition::HD_1080p};
+
+    /** Target output width in UE units (only used when HdDefinition is Custom). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "100.0", ClampMax = "8000.0", EditCondition = "bUniformHdScale && HdDefinition == EHdDefinition::Custom"))
+    float TargetWidth{1920.0f};
+
+    /** Target output height in UE units (only used when HdDefinition is Custom). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "100.0", ClampMax = "8000.0", EditCondition = "bUniformHdScale && HdDefinition == EHdDefinition::Custom"))
+    float TargetHeight{1080.0f};
+
+    /** Manual UE units per PS1 pixel (used only when bUniformHdScale is disabled). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "0.01", ClampMax = "100.0", EditCondition = "!bUniformHdScale"))
     float PixelScale{1.0f};
 
     /** Z-axis increment per draw command (separates primitives for painter's algorithm). */
@@ -79,6 +113,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
     bool bCenterDisplay{true};
 
+    /** Get the effective pixel scale (computed from target size if bUniformHdScale, else manual PixelScale). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    float GetEffectivePixelScale() const;
+
     /** When enabled, log transform params and vertex coords to UE Output Log (Verbose). Useful for debugging offset/exploding polygons. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Debug")
     bool bDebugMeshLog{false};
@@ -88,17 +126,66 @@ public:
      * Should be Unlit/Translucent with Disable Depth Test.
      * Enable "Two Sided" to avoid holes from backface culling (PS1 has no culling).
      *
-     * Future: multiple materials per blend mode (opaque, translucent, additive).
-     * UV3.y encodes semi-transparency: 0-3 = semi mode, 4 = opaque.
-     * Can use these texture/scalar parameters:
-     *   - "VramTexture" (Texture2D): the 1024x512 VRAM
-     * Vertex data encodes per-triangle info:
-     *   - Vertex Color: PS1 flat/gouraud color
-     *   - UV0: texture coords within texture page (0-1)
-     *   - UV1: texture page base in VRAM (normalized)
-     *   - UV2: CLUT base in VRAM (normalized)
-     *   - UV3.x: tex depth mode (0=none, 1=4bit, 2=8bit, 3=15bit)
-     *   - UV3.y: semi-transparency (0-3=semi mode, 4=opaque)
+     * ============================================================
+     * MATERIAL TEXTURE PARAMETERS:
+     * ============================================================
+     *   - "VramTexture" (Texture2D): PS1 VRAM as 1024x512 BGRA8
+     *
+     * ============================================================
+     * VERTEX DATA (per-vertex attributes):
+     * ============================================================
+     *   - Vertex Color RGB: PS1 flat/gouraud shading color
+     *   - Vertex Color A: Reserved (1.0)
+     *
+     *   - UV0 (x, y): Texture coords in PIXELS (0-255) within texture page
+     *       u = horizontal texel, v = vertical texel
+     *
+     *   - UV1 (x, y): Texture page base in VRAM PIXELS
+     *       x = tpBaseX: 0, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960
+     *       y = tpBaseY: 0 or 256
+     *
+     *   - UV2 (x, y): CLUT (palette) position in VRAM PIXELS
+     *       x = clutX: 0, 16, 32, ... 1008 (multiples of 16)
+     *       y = clutY: 0 - 511
+     *
+     *   - UV3.x: Texture depth mode
+     *       0 = No texture (flat/gouraud color only)
+     *       1 = 4-bit indexed (16 colors, CLUT lookup)
+     *       2 = 8-bit indexed (256 colors, CLUT lookup)
+     *       3 = 15-bit direct color (no CLUT)
+     *
+     *   - UV3.y: Packed flags (decode as int)
+     *       bits 0-1: Semi-transparency mode (0-3)
+     *       bit 2: Is semi-transparent (1=yes, 0=no)
+     *       bit 3: Is raw texture (1=no color modulation, 0=multiply by vertex color)
+     *
+     * ============================================================
+     * TEXTURE SAMPLING IN MATERIAL:
+     * ============================================================
+     * VRAM Layout: 1024x512 pixels, 16-bit per pixel
+     *
+     * For 4-bit textures (UV3.x == 1):
+     *   - 4 texels packed per 16-bit VRAM word
+     *   - VRAM X = tpBaseX + floor(u / 4)
+     *   - Index = (vram_pixel >> ((u % 4) * 4)) & 0xF
+     *   - Color = CLUT[clutY][clutX + index]
+     *
+     * For 8-bit textures (UV3.x == 2):
+     *   - 2 texels packed per 16-bit VRAM word
+     *   - VRAM X = tpBaseX + floor(u / 2)
+     *   - Index = (u % 2 == 0) ? (vram_pixel & 0xFF) : (vram_pixel >> 8)
+     *   - Color = CLUT[clutY][clutX + index]
+     *
+     * For 15-bit textures (UV3.x == 3):
+     *   - Direct color, 1 texel per VRAM word
+     *   - VRAM X = tpBaseX + u
+     *   - Color = RGB555 to RGB888
+     *
+     * Semi-transparency modes (when bit2 of UV3.y is set):
+     *   0: 0.5*Back + 0.5*Front
+     *   1: 1.0*Back + 1.0*Front
+     *   2: 1.0*Back - 1.0*Front
+     *   3: 1.0*Back + 0.25*Front
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
     UMaterialInterface* BaseMaterial{nullptr};
@@ -130,6 +217,50 @@ public:
     /** Toggle the VRAM viewer at runtime. */
     UFUNCTION(BlueprintCallable, Category = "R3000Emu|GPU|VramViewer")
     void SetVramViewerVisible(bool bVisible);
+
+    // ------- PS1 VRAM Constants (for Material/Blueprint use) -------
+
+    /** PS1 VRAM width in pixels (1024). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static int32 GetVramWidth() { return 1024; }
+
+    /** PS1 VRAM height in pixels (512). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static int32 GetVramHeight() { return 512; }
+
+    /** Texture page width in texels (256 for all depths, but VRAM footprint varies). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static int32 GetTexturePageWidth() { return 256; }
+
+    /** Texture page height in texels (256). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static int32 GetTexturePageHeight() { return 256; }
+
+    /** Get VRAM X scale factor for a texture depth mode.
+     *  4-bit=0.25 (64 VRAM pixels for 256 texels), 8-bit=0.5, 15-bit=1.0 */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static float GetVramScaleForDepth(int32 TexDepthMode)
+    {
+        switch (TexDepthMode)
+        {
+            case 1: return 0.25f;  // 4-bit: 4 texels per 16-bit word
+            case 2: return 0.5f;   // 8-bit: 2 texels per 16-bit word
+            case 3: return 1.0f;   // 15-bit: 1 texel per 16-bit word
+            default: return 1.0f;
+        }
+    }
+
+    /** Decode semi-transparency mode from UV3.y flags. */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static int32 DecodeSemiMode(float UV3Y) { return static_cast<int32>(UV3Y) & 0x3; }
+
+    /** Check if semi-transparent from UV3.y flags. */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static bool IsSemiTransparent(float UV3Y) { return (static_cast<int32>(UV3Y) & 0x4) != 0; }
+
+    /** Check if raw texture (no color modulation) from UV3.y flags. */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
+    static bool IsRawTexture(float UV3Y) { return (static_cast<int32>(UV3Y) & 0x8) != 0; }
 
 private:
     void CreateVramTexture();

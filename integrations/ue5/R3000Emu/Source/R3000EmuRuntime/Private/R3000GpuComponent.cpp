@@ -44,12 +44,69 @@ void UR3000GpuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 }
 
 // ===================================================================
+// GetEffectivePixelScale - compute uniform HD scale or return manual
+// ===================================================================
+float UR3000GpuComponent::GetEffectivePixelScale() const
+{
+    if (!bUniformHdScale)
+    {
+        return PixelScale;
+    }
+
+    // Get target resolution from HD definition preset
+    float TgtWidth, TgtHeight;
+    switch (HdDefinition)
+    {
+        case EHdDefinition::HD_720p:
+            TgtWidth = 1280.0f;
+            TgtHeight = 720.0f;
+            break;
+        case EHdDefinition::HD_1080p:
+            TgtWidth = 1920.0f;
+            TgtHeight = 1080.0f;
+            break;
+        case EHdDefinition::HD_1440p:
+            TgtWidth = 2560.0f;
+            TgtHeight = 1440.0f;
+            break;
+        case EHdDefinition::HD_4K:
+            TgtWidth = 3840.0f;
+            TgtHeight = 2160.0f;
+            break;
+        case EHdDefinition::Custom:
+        default:
+            TgtWidth = TargetWidth;
+            TgtHeight = TargetHeight;
+            break;
+    }
+
+    // Get PS1 display resolution
+    float Ps1Width = 320.0f;  // Default
+    float Ps1Height = 240.0f;
+
+    if (Gpu_)
+    {
+        const gpu::DisplayConfig& Disp = Gpu_->display_config();
+        Ps1Width = static_cast<float>(Disp.width());
+        Ps1Height = static_cast<float>(Disp.height());
+        // Clamp to sane values
+        if (Ps1Width < 1.0f) Ps1Width = 320.0f;
+        if (Ps1Height < 1.0f) Ps1Height = 240.0f;
+    }
+
+    // Scale to fit target while maintaining aspect ratio
+    const float ScaleX = TgtWidth / Ps1Width;
+    const float ScaleY = TgtHeight / Ps1Height;
+    return FMath::Min(ScaleX, ScaleY);
+}
+
+// ===================================================================
 // BindGpu - called by R3000EmuComponent after core init
 // ===================================================================
 void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
 {
     UE_LOG(LogR3000Gpu, Warning, TEXT("BindGpu called. InGpu=%p (was Gpu_=%p)"), InGpu, Gpu_);
-    emu::logf(emu::LogLevel::info, "GPU", "GpuComponent v7 (debug_texture_upload)");
+    emu::logf(emu::LogLevel::info, "GPU", "GpuComponent v8 (uniform_hd_scale)");
 
     Gpu_ = InGpu;
 
@@ -167,20 +224,18 @@ void UR3000GpuComponent::UpdateVramTexture()
     // Use our thread-safe copy instead of direct GPU VRAM access
     const uint16_t* Vram = VramCopyBuffer_;
 
-    // Convert 15-bit PS1 pixels (0bbbbbgg_gggrrrrr) to BGRA8
+    // Store raw 16-bit values in BGRA8 texture for shader reconstruction
+    // This preserves ALL 16 bits (including bit 15) for proper 4-bit/8-bit texture indexing
+    // Layout: B = low byte, G = high byte, R = unused, A = 0xFF
     uint8* Dst = PixelBuffer_;
     const int32 NumPixels = kVramW * kVramH;
     for (int32 i = 0; i < NumPixels; ++i)
     {
         const uint16_t Px = Vram[i];
-        const uint8_t R5 = (uint8_t)(Px & 0x1F);
-        const uint8_t G5 = (uint8_t)((Px >> 5) & 0x1F);
-        const uint8_t B5 = (uint8_t)((Px >> 10) & 0x1F);
-        // 5-bit → 8-bit with top-bit replication for accuracy
-        Dst[0] = (B5 << 3) | (B5 >> 2); // B
-        Dst[1] = (G5 << 3) | (G5 >> 2); // G
-        Dst[2] = (R5 << 3) | (R5 >> 2); // R
-        Dst[3] = 0xFF;                   // A
+        Dst[0] = Px & 0xFF;          // B = low byte (bits 0-7)
+        Dst[1] = (Px >> 8) & 0xFF;   // G = high byte (bits 8-15)
+        Dst[2] = 0;                   // R = unused
+        Dst[3] = 0xFF;                // A = opaque
         Dst += 4;
     }
 
@@ -304,12 +359,16 @@ void UR3000GpuComponent::RebuildMesh()
     const float OriginX = bCenterDisplay ? DispCenterX : static_cast<float>(Env.clip_x1);
     const float OriginY = bCenterDisplay ? DispCenterY : static_cast<float>(Env.clip_y1);
 
+    // Compute effective scale: uniform HD or manual
+    const float EffScale = GetEffectivePixelScale();
+
     if (bDebugMeshLog)
     {
-        emu::logf(emu::LogLevel::info, "GPU", "MeshRebuild: %d tris | clip=(%u,%u)-(%u,%u) disp=(%u,%u)+(%u,%u) | Origin=(%.1f,%.1f) bCenter=%d Scale=%.3f DispOff=(%.1f,%.1f)",
-            NumCmds, Env.clip_x1, Env.clip_y1, Env.clip_x2, Env.clip_y2,
-            Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
-            OriginX, OriginY, bCenterDisplay ? 1 : 0, PixelScale, DisplayOffset.X, DisplayOffset.Y);
+        const char* HdNames[] = {"720p", "1080p", "1440p", "4K", "Custom"};
+        const char* HdName = (static_cast<int>(HdDefinition) < 5) ? HdNames[static_cast<int>(HdDefinition)] : "?";
+        emu::logf(emu::LogLevel::info, "GPU", "MeshRebuild: %d tris | disp=(%u,%u)+(%ux%u) | EffScale=%.3f (HD=%s) Origin=(%.1f,%.1f)",
+            NumCmds, Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
+            EffScale, HdName, OriginX, OriginY);
     }
 
     float Ps1MinX = 1e9f, Ps1MaxX = -1e9f, Ps1MinY = 1e9f, Ps1MaxY = -1e9f;
@@ -334,8 +393,8 @@ void UR3000GpuComponent::RebuildMesh()
             // +0.5: PS1 uses pixel-center convention (coords at pixel centers)
             float dx = (vx + 0.5f) - OriginX;
             float dy = (vy + 0.5f) - OriginY;
-            float px = dx * PixelScale + DisplayOffset.X;
-            float py = -dy * PixelScale + DisplayOffset.Y;
+            float px = dx * EffScale + DisplayOffset.X;
+            float py = -dy * EffScale + DisplayOffset.Y;
             Vertices.Add(FVector(Depth, px, py));
 
             if (bDebugMeshLog)
@@ -349,27 +408,61 @@ void UR3000GpuComponent::RebuildMesh()
             Normals.Add(FaceNormal);
             Tangents.Add(FaceTangent);
 
-            // Vertex color: PS1 RGB
+            // Vertex color: PS1 RGB (alpha = 1.0 for opaque, could encode flags)
             Colors.Add(FLinearColor(V.r / 255.0f, V.g / 255.0f, V.b / 255.0f, 1.0f));
 
-            // UV0: texture coords within texture page (0-255 → 0.0-1.0)
-            UV0.Add(FVector2D(V.u / 255.0f, V.v / 255.0f));
+            // ============================================================
+            // TEXTURE DATA FOR MATERIAL (all in PIXELS, not normalized)
+            // ============================================================
+            //
+            // PS1 VRAM is 1024x512 pixels (16-bit per pixel)
+            // Texture pages are 256x256 in texture coords, but actual VRAM size depends on depth:
+            //   4-bit:  64x256 VRAM pixels (256 texels packed, 4 texels per 16-bit word)
+            //   8-bit: 128x256 VRAM pixels (256 texels, 2 texels per 16-bit word)
+            //  15-bit: 256x256 VRAM pixels (direct color, 1 texel per 16-bit word)
+            //
+            // UV0: Texture coords (u, v) in pixels 0-255 within texture page
+            // UV1: Texture page base in VRAM pixels (X: 0,64,128...960  Y: 0 or 256)
+            // UV2: CLUT position in VRAM pixels (X: 0,16,32...1008  Y: 0-511)
+            // UV3.x: Texture mode: 0=no texture (flat/gouraud), 1=4-bit, 2=8-bit, 3=15-bit direct
+            // UV3.y: Flags packed: bits[1:0]=semi_mode(0-3), bit2=is_semi_transparent, bit3=is_raw_texture
+            //
+            // VRAM texture is 1024x512 BGRA8. To sample:
+            //   - Compute VRAM pixel coords: vramX = tpBaseX + (u * scale), vramY = tpBaseY + v
+            //   - Scale depends on tex depth: 4-bit=0.25, 8-bit=0.5, 15-bit=1.0
+            //   - For 4/8-bit: read index from VRAM, then lookup CLUT[index] at clutPos
+            // ============================================================
 
-            // UV1: texture page base in VRAM (normalized)
-            const float TpX = static_cast<float>((Cmd.texpage & 0xF) * 64) / 1024.0f;
-            const float TpY = static_cast<float>(((Cmd.texpage >> 4) & 1) * 256) / 512.0f;
-            UV1.Add(FVector2D(TpX, TpY));
+            // UV0: texture coords (u, v) as raw pixel values 0-255
+            UV0.Add(FVector2D(static_cast<float>(V.u), static_cast<float>(V.v)));
 
-            // UV2: CLUT base in VRAM (normalized)
-            const float ClutX = static_cast<float>((Cmd.clut & 0x3F) * 16) / 1024.0f;
-            const float ClutY = static_cast<float>((Cmd.clut >> 6) & 0x1FF) / 512.0f;
+            // UV1: texture page base in VRAM (pixels)
+            // texpage bits 0-3 = X base (multiply by 64)
+            // texpage bit 4 = Y base (0 or 256)
+            const float TpBaseX = static_cast<float>((Cmd.texpage & 0xF) * 64);
+            const float TpBaseY = static_cast<float>(((Cmd.texpage >> 4) & 1) * 256);
+            UV1.Add(FVector2D(TpBaseX, TpBaseY));
+
+            // UV2: CLUT position in VRAM (pixels)
+            // clut bits 0-5 = X position / 16
+            // clut bits 6-14 = Y position
+            const float ClutX = static_cast<float>((Cmd.clut & 0x3F) * 16);
+            const float ClutY = static_cast<float>((Cmd.clut >> 6) & 0x1FF);
             UV2.Add(FVector2D(ClutX, ClutY));
 
-            // UV3.x: tex depth mode (0=none, 1=4bit, 2=8bit, 3=15bit)
-            // UV3.y: semi-transparency (0-3=semi mode, 4=opaque)
-            const float TexMode = (Cmd.flags & 1) ? static_cast<float>(Cmd.tex_depth + 1) : 0.0f;
-            const float SemiVal = (Cmd.flags & 2) ? static_cast<float>(Cmd.semi_mode) : 4.0f;
-            UV3.Add(FVector2D(TexMode, SemiVal));
+            // UV3: texture mode + flags
+            // X = texture depth mode: 0=none (flat/gouraud color only), 1=4-bit, 2=8-bit, 3=15-bit
+            // Y = packed flags: bits[1:0]=semi_mode, bit2=is_semi_trans, bit3=is_raw_texture
+            const bool bTextured = (Cmd.flags & 1) != 0;
+            const bool bSemiTrans = (Cmd.flags & 2) != 0;
+            const bool bRawTexture = (Cmd.flags & 4) != 0;
+            const float TexMode = bTextured ? static_cast<float>(Cmd.tex_depth + 1) : 0.0f;
+            const float FlagsPacked = static_cast<float>(
+                (Cmd.semi_mode & 0x3) |           // bits 0-1: semi mode
+                (bSemiTrans ? 0x4 : 0) |          // bit 2: is semi-transparent
+                (bRawTexture ? 0x8 : 0)           // bit 3: is raw texture (no color modulation)
+            );
+            UV3.Add(FVector2D(TexMode, FlagsPacked));
 
             // Winding order: PS1 has no backface culling, but UE5 does.
             // The Y inversion (-dy) flips winding, so we reverse vertex order:
@@ -389,9 +482,9 @@ void UR3000GpuComponent::RebuildMesh()
             float dxc = (static_cast<float>(Vc.x) + 0.5f) - OriginX, dyc = (static_cast<float>(Vc.y) + 0.5f) - OriginY;
             emu::logf(emu::LogLevel::info, "GPU", "  Tri[%d]: PS1 v0=(%d,%d) v1=(%d,%d) v2=(%d,%d) -> UE5 (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) | tex=%d semi=%d",
                 i, Va.x, Va.y, Vb.x, Vb.y, Vc.x, Vc.y,
-                dxa * PixelScale + DisplayOffset.X, -dya * PixelScale + DisplayOffset.Y,
-                dxb * PixelScale + DisplayOffset.X, -dyb * PixelScale + DisplayOffset.Y,
-                dxc * PixelScale + DisplayOffset.X, -dyc * PixelScale + DisplayOffset.Y,
+                dxa * EffScale + DisplayOffset.X, -dya * EffScale + DisplayOffset.Y,
+                dxb * EffScale + DisplayOffset.X, -dyb * EffScale + DisplayOffset.Y,
+                dxc * EffScale + DisplayOffset.X, -dyc * EffScale + DisplayOffset.Y,
                 (Cmd.flags & 1) ? 1 : 0, (Cmd.flags & 2) ? 1 : 0);
         }
     }
