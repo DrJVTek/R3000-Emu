@@ -334,6 +334,12 @@ class Cpu
 
     uint64_t exc_vec_hits_{0};
 
+    // Temporary exception trace: armed when PC enters game code, logs next N exceptions/RFE
+    int exc_trace_armed_{0};
+    int exc_trace_count_{0};
+    int exc_trace_pc_log_{0};
+    static constexpr int kExcTraceMax = 2000;
+
     // HLE BIOS vectors (bring-up): petit état pour quelques services kernel.
     // NOTE: ce n'est pas "PS1-accurate"; objectif = permettre au BIOS d'avancer,
     // tout en gardant le code lisible pour le live.

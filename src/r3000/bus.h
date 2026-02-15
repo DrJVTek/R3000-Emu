@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -90,6 +91,12 @@ class Bus
     void set_cpu_pc(uint32_t pc) { cpu_pc_ = pc; }
     uint32_t cpu_pc() const { return cpu_pc_; }
 
+    // Controller input: set pad button state (active-low, 0=pressed, 1=released).
+    // Thread-safe (atomic). Called from UE5 game thread, read by emulator worker thread.
+    // Bit layout: [Select L3 R3 Start Up Right Down Left | L2 R2 L1 R1 Tri Cir X Sqr]
+    void set_pad_buttons(uint16_t v) { pad_buttons_.store(v, std::memory_order_relaxed); }
+    uint16_t pad_buttons() const { return pad_buttons_.load(std::memory_order_relaxed); }
+
     // Debug: watch d'une adresse RAM (physique) - log les writes byte qui la touchent.
     // Exemple: pour watcher 0x8009A204 (KSEG0), donner phys=0x0009A204.
     void set_watch_ram_u32(uint32_t phys_addr, int enabled)
@@ -107,6 +114,9 @@ class Bus
     // Debug: raw access to I_STAT and I_MASK for diagnostic logging.
     uint32_t irq_stat_raw() const { return i_stat_; }
     uint32_t irq_mask_raw() const { return i_mask_; }
+
+    // Debug: SIO0 status for diagnostic tracing
+    uint16_t sio0_stat_debug() const;
 
     // Set a specific I_STAT bit (used by HLE VBlank delivery).
     void set_i_stat_bit(uint32_t bit) { i_stat_ |= (1u << bit); }
@@ -206,6 +216,8 @@ class Bus
     Timer timers_[3]{};
     uint32_t timer_prescale_accum_[3]{}; // prescaler accumulator (dotclock/hblank)
 
+    void sio0_write_ctrl(uint16_t v);
+
     // SIO0 minimal state (enough for BIOS polling loops)
     uint16_t sio0_data_{0};
     uint16_t sio0_stat_{0x0005u}; // TXRDY|TXEMPTY by default
@@ -213,8 +225,13 @@ class Bus
     uint16_t sio0_ctrl_{0};
     uint16_t sio0_baud_{0};
     uint8_t sio0_rx_data_{0xFF};
-    uint8_t sio0_rx_ready_{0};
+    uint8_t sio0_rx_ready_{0};    // RXRDY (STAT bit 1): data available in RX buffer
+    uint8_t sio0_irq_flag_{0};    // IRQ flag (STAT bit 9): cleared by CTRL ACK bit
     uint8_t sio0_tx_phase_{0};
+    uint32_t sio0_ack_countdown_{0}; // cycles until /ACK deasserts (0 = idle)
+
+    // Pad button state (active-low, 0xFFFF = all released). Thread-safe.
+    std::atomic<uint16_t> pad_buttons_{0xFFFFu};
 
     // DMA controller (PS1) - minimal (suffisant pour BIOS init).
     // On implémente surtout DMA2 (GPU) linked-list pour déverrouiller les boucles BIOS qui attendent CHCR.

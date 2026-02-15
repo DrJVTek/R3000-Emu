@@ -155,7 +155,7 @@ Gpu::Gpu(rlog::Logger* logger)
     , vram_(std::make_unique<uint16_t[]>(kVramPixels))
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::info, "GPU", "GPU source v6 (vsync_stuck_detect)");
+    emu::logf(emu::LogLevel::info, "GPU", "GPU source v7 (NTSC_timing, bit31_toggle)");
     status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
     vblank_div_ = 0;
@@ -218,16 +218,25 @@ int Gpu::tick_vblank(uint32_t cycles)
 {
     vblank_div_ += cycles;
 
-    uint32_t vblank_start = kVblankPeriodCycles - kVblankDuration;
+    // Use correct timing based on video mode (PAL vs NTSC)
+    const uint32_t period   = display_.is_pal ? kVblankPeriodCyclesPal  : kVblankPeriodCyclesNtsc;
+    const uint32_t duration = display_.is_pal ? kVblankDurationPal      : kVblankDurationNtsc;
+
+    uint32_t vblank_start = period - duration;
     in_vblank_ = (vblank_div_ >= vblank_start);
 
-    if (vblank_div_ >= kVblankPeriodCycles)
+    if (vblank_div_ >= period)
     {
-        vblank_div_ = 0;
+        vblank_div_ -= period; // Preserve remainder for accurate timing
         in_vblank_ = false;
 
+        // Toggle even/odd field flag each VBlank.
+        // GPUSTAT bit 31 = "Drawing even/odd lines in interlace mode"
+        // Games poll this bit to detect VSync (wait for it to change).
+        // Real hardware toggles this every frame regardless of interlace setting.
+        even_odd_field_ = !even_odd_field_;
+
         // Toggle interlace field bit (GPUSTAT bit 13) each frame when interlace is enabled
-        // Some games poll this to detect even/odd fields
         if (display_.interlace)
             status_ ^= (1u << 13);
 
@@ -250,7 +259,9 @@ int Gpu::tick_vblank(uint32_t cycles)
         // Log every 50 VBlanks (~1 second) to confirm timing
         if ((frame_count_ % 50) == 1)
         {
-            emu::logf(emu::LogLevel::info, "GPU", "VBlank #%u (every 50 = ~1sec at 50Hz)", frame_count_);
+            emu::logf(emu::LogLevel::info, "GPU", "VBlank #%u (%s, period=%u, field=%s)",
+                frame_count_, display_.is_pal ? "PAL" : "NTSC", period,
+                even_odd_field_ ? "odd" : "even");
         }
 
         const auto& s = frame_stats_;
@@ -366,8 +377,11 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
             else if ((dma_dir_ & 3u) == 2u && ready_dma) v |= (1u << 25);
             else if ((dma_dir_ & 3u) == 3u && ready_v2c) v |= (1u << 25);
 
+            // Bit 31: Even/odd field indicator (toggles each VBlank).
+            // NOT a VBlank pulse - real hardware toggles this per-frame.
+            // Games detect VSync by waiting for this bit to change.
             v &= ~(1u << 31);
-            if (in_vblank_) v |= (1u << 31);
+            if (even_odd_field_) v |= (1u << 31);
 
             return v;
         }

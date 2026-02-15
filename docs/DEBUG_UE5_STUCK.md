@@ -9,7 +9,250 @@
 
 ---
 
-## 📌 ÉTAT ACTUEL (2026-02-14) - VERSION v5: RÉÉCRITURE COMPLÈTE GTE
+## 📌 ÉTAT ACTUEL (2026-02-15) - SIO0 ROOT CAUSE FIXED (bus v12)
+
+### ✅ ROOT CAUSE FIXED: SIO0 RXRDY/IRQ flag separation (bus v12)
+
+**Bug critique:** `sio0_write_ctrl()` ACK handler (bit 4) effaçait `sio0_rx_ready_` qui
+contrôlait BOTH RXRDY (STAT bit 1) AND IRQ flag (STAT bit 9). Sur le vrai PS1,
+le bit ACK dans CTRL ne doit effacer QUE le flag IRQ (bit 9), PAS RXRDY (bit 1).
+
+**Séquence de deadlock (avant fix):**
+1. VBlank IRQ tire → BIOS exception handler s'exécute (IEc=0)
+2. Handler pad (installé par B(0x4B) StartPAD) exécute dans le contexte exception
+3. Write SIO0_DATA → `sio0_rx_ready_=1` (RXRDY set)
+4. Write JOY_CTRL avec ACK bit → `sio0_rx_ready_=0` (RXRDY cleared! BUG!)
+5. Poll RXRDY → toujours 0 → boucle infinie
+6. Comme IEc=0 (dans exception), aucun IRQ ne peut interrompre → DEADLOCK
+
+**Fix (bus v12):** Séparation de `sio0_rx_ready_` (STAT bit 1) et `sio0_irq_flag_` (STAT bit 9):
+- `sio0_write_data()` set les deux flags
+- `sio0_write_ctrl()` ACK (bit 4) ne clear que `sio0_irq_flag_`, PAS `sio0_rx_ready_`
+- `sio0_read_data()` ne clear que `sio0_rx_ready_`
+- `sio0_stat_value()` utilise chaque flag séparément pour ses bits respectifs
+
+**Diagnostic utilisé:** Exception trace (cpu.cpp) armé à B(0x4B) StartPAD, suivi de
+dump d'instructions à la boucle bloquée (PC=0x45C4/0x45D4), décodage assembleur
+montrant poll de JOY_STAT bit 1 (RXRDY) depuis $s1=0x1F801040.
+
+**Résultat:** Le jeu progresse maintenant au-delà du logo PlayStation en mode non-HLE !
+Confirmé sous UE5.
+
+**Fichiers:** `src/r3000/bus.cpp` (v12), `src/r3000/bus.h` (ajout `sio0_irq_flag_`)
+
+### ✅ FIX: SIO0 CTRL register handling (2026-02-15, bus v11)
+
+**3 bugs critiques dans l'émulation SIO0 (contrôleur PS1):**
+
+| # | Bug | Impact | Fix |
+|---|-----|--------|-----|
+| 1 | **CTRL Reset (bit 6) ignoré** | Le jeu écrit CTRL=0x40 pour reset SIO avant chaque transaction pad. Sans traitement, `sio0_tx_phase_` reste bloqué dans une phase intermédiaire → protocole désynchronisé → pad jamais lu | `sio0_write_ctrl()`: reset tx_phase=0, rx_ready=0, stat/mode/baud/ctrl=0 |
+| 2 | **CTRL Acknowledge (bit 4) ignoré** | Le jeu écrit CTRL bit 4 pour acquitter IRQ/RXRDY. Sans traitement, IRQ SIO0 stale dans STAT → jeu confus | `sio0_write_ctrl()`: clear rx_ready → efface STAT bits 1 et 9 |
+| 3 | **STAT IRQ bit mauvaise position** | Code mettait bit 8 (0x0100) au lieu de bit 9 (0x0200). JOY_STAT.IRQ = bit 9 selon nocash specs | Changé 0x0100 → 0x0200 |
+
+**Bonus:** STAT base changé de 0x00C5 → 0x0085 (bit 6 est "unused" dans JOY_STAT, doit être 0)
+
+**Fichiers:** `src/r3000/bus.cpp` (ajout `sio0_write_ctrl()`), `src/r3000/bus.h` (déclaration)
+
+**Détail CTRL write:** Les 2 handlers (byte write 0xA/0xB et word write 0xA) appellent maintenant `sio0_write_ctrl()` au lieu de stocker directement.
+
+### ⚠️ FIX: PollPadInput bailing silencieusement (2026-02-15)
+
+**Symptôme:** Aucun log `PadInput:` dans PSXVR.log. Le polling d'input ne fonctionnait pas du tout.
+
+**Cause:** `PollPadInput()` faisait `if (!PC || !PC->GetPawn()) { return; }` sans aucun log.
+Sans GameMode configuré dans World Settings (ou si le Pawn n'est pas spawné), la fonction
+retournait silencieusement à chaque tick → aucun input jamais envoyé au PS1.
+
+**Fix:**
+1. Retiré le check `!PC->GetPawn()` - `IsInputKeyDown()` fonctionne sans Pawn
+2. Ajouté warning log quand PC est null
+3. Ajouté log one-shot "polling active" au premier poll réussi (avec nom du Pawn)
+
+**Fichier:** `R3000EmuComponent.cpp` (`PollPadInput()`)
+
+**Pour tester:** Après Hot Reload, chercher dans PSXVR.log:
+- `PadInput: polling active` → le polling fonctionne
+- `PadInput: No PlayerController found` → pas de PlayerController
+- `PadInput: buttons=0x...` → boutons détectés
+
+### 🔴 ROOT CAUSE TROUVÉE: COP0.Status IEc=0 (interrupts désactivés)
+
+**Symptôme:** Jeu bloqué à `pc=0x000045C4` après chargement EXE principal depuis CD.
+
+**Diagnostic CLI avec PC samples (--pc-sample=5000000):**
+```
+step=255M PC=0xBFC0D864 status=0x40000401 (IEc=1) i_mask=0x0C  ← BIOS, IRQs ON
+step=260M PC=0x80040014 status=0x40000400 (IEc=0) i_mask=0x0C  ← Game entry, IRQs OFF
+step=265M PC=0x000045C4 status=0x40000404 (IEc=0,IEp=1) i_mask=0x0D  ← STUCK!
+step=270M PC=0x000045C4 status=0x40000404 (IEc=0,IEp=1) i_mask=0x0D  ← STUCK!
+```
+
+**Analyse COP0.Status = 0x40000404:**
+- bit 0 (IEc) = **0** → interrupts GLOBALEMENT désactivées
+- bit 2 (IEp) = **1** → ancienne IEc=1 sauvé par exception
+- bit 10 (IM2) = **1** → hardware IRQ unmasked
+- **EPC = 0xBFC09190** (BIOS ROM)
+
+**Séquence reconstituée:**
+1. BIOS charge EXE depuis CD → saute à 0x80040014 avec IEc=0
+2. Game startup init → enable VBlank dans I_MASK (0x0C→0x0D)
+3. Game active IEc=1 (MTC0 Status)
+4. VBlank IRQ immédiatement tire (était pending dans i_stat)
+5. Exception prise → IEc=1→IEp, IEc=0 → status=0x40000404
+6. BIOS exception handler à 0x80000080 s'exécute...
+7. **MAIS: le CPU finit à 0x000045C4 avec IEc=0 (jamais de RFE!)**
+
+**Instruction à 0x000045C4:** `LHU $t4, 4($s1)` = poll d'un champ 16-bit en mémoire
+→ C'est une boucle WaitEvent/TestEvent du kernel BIOS qui poll le status d'un événement.
+
+**Problème:** Le BIOS handler a traité l'exception et sauté au jeu (via HookEntryInt/
+SetCustomExitFromException?) AVEC IEc=0. Le jeu devrait appeler B(0x17) ReturnFromException
+pour faire RFE. Mais le code à 0x000045C4 est une boucle poll qui attend un événement
+qui ne peut jamais être délivré (car IEc=0 → pas d'IRQ → pas d'event delivery).
+
+**Table d'événements au moment du blocage:**
+```
+Event table ptr=0xA000E028
+Tous les events: cls=0xF0000003 (CDROM) status=0x0000 (FREED)
+AUCUN event VBlank (0xF0000001) dans la table!
+```
+→ Le jeu n'a pas encore créé ses events VBlank - il est bloqué AVANT dans son init.
+
+**CLI ET UE5 ont le même bug** - ce n'est PAS un problème de timing wall-clock.
+
+**Piste: PADInit() bloquant?** L'utilisateur suspecte que le jeu bloque dans PADInit().
+Le BIOS PADInit initialise SIO0 et peut configurer un callback VBlank pour le polling pad.
+Si ce callback attend un event qui nécessite IRQs... deadlock.
+
+**À investiguer:**
+1. Quand exactement IEc passe de 0→1→0 (entre step 260M et 265M)
+2. Le BIOS exception handler fait-il bien RFE?
+3. Y a-t-il un HookEntryInt qui saute au jeu avec IEc=0?
+4. Le code BIOS à 0x000045C4 est-il WaitEvent, TestEvent, ou StartPAD?
+
+**Note:** Le rescue code v8 (BUSY→READY) ne marche pas car les events sont status=0x0000
+pas 0x2000. Le jeu n'a même pas encore créé ses events.
+
+---
+
+### ✅ FIX: Flickering "une frame sur 2" (2026-02-15)
+
+**Symptôme:** Ridge Racer affiche une frame sur deux, l'image clignote.
+
+**Analyse logs:** Pattern "2 frames avec commandes, 1 frame vide" dans system.log.
+Ridge Racer dessine à ~33fps (2 frames par 3 VBlanks).
+
+**Cause:** `R3000GpuComponent::RebuildMesh()` appelait `ClearAllMeshSections()` quand
+`NumCmds == 0`, effaçant le mesh visible sur les frames vides.
+
+**Fix:** Simplement `return` sur les frames vides, garder le mesh précédent visible.
+
+**Fichier:** `R3000GpuComponent.cpp` ligne ~309-313
+
+### ✅ FIX: GPUSTAT bit 31 (even/odd field) (2026-02-15)
+
+**Avant (bug):** bit 31 = `in_vblank_` (pulse pendant VBlank)
+**Après (fix):** bit 31 = `even_odd_field_` qui toggle chaque VBlank (comme le vrai hardware)
+
+**Fichier:** `src/gpu/gpu.h` + `src/gpu/gpu.cpp`
+
+### ✅ FIX: Timing VBlank PAL/NTSC dynamique (2026-02-15)
+
+**Avant:** Hardcodé PAL (680688 cycles)
+**Après:** Dynamique basé sur `display_.is_pal` (PAL=680688, NTSC=571088)
+
+### ✅ AJOUT: PS1 Controller Input via Xbox Gamepad (2026-02-15)
+
+**3 couches implémentées:**
+
+1. **Bus** (`src/r3000/bus.h/cpp`):
+   - `std::atomic<uint16_t> pad_buttons_{0xFFFF}` (active-low, 0=pressed)
+   - `sio0_write_data()` phases 3/4 lisent `pad_buttons_` au lieu de 0xFF
+
+2. **Core** (`src/emu/core.h/cpp`):
+   - `set_pad_buttons(uint16_t)` forwarde vers `bus_->set_pad_buttons()`
+
+3. **UE5** (`R3000EmuComponent.cpp`):
+   - `PollPadInput()` appelé dans TickComponent
+   - Utilise `APlayerController::IsInputKeyDown(FKey)` directement (pas Enhanced Input)
+   - Mapping Xbox hardcodé: A=Cross, B=Circle, X=Square, Y=Triangle, etc.
+   - Enhanced Input IMC aussi ajouté pour flexibilité future
+
+**PS1 Button Bit Layout (active-low):**
+```
+Byte low  (bits 0-7):  Select L3 R3 Start Up Right Down Left
+Byte high (bits 8-15): L2 R2 L1 R1 Triangle Circle Cross Square
+```
+
+**Assets créés par script Python** (`scripts/ue5_create_psx_inputs.py`):
+- 16 `IA_Pad*` InputActions (bool/Digital) dans `/Game/PSX/Input/`
+- 1 `IMC_PSXPad` InputMappingContext avec mappings Xbox gamepad
+- Le constructeur C++ charge ces assets par défaut
+
+**Debug:** `PadInput: buttons=0x%04X` dans les logs quand un bouton est pressé.
+
+### ⚠️ Bug Enhanced Input: GetPlayerInput() retourne null
+
+Enhanced Input ne fonctionnait pas pour le polling (`GetPlayerInput()` null).
+Cause probable: Default Player Input Class pas configuré sur `EnhancedPlayerInput`
+dans Project Settings > Input > Default Classes.
+
+**Workaround:** Utilisation directe de `IsInputKeyDown(EKeys::Gamepad_*)` au lieu
+d'Enhanced Input `GetActionValue()`. Marche avec n'importe quel système d'input.
+
+### ⚠️ Note UE5.7: Noms FKey thumbstick
+
+- `EKeys::Gamepad_LeftThumbstick` (PAS `Gamepad_LeftThumbstickButton`)
+- `EKeys::Gamepad_RightThumbstick` (PAS `Gamepad_RightThumbstickButton`)
+
+### ✅ FIX: GTE v6→v8 (2026-02-14/15) - Lighting, projection, flags
+
+**v6 (DuckStation comparison):** 7 bugs trouvés (voir section v5 ci-dessous)
+
+**v7:** Réécriture complète lighting (NCS/CC/NCDS/etc.)
+- `push_color()` helper avec FLAG_COLOR saturation bits
+- `set_mac_shifted()` pour tous les cmds lighting
+- Toutes les commandes lighting réécrites: NCS, CC, NCDS, NCCS, DPCS, INTPL, NCT, NCDT, NCCT, DCPL, DPCT
+
+**v8:** Projection + flags fixes
+| # | Bug | Impact | Fix |
+|---|-----|--------|-----|
+| 1 | **MAC0 overflow** non vérifié dans RTPS screen projection (Sx/Sy) | FLAG bit 31 jamais set, jeux qui rejettent les vertices overflowed ne filtrent pas | Ajout check MAC0 overflow pour Sx et Sy |
+| 2 | **IR3 second write** utilisait mauvais flag | FLAG_IR3_SAT pas set correctement | Utilise `set_ir()` avec FLAG_IR3_SAT |
+| 3 | **IR3/push_sxy ordre** ne matchait pas DuckStation | Séquence RTPS légèrement différente | Réordonné pour matcher DuckStation |
+
+### ✅ FIX: DMA2 GPU→RAM (2026-02-14)
+
+**Bug:** Les transferts DMA2 direction GPU→RAM (dir=0, GPUREAD) étaient **silencieusement ignorés**.
+1040 transferts par frame jamais exécutés.
+
+**Impact:** Pipeline de textures VRAM cassé. Le jeu lit des textures/palettes depuis le GPU
+via DMA2 GPUREAD et les copies échouaient silencieusement.
+
+**Fix:** Implémenté les transferts GPU→RAM dans `bus.cpp` via `gpu.read_data()` (GPUREAD port).
+
+### ✅ FIX: DIV/DIVU edge cases CPU (2026-02-14)
+
+| Case | Avant (bug) | Après (fix, match hardware) |
+|------|-------------|----------------------------|
+| DIV by zero | Undefined | LO = num>=0 ? -1 : +1, HI = num |
+| DIVU by zero | Undefined | LO = 0xFFFFFFFF, HI = num |
+| DIV overflow (INT32_MIN/-1) | Undefined | LO = INT32_MIN, HI = 0 |
+
+### 🔧 Versions mises à jour
+
+| Fichier | Version |
+|---------|---------|
+| `src/gpu/gpu.cpp` | v7 (even/odd field, PAL/NTSC timing) |
+| `src/gpu/gpu.h` | `even_odd_field_`, constantes PAL/NTSC |
+| `src/gte/gte.cpp` | v8 (lighting rewrite, projection flags, MAC0 overflow) |
+| `src/r3000/cpu.cpp` | DIV/DIVU edge cases fixed |
+| `src/r3000/bus.cpp` | DMA2 GPU→RAM transfers, SIO0 RXRDY/IRQ split (v12) |
+
+---
+
+## 📌 ÉTAT PRÉCÉDENT (2026-02-14) - VERSION v5: RÉÉCRITURE COMPLÈTE GTE
 
 **À TESTER:** Relancer UE5 et vérifier si le demo mode fonctionne.
 
@@ -642,7 +885,7 @@ Les fichiers suivants ont des marqueurs de version au démarrage:
 |---------|------------------|------------------|
 | `src/emu/core.cpp` | `[CORE] R3000-Emu core vX` | v6 |
 | `src/r3000/cpu.cpp` | `[CPU] CPU source vX` | v6 |
-| `src/r3000/bus.cpp` | `[BUS] BUS source vX` | **v9** |
+| `src/r3000/bus.cpp` | `[BUS] BUS source vX` | **v11** |
 | `src/gpu/gpu.cpp` | `[GPU] GPU source vX` | v6 |
 | `src/cdrom/cdrom.cpp` | `[CD] CDROM source vX` | v6 |
 
@@ -652,6 +895,9 @@ Les fichiers suivants ont des marqueurs de version au démarrage:
 - **v7**: VSync rescue (deliver_events_for_class pour VBlank)
 - **v8**: Force ALL events ready (scan table, force BUSY→READY)
 - **v9**: Log rescued events (log class/spec pour identifier le bon événement)
+- **v10**: Fix bounds check
+- **v11**: SIO0 CTRL reset/acknowledge, STAT IRQ bit fix (bit 8→9)
+- **v12**: SIO0 RXRDY/IRQ flag separation (ROOT CAUSE fix for stuck after logo)
 
 **Quand modifier la version**:
 1. Après chaque fix appliqué aux sources

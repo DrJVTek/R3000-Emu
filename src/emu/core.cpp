@@ -359,6 +359,12 @@ r3000::Cpu* Core::cpu()
     return cpu_.get();
 }
 
+void Core::set_pad_buttons(uint16_t v)
+{
+    if (bus_)
+        bus_->set_pad_buttons(v);
+}
+
 void Core::set_cycle_multiplier(uint32_t n)
 {
     if (cpu_)

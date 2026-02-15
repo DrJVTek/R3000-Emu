@@ -4,8 +4,12 @@
 
 #include "Logging/LogMacros.h"
 #include "Containers/StringConv.h"
+#include "EnhancedInputSubsystems.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "InputAction.h"
+#include "InputMappingContext.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -237,13 +241,17 @@ public:
                 const uint32 IStat = Bus ? Bus->irq_stat_raw() : 0u;
                 const uint32 IMask = Bus ? Bus->irq_mask_raw() : 0u;
 
+                const uint32 COP0Status = Cpu ? Cpu->cop0(12) : 0u;
+                const uint32 COP0Cause = Cpu ? Cpu->cop0(13) : 0u;
                 emu::logf(emu::LogLevel::info, "CORE",
-                    "Worker PC sample steps=%llu pc=0x%08X total_cycles=%llu i_stat=0x%08X i_mask=0x%08X",
+                    "Worker PC sample steps=%llu pc=0x%08X total_cycles=%llu i_stat=0x%08X i_mask=0x%08X sr=0x%08X cause=0x%08X",
                     (unsigned long long)LocalSteps,
                     (unsigned)Core->pc(),
                     (unsigned long long)LocalTotalCycles,
                     (unsigned)IStat,
-                    (unsigned)IMask);
+                    (unsigned)IMask,
+                    (unsigned)COP0Status,
+                    (unsigned)COP0Cause);
 
                 const uint64 StepInterval = static_cast<uint64>(FMath::Max(Owner->GetPcSampleIntervalSteps(), 1));
                 while (NextPcSampleAt != 0 && NextPcSampleAt <= LocalSteps)
@@ -334,9 +342,42 @@ static void UELogCallback(emu::LogLevel Level, const char* Tag, const char* Msg,
         std::fprintf(Files->sys, "[%hs] %hs\n", Tag, Msg);
 }
 
+static const TCHAR* kPSXInputDir = TEXT("/Game/PSX/Input/");
+
 UR3000EmuComponent::UR3000EmuComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
+
+    // Load default PSX input assets created by scripts/ue5_create_psx_inputs.py
+    struct FPadDefault { TObjectPtr<UInputAction>& Slot; const TCHAR* Name; };
+    FPadDefault Defaults[] = {
+        { IA_PadSelect,   TEXT("IA_PadSelect")   },
+        { IA_PadL3,       TEXT("IA_PadL3")       },
+        { IA_PadR3,       TEXT("IA_PadR3")       },
+        { IA_PadStart,    TEXT("IA_PadStart")    },
+        { IA_PadUp,       TEXT("IA_PadUp")       },
+        { IA_PadRight,    TEXT("IA_PadRight")    },
+        { IA_PadDown,     TEXT("IA_PadDown")     },
+        { IA_PadLeft,     TEXT("IA_PadLeft")     },
+        { IA_PadL2,       TEXT("IA_PadL2")       },
+        { IA_PadR2,       TEXT("IA_PadR2")       },
+        { IA_PadL1,       TEXT("IA_PadL1")       },
+        { IA_PadR1,       TEXT("IA_PadR1")       },
+        { IA_PadTriangle, TEXT("IA_PadTriangle") },
+        { IA_PadCircle,   TEXT("IA_PadCircle")   },
+        { IA_PadCross,    TEXT("IA_PadCross")    },
+        { IA_PadSquare,   TEXT("IA_PadSquare")   },
+    };
+
+    for (auto& D : Defaults)
+    {
+        FString Path = FString(kPSXInputDir) + D.Name + TEXT(".") + D.Name;
+        D.Slot = Cast<UInputAction>(StaticLoadObject(UInputAction::StaticClass(), nullptr, *Path));
+    }
+
+    // Load default InputMappingContext
+    static const FString IMCPath = FString(kPSXInputDir) + TEXT("IMC_PSXPad.IMC_PSXPad");
+    PadMappingContext = Cast<UInputMappingContext>(StaticLoadObject(UInputMappingContext::StaticClass(), nullptr, *IMCPath));
 }
 
 void UR3000EmuComponent::UpdateStepsExecuted(uint64 Steps, uint64 Cycles)
@@ -739,6 +780,9 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         return;
     }
 
+    // Poll UE5 input and forward to PS1 controller (works in both threaded and non-threaded modes)
+    PollPadInput();
+
     // THREADED MODE: Worker thread handles emulation, we just monitor stats
     if (bThreadedMode && EmuWorker_)
     {
@@ -1059,5 +1103,106 @@ void UR3000EmuComponent::PutcharCB(char Ch, void* User)
     {
         Self->PutcharLineBuf_.AppendChar(static_cast<TCHAR>(Ch));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Setup Enhanced Input mapping context for PS1 controller
+// ---------------------------------------------------------------------------
+void UR3000EmuComponent::SetupPadInput()
+{
+    if (bPadMappingAdded_ || !PadMappingContext) return;
+
+    APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+    if (!PC || !PC->GetLocalPlayer()) return;
+
+    UEnhancedInputLocalPlayerSubsystem* EIS =
+        ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer());
+    if (EIS)
+    {
+        EIS->AddMappingContext(PadMappingContext, 0);
+        UE_LOG(LogR3000Emu, Log, TEXT("PS1 pad mapping context added via Enhanced Input"));
+    }
+    else
+    {
+        UE_LOG(LogR3000Emu, Warning, TEXT("Enhanced Input subsystem not available, using direct IsInputKeyDown"));
+    }
+
+    bPadMappingAdded_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Poll gamepad input and forward to PS1 controller (SIO0)
+// Requires a GameMode with a DefaultPawn so PlayerController receives input.
+// Run scripts/ue5_create_psx_gamemode.py then set GameMode Override in World Settings.
+// ---------------------------------------------------------------------------
+void UR3000EmuComponent::PollPadInput()
+{
+    if (!Core_) { return; }
+
+    if (!bPadMappingAdded_)
+        SetupPadInput();
+
+    APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+    if (!PC)
+    {
+        static bool bWarnedNoPC = false;
+        if (!bWarnedNoPC)
+        {
+            UE_LOG(LogR3000Emu, Warning, TEXT("PadInput: No PlayerController found"));
+            bWarnedNoPC = true;
+        }
+        return;
+    }
+
+    // PS1 digital pad button bits (active-low: 0=pressed, 1=released)
+    uint16_t Buttons = 0xFFFF;
+
+    auto Check = [&](int Bit, FKey Key)
+    {
+        if (PC->IsInputKeyDown(Key))
+            Buttons &= ~(1u << Bit);
+    };
+
+    Check(0,  EKeys::Gamepad_Special_Left);         // Select  (View)
+    Check(1,  EKeys::Gamepad_LeftThumbstick);        // L3
+    Check(2,  EKeys::Gamepad_RightThumbstick);       // R3
+    Check(3,  EKeys::Gamepad_Special_Right);         // Start   (Menu)
+    Check(4,  EKeys::Gamepad_DPad_Up);               // Up
+    Check(5,  EKeys::Gamepad_DPad_Right);            // Right
+    Check(6,  EKeys::Gamepad_DPad_Down);             // Down
+    Check(7,  EKeys::Gamepad_DPad_Left);             // Left
+    Check(8,  EKeys::Gamepad_LeftTrigger);           // L2      (LT)
+    Check(9,  EKeys::Gamepad_RightTrigger);          // R2      (RT)
+    Check(10, EKeys::Gamepad_LeftShoulder);          // L1      (LB)
+    Check(11, EKeys::Gamepad_RightShoulder);         // R1      (RB)
+    Check(12, EKeys::Gamepad_FaceButton_Top);        // Triangle (Y)
+    Check(13, EKeys::Gamepad_FaceButton_Right);      // Circle   (B)
+    Check(14, EKeys::Gamepad_FaceButton_Bottom);     // Cross    (A)
+    Check(15, EKeys::Gamepad_FaceButton_Left);       // Square   (X)
+
+    // One-time log to confirm polling is active
+    {
+        static bool bFirstPoll = true;
+        if (bFirstPoll)
+        {
+            UE_LOG(LogR3000Emu, Log, TEXT("PadInput: polling active, Pawn=%s"),
+                PC->GetPawn() ? *PC->GetPawn()->GetName() : TEXT("(none)"));
+            bFirstPoll = false;
+        }
+    }
+
+    // Debug: log when any button is pressed (throttled)
+    if (Buttons != 0xFFFF)
+    {
+        static double LastLogTime = 0.0;
+        const double Now = FPlatformTime::Seconds();
+        if (Now - LastLogTime > 0.5)
+        {
+            UE_LOG(LogR3000Emu, Log, TEXT("PadInput: buttons=0x%04X"), Buttons);
+            LastLogTime = Now;
+        }
+    }
+
+    Core_->set_pad_buttons(Buttons);
 }
 

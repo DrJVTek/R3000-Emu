@@ -94,6 +94,9 @@ class Core
     r3000::Bus* bus();
     r3000::Cpu* cpu();
 
+    // Controller input (thread-safe, forwarded to Bus).
+    void set_pad_buttons(uint16_t v);
+
     // Cycle multiplier for timing accuracy (1=simplified, 2=approximate real R3000)
     void set_cycle_multiplier(uint32_t n);
 

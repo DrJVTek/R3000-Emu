@@ -308,8 +308,10 @@ void UR3000GpuComponent::RebuildMesh()
 
     if (NumCmds == 0)
     {
-        MeshComp_->ClearAllMeshSections();
-        LastTriCount_ = 0;
+        // Don't clear the mesh on empty frames — keep the previous frame visible.
+        // PS1 games often skip GPU commands on some VBlanks (e.g. Ridge Racer
+        // draws 2 frames then skips 1 in 30fps interlaced mode). Clearing
+        // the mesh on empty frames causes visible flickering.
         return;
     }
 

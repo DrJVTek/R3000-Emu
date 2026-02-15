@@ -417,6 +417,54 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
         );
     }
 
+    // Temporary exception trace
+    if (exc_trace_armed_ && exc_trace_count_ < kExcTraceMax)
+    {
+        ++exc_trace_count_;
+        emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+            "EXCEPTION code=%u PC=0x%08X EPC=0x%08X Status=0x%08X Cause=0x%08X BD=%d i_stat=0x%04X i_mask=0x%04X",
+            code, pc_of_fault, epc, cop0_[COP0_STATUS], cop0_[COP0_CAUSE], in_delay_slot,
+            (unsigned)(bus_.irq_stat_raw() & 0xFFFFu), (unsigned)(bus_.irq_mask_raw() & 0xFFFFu));
+        // Start PC logging for this exception (the critical one)
+        if (epc >= 0xBFC00000u)
+        {
+            exc_trace_pc_log_ = 1;
+            // Dump instructions at key handler addresses
+            Bus::MemFault mf2{};
+            for (uint32_t addr : {0x6D88u, 0x6D8Cu, 0x6D90u, 0x6D94u, 0x6D98u, 0x6D9Cu, 0x6DA0u, 0x6DA4u,
+                                  0x1A00u, 0x1A04u, 0x1A08u, 0x1A0Cu, 0x1A10u, 0x1A14u, 0x1A18u, 0x1A1Cu,
+                                  0x4470u, 0x4474u, 0x4478u, 0x447Cu, 0x4480u, 0x4484u, 0x4488u, 0x448Cu,
+                                  0x4490u, 0x45C0u, 0x45C4u, 0x45C8u, 0x45CCu, 0x45D0u, 0x45D4u, 0x45D8u})
+            {
+                uint32_t w = 0;
+                bus_.read_u32(addr, w, mf2);
+                emu::logf(emu::LogLevel::warn, "EXC-DISASM", "RAM[0x%04X] = 0x%08X", addr, w);
+            }
+            // Dump SysEnqIntRP chain heads and nodes
+            for (int prio = 0; prio < 4; ++prio)
+            {
+                uint32_t head = 0;
+                Bus::MemFault mf{};
+                bus_.read_u32(0x100u + prio * 4u, head, mf);
+                emu::logf(emu::LogLevel::warn, "EXC-CHAIN",
+                    "SysEnqIntRP[%d] head=0x%08X", prio, head);
+                // Walk chain (max 8 nodes)
+                uint32_t node_addr = head;
+                for (int j = 0; j < 8 && node_addr != 0; ++j)
+                {
+                    uint32_t next = 0, func = 0, verify = 0;
+                    bus_.read_u32(node_addr & 0x1FFFFFFFu, next, mf);
+                    bus_.read_u32((node_addr + 4u) & 0x1FFFFFFFu, func, mf);
+                    bus_.read_u32((node_addr + 8u) & 0x1FFFFFFFu, verify, mf);
+                    emu::logf(emu::LogLevel::warn, "EXC-CHAIN",
+                        "  node[%d]=0x%08X next=0x%08X func=0x%08X verify=0x%08X",
+                        j, node_addr, next, func, verify);
+                    node_addr = next;
+                }
+            }
+        }
+    }
+
     // Les branches pending sont annulées quand on prend une exception.
     branch_pending_ = false;
     branch_delay_slots_ = 0;
@@ -454,6 +502,55 @@ Cpu::StepResult Cpu::step()
     // 4) Commit  : r0=0, et si un branch "pending" arrive à échéance, on applique PC=target
     StepResult r;
     r.pc = pc_;
+
+    // Arm exception trace when B(0x4B) StartPAD is called (right before the critical exception)
+    if (!exc_trace_armed_ && pc_ == 0xB0u && (gpr_[9] & 0xFFu) == 0x4Bu)
+    {
+        exc_trace_armed_ = 1;
+        exc_trace_pc_log_ = 0;
+        emu::logf(emu::LogLevel::warn, "EXC-TRACE", "ARMED at B(0x4B) StartPAD, Status=0x%08X",
+            cop0_[COP0_STATUS]);
+    }
+
+    // After the critical exception fires, log PC trace for 2000 instructions
+    if (exc_trace_pc_log_ > 0 && exc_trace_pc_log_ <= 2000)
+    {
+        // Log at stuck loop PC to see s1 register
+        if (pc_ == 0x000045C4u || pc_ == 0x000045D0u || pc_ == 0x000045D4u)
+        {
+            if (exc_trace_pc_log_ < 1500)
+            {
+                emu::logf(emu::LogLevel::warn, "EXC-STUCK",
+                    "[%d] PC=0x%08X s1=0x%08X t4=0x%08X STAT=0x%04X",
+                    exc_trace_pc_log_, pc_, gpr_[17], gpr_[12],
+                    (unsigned)bus_.sio0_stat_debug());
+            }
+        }
+        else if ((exc_trace_pc_log_ % 10) == 1 || exc_trace_pc_log_ <= 20)
+        {
+            emu::logf(emu::LogLevel::warn, "EXC-PC",
+                "[%d] PC=0x%08X Status=0x%08X ra=0x%08X s1=0x%08X a0=0x%08X",
+                exc_trace_pc_log_, pc_, cop0_[COP0_STATUS], gpr_[31], gpr_[17], gpr_[4]);
+        }
+        ++exc_trace_pc_log_;
+    }
+
+    // Trace BIOS vector calls (A0/B0/C0) after arming - exclude putchar B(0x3D)
+    if (exc_trace_armed_ && exc_trace_count_ < kExcTraceMax &&
+        (pc_ == 0xA0u || pc_ == 0xB0u || pc_ == 0xC0u))
+    {
+        const uint32_t fn = gpr_[9] & 0xFFu;
+        const int is_putchar = (pc_ == 0xB0u && fn == 0x3Du) ? 1 : 0;
+        if (!is_putchar)
+        {
+            ++exc_trace_count_;
+            emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+                "BIOS %c(0x%02X) ra=0x%08X Status=0x%08X a0=0x%08X a1=0x%08X",
+                (pc_ == 0xA0u ? 'A' : (pc_ == 0xB0u ? 'B' : 'C')),
+                fn, gpr_[31], cop0_[COP0_STATUS],
+                gpr_[4], gpr_[5]);
+        }
+    }
 
     // Détection simple de boucle (même PC répété).
     if (pc_ == spin_pc_)
@@ -3817,6 +3914,15 @@ Cpu::StepResult Cpu::step()
                 else if (rs_field == 0x04)
                 {
                     // MTC0 rt, rd
+                    // Temporary trace: log writes to COP0.Status (reg 12)
+                    if (exc_trace_armed_ && (d & 31u) == COP0_STATUS && exc_trace_count_ < kExcTraceMax)
+                    {
+                        ++exc_trace_count_;
+                        emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+                            "MTC0 Status PC=0x%08X old=0x%08X new=0x%08X (IEc %d->%d)",
+                            r.pc, cop0_[COP0_STATUS], gpr_[t],
+                            (int)(cop0_[COP0_STATUS] & 1), (int)(gpr_[t] & 1));
+                    }
                     cop0_[d & 31u] = gpr_[t];
                 }
                 else if (rs_field == 0x10)
@@ -3827,8 +3933,18 @@ Cpu::StepResult Cpu::step()
                         // RFE: restore mode/IE stack (simplifié).
                         // status[5:0] = status[5:0] >> 2
                         uint32_t st = cop0_[COP0_STATUS];
+                        uint32_t st_before = st;
                         st = (st & ~0x3Fu) | ((st >> 2) & 0x3Fu);
                         cop0_[COP0_STATUS] = st;
+
+                        // Temporary exception trace
+                        if (exc_trace_armed_ && exc_trace_count_ < kExcTraceMax)
+                        {
+                            ++exc_trace_count_;
+                            emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+                                "RFE PC=0x%08X Status 0x%08X -> 0x%08X (IEc=%d->%d)",
+                                r.pc, st_before, st, (int)(st_before & 1), (int)(st & 1));
+                        }
                     }
                     else
                     {

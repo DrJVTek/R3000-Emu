@@ -13,6 +13,8 @@ public class R3000EmuRuntime : ModuleRules
             "Core",
             "CoreUObject",
             "Engine",
+            "InputCore",
+            "EnhancedInput",
             "AudioMixer",
             "ProceduralMeshComponent",
             "RHI",

@@ -12,6 +12,8 @@
 
 #include "R3000EmuComponent.generated.h"
 
+class UInputAction;
+class UInputMappingContext;
 class UR3000AudioComponent;
 class UR3000GpuComponent;
 
@@ -168,6 +170,61 @@ class UR3000EmuComponent : public UActorComponent
     UPROPERTY(BlueprintAssignable, Category = "R3000Emu")
     FOnBiosPrint OnBiosPrint;
 
+    // --- PS1 Controller Input (Enhanced Input) ---
+    // Assign a UInputMappingContext asset that maps keys/gamepad to the InputActions below.
+    // Create InputAction assets (bool type) in the editor and assign them here.
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputMappingContext> PadMappingContext;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadCross;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadCircle;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadTriangle;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadSquare;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadUp;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadDown;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadLeft;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadRight;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadStart;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadSelect;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadL1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadR1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadL2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadR2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadL3;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Input")
+    TObjectPtr<UInputAction> IA_PadR3;
+
     // Routing struct for emu::logf callback (tag → file).
     struct EmuLogFiles
     {
@@ -200,6 +257,9 @@ class UR3000EmuComponent : public UActorComponent
 
     bool BootBiosInternal();
     void StopWorkerThread();
+    void SetupPadInput();
+    void PollPadInput();
+    bool bPadMappingAdded_{false};
 
     emu::Core* Core_{nullptr};
     TAtomic<uint64> StepsExecuted_{0};

@@ -33,7 +33,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::info, "BUS", "BUS source v10 (fix_bounds_check)");
+    emu::logf(emu::LogLevel::info, "BUS", "BUS source v12 (sio0_rxrdy_irq_split)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -153,25 +153,57 @@ static constexpr uint32_t kRamWindow = 0x00800000u; // 8 MB
 // ------------------ SIO0 (minimal controller) ------------------
 uint16_t Bus::sio0_stat_value() const
 {
-    uint16_t stat = (uint16_t)(sio0_stat_ | 0x00C5u); // TXRDY|TXEMPTY|DSR|CTS
+    // Base: TX Ready 1 (bit 0) | TX Ready 2 (bit 2)
+    uint16_t stat = (uint16_t)(sio0_stat_ | 0x0005u);
+    // Bit 7: /ACK input level. HIGH (1) = idle, LOW (0) = ACK asserted.
+    // When sio0_ack_countdown_ > 0, ACK is asserted (LOW/0).
+    // When countdown is 0, ACK is idle (HIGH/1).
+    if (sio0_ack_countdown_ == 0)
+        stat |= 0x0080u; // /ACK HIGH (idle)
+    // else: /ACK LOW (asserted) - bit 7 stays 0
+
     if (sio0_rx_ready_)
-    {
-        stat |= 0x0002u; // RXRDY
-        stat |= 0x0100u; // IRQ
-    }
-    else
-    {
-        stat &= static_cast<uint16_t>(~0x0002u & 0xFFFFu);
-        stat &= static_cast<uint16_t>(~0x0100u & 0xFFFFu);
-    }
+        stat |= 0x0002u; // RXRDY (bit 1)
+    if (sio0_irq_flag_)
+        stat |= 0x0200u; // IRQ flag (bit 9)
     return stat;
 }
+
+uint16_t Bus::sio0_stat_debug() const { return sio0_stat_value(); }
 
 uint16_t Bus::sio0_read_data()
 {
     uint16_t v = sio0_rx_ready_ ? (uint16_t)sio0_rx_data_ : 0x00FFu;
     sio0_rx_ready_ = 0;
     return v;
+}
+
+void Bus::sio0_write_ctrl(uint16_t v)
+{
+    sio0_ctrl_ = v;
+
+    // Bit 6 (0x0040) = Reset: resets most JOY registers
+    if (v & 0x0040u)
+    {
+        sio0_tx_phase_ = 0u;
+        sio0_rx_ready_ = 0;
+        sio0_irq_flag_ = 0;
+        sio0_rx_data_  = 0xFFu;
+        sio0_stat_     = 0x0005u; // TX Ready flags
+        sio0_mode_     = 0;
+        sio0_baud_     = 0;
+        sio0_ctrl_     = 0;       // reset clears itself
+        sio0_ack_countdown_ = 0;
+    }
+
+    // Bit 4 (0x0010) = Acknowledge: clears STAT IRQ flag (bit 9) only.
+    // IMPORTANT: does NOT clear RXRDY (bit 1). On real PS1, the BIOS pad handler
+    // writes CTRL ACK between bytes to clear the IRQ flag while still expecting
+    // to read the response byte via RXRDY polling.
+    if (v & 0x0010u)
+    {
+        sio0_irq_flag_ = 0;
+    }
 }
 
 void Bus::sio0_write_data(uint8_t v)
@@ -196,15 +228,24 @@ void Bus::sio0_write_data(uint8_t v)
             sio0_tx_phase_ = 3u;
             break;
         case 3:
-            // Buttons low
-            resp = 0xFFu;
+        {
+            // Buttons low byte: Select L3 R3 Start Up Right Down Left
+            const uint16_t btns = pad_buttons_.load(std::memory_order_relaxed);
+            resp = (uint8_t)(btns & 0xFF);
+            if (btns != 0xFFFFu)
+                emu::logf(emu::LogLevel::debug, "SIO0", "PAD read lo=0x%02X hi=0x%02X (buttons=0x%04X)",
+                    (btns & 0xFF), (btns >> 8), btns);
             sio0_tx_phase_ = 4u;
             break;
+        }
         case 4:
-            // Buttons high
-            resp = 0xFFu;
+        {
+            // Buttons high byte: L2 R2 L1 R1 Triangle Circle Cross Square
+            const uint16_t btns = pad_buttons_.load(std::memory_order_relaxed);
+            resp = (uint8_t)(btns >> 8);
             sio0_tx_phase_ = 0u;
             break;
+        }
         default:
             resp = 0xFFu;
             sio0_tx_phase_ = 0u;
@@ -212,8 +253,16 @@ void Bus::sio0_write_data(uint8_t v)
     }
     sio0_rx_data_ = resp;
     sio0_rx_ready_ = 1;
-    // Raise SIO IRQ (bit 7) when a byte is ready.
-    i_stat_ |= (1u << 7);
+    sio0_irq_flag_ = 1;
+    // Start ACK sequence: controller asserts /ACK for ~100 cycles after receiving a byte.
+    // The BIOS pad handler polls STAT bit 7 to detect ACK. If we never assert ACK (bit 7 LOW),
+    // the BIOS thinks no controller is connected and enters a blocking WaitEvent path.
+    // After the ACK period, we raise SIO0 IRQ (I_STAT bit 7).
+    // Don't ACK the last byte (phase 0 = transfer complete, no more bytes expected).
+    if (sio0_tx_phase_ != 0u)
+        sio0_ack_countdown_ = 88; // ~88 CPU cycles ≈ controller ACK pulse
+    else
+        sio0_ack_countdown_ = 0; // last byte, no ACK
 }
 
 // ================== READ FUNCTIONS ==================
@@ -643,10 +692,10 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
                 sio0_mode_ = (uint16_t)((sio0_mode_ & 0x00FFu) | ((uint16_t)v << 8));
                 break;
             case 0xA:
-                sio0_ctrl_ = (uint16_t)((sio0_ctrl_ & 0xFF00u) | v);
+                sio0_write_ctrl((uint16_t)((sio0_ctrl_ & 0xFF00u) | v));
                 break;
             case 0xB:
-                sio0_ctrl_ = (uint16_t)((sio0_ctrl_ & 0x00FFu) | ((uint16_t)v << 8));
+                sio0_write_ctrl((uint16_t)((sio0_ctrl_ & 0x00FFu) | ((uint16_t)v << 8)));
                 break;
             case 0xE:
                 sio0_baud_ = (uint16_t)((sio0_baud_ & 0xFF00u) | v);
@@ -740,7 +789,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
                 sio0_write_data((uint8_t)(v & 0xFFu));
                 break;
             case 0x8: sio0_mode_ = v; break;  // MODE
-            case 0xA: sio0_ctrl_ = v; break;  // CTRL
+            case 0xA: sio0_write_ctrl(v); break;  // CTRL
             case 0xE: sio0_baud_ = v; break;  // BAUD
             case 0x4: sio0_stat_ = v; break;  // STAT (rarely written)
             default: break;
@@ -1472,6 +1521,21 @@ void Bus::tick(uint32_t cycles)
     if (spu_)
     {
         spu_->tick_cycles(cycles);
+    }
+
+    // Tick SIO0 ACK countdown
+    if (sio0_ack_countdown_ > 0)
+    {
+        if (cycles >= sio0_ack_countdown_)
+        {
+            sio0_ack_countdown_ = 0;
+            // ACK period ended → raise SIO0 IRQ (I_STAT bit 7)
+            i_stat_ |= (1u << 7);
+        }
+        else
+        {
+            sio0_ack_countdown_ -= cycles;
+        }
     }
 
     // Tick GPU VBlank
