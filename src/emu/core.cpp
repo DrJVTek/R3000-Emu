@@ -362,7 +362,19 @@ r3000::Cpu* Core::cpu()
 void Core::set_pad_buttons(uint16_t v)
 {
     if (bus_)
+    {
         bus_->set_pad_buttons(v);
+        // Diagnostic: confirm buttons reach the bus (first few non-idle calls)
+        if (v != 0xFFFFu)
+        {
+            static uint32_t log_count = 0;
+            if (log_count < 10)
+            {
+                emu::logf(emu::LogLevel::info, "CORE", "set_pad_buttons(0x%04X) bus=%p", v, (void*)bus_.get());
+                ++log_count;
+            }
+        }
+    }
 }
 
 void Core::set_cycle_multiplier(uint32_t n)

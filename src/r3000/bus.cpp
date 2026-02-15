@@ -233,7 +233,7 @@ void Bus::sio0_write_data(uint8_t v)
             const uint16_t btns = pad_buttons_.load(std::memory_order_relaxed);
             resp = (uint8_t)(btns & 0xFF);
             if (btns != 0xFFFFu)
-                emu::logf(emu::LogLevel::debug, "SIO0", "PAD read lo=0x%02X hi=0x%02X (buttons=0x%04X)",
+                emu::logf(emu::LogLevel::info, "SIO0", "PAD read lo=0x%02X hi=0x%02X (buttons=0x%04X)",
                     (btns & 0xFF), (btns >> 8), btns);
             sio0_tx_phase_ = 4u;
             break;

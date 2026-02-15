@@ -1154,6 +1154,11 @@ void UR3000EmuComponent::PollPadInput()
         return;
     }
 
+    // Disable default pawn movement so gamepad inputs go to PS1 emulator only.
+    // Without this, the DefaultPawn captures A=jump, stick=fly, etc.
+    PC->SetIgnoreMoveInput(true);
+    PC->SetIgnoreLookInput(true);
+
     // PS1 digital pad button bits (active-low: 0=pressed, 1=released)
     uint16_t Buttons = 0xFFFF;
 
