@@ -77,6 +77,12 @@ struct FrameDrawList
     std::vector<DrawCmd> cmds;
     uint32_t frame_id{0};
 
+    // Snapshot of GPU state at frame-swap time.
+    // UE5 MUST use these instead of reading live GPU state to avoid
+    // race conditions (display_y / clip / offset change mid-frame).
+    DrawEnv draw_env{};
+    DisplayConfig display{};
+
     FrameDrawList() { cmds.reserve(4096); }
     void clear() { cmds.clear(); }
     void push(const DrawCmd& c) { cmds.push_back(c); }
@@ -167,6 +173,12 @@ class Gpu
 
     // Total VBlank count since init
     uint32_t frame_count() const { return frame_count_; }
+
+    /// Enable/disable draw area clipping for push_triangle.
+    /// When disabled (VR mode), all primitives pass through regardless of clip region.
+    /// Default: true (standard PS1 behavior).
+    void set_clip_to_draw_area(bool enabled) { clip_to_draw_area_ = enabled; }
+    bool clip_to_draw_area() const { return clip_to_draw_area_; }
 
     // Get previous frame stats (saved before reset, for stuck detection)
     const FrameStats& prev_frame_stats() const { return prev_frame_stats_; }
@@ -276,6 +288,9 @@ class Gpu
 
     // VRAM write tracking (bumped on fill, cpu→vram, vram→vram)
     uint32_t vram_write_seq_{0};
+
+    // Draw area clipping toggle (default: on = standard PS1; off = VR mode)
+    bool clip_to_draw_area_{true};
 
     uint32_t vblank_div_{0};
     bool in_vblank_{false};

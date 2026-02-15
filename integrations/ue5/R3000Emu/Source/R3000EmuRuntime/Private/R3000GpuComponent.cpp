@@ -349,15 +349,12 @@ void UR3000GpuComponent::RebuildMesh()
     const FProcMeshTangent FaceTangent(0.0f, 1.0f, 0.0f);
 
     // PS1→UE5 coordinate transform
-    // Vertex coords are in drawing buffer space (draw offset already applied in GPU).
-    // For centering: use DISPLAY rect (GP1(05) + width/height) - that's what the TV shows.
-    // Display start (display_x, display_y) + half size = center of visible region.
-    const gpu::DrawEnv& Env = Gpu_->draw_env();
-    const gpu::DisplayConfig& Disp = Gpu_->display_config();
-    const float DispCenterX = static_cast<float>(Disp.display_x) + 0.5f * static_cast<float>(Disp.width());
-    const float DispCenterY = static_cast<float>(Disp.display_y) + 0.5f * static_cast<float>(Disp.height());
-    const float OriginX = bCenterDisplay ? DispCenterX : static_cast<float>(Env.clip_x1);
-    const float OriginY = bCenterDisplay ? DispCenterY : static_cast<float>(Env.clip_y1);
+    // Vertices are now screen-relative (draw_offset subtracted in GPU).
+    // Both double-buffer halves map to (0..width, 0..height).
+    // Origin = center of PS1 screen resolution for centering.
+    const gpu::DisplayConfig& Disp = DrawList.display;
+    const float OriginX = 0.5f * static_cast<float>(Disp.width());
+    const float OriginY = 0.5f * static_cast<float>(Disp.height());
 
     // Compute effective scale: uniform HD or manual
     const float EffScale = GetEffectivePixelScale();

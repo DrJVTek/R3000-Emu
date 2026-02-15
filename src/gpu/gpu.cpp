@@ -171,10 +171,38 @@ void Gpu::push_triangle(
     int16_t x2, int16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
     uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth)
 {
+    // Triangle bounding box (always computed for large-primitive rejection)
+    const int16_t min_x = (std::min)({x0, x1, x2});
+    const int16_t max_x = (std::max)({x0, x1, x2});
+    const int16_t min_y = (std::min)({y0, y1, y2});
+    const int16_t max_y = (std::max)({y0, y1, y2});
+
+    // PS1 rejects "too large" primitives (>1023 pixels span in any axis).
+    // Always active — prevents degenerate triangles from GTE overflow.
+    if ((max_x - min_x) > 1023 || (max_y - min_y) > 1023)
+        return;
+
+    // Draw area clipping (GP0 E3h/E4h). Skipped in VR mode so that
+    // off-screen polygons are available for full 3D reconstruction.
+    if (clip_to_draw_area_)
+    {
+        const int16_t cx1 = (int16_t)draw_env_.clip_x1;
+        const int16_t cy1 = (int16_t)draw_env_.clip_y1;
+        const int16_t cx2 = (int16_t)draw_env_.clip_x2;
+        const int16_t cy2 = (int16_t)draw_env_.clip_y2;
+        if (max_x < cx1 || min_x > cx2 || max_y < cy1 || min_y > cy2)
+            return;
+    }
+
+    // Subtract draw_offset: vertices arrive with VRAM-absolute coords (offset baked in).
+    // We convert to screen-relative coords so both double-buffer halves
+    // (Y=0 and Y=240) map to the same position. We render 3D, not VRAM.
+    const int16_t ox = draw_env_.offset_x;
+    const int16_t oy = draw_env_.offset_y;
     DrawCmd cmd{};
-    cmd.v[0] = {x0, y0, r0, g0, b0, u0, v0};
-    cmd.v[1] = {x1, y1, r1, g1, b1, u1, v1};
-    cmd.v[2] = {x2, y2, r2, g2, b2, u2, v2};
+    cmd.v[0] = {(int16_t)(x0 - ox), (int16_t)(y0 - oy), r0, g0, b0, u0, v0};
+    cmd.v[1] = {(int16_t)(x1 - ox), (int16_t)(y1 - oy), r1, g1, b1, u1, v1};
+    cmd.v[2] = {(int16_t)(x2 - ox), (int16_t)(y2 - oy), r2, g2, b2, u2, v2};
     cmd.clut = clut;
     cmd.texpage = texpage;
     cmd.flags = flags;
@@ -203,14 +231,18 @@ int Gpu::tick_vblank(uint32_t cycles)
         if (display_.interlace)
             status_ ^= (1u << 13);
 
-        // Swap draw lists: current becomes ready for UE5, new list cleared
-        // Lock mutex to prevent race with UE5 reading ready_draw_list()
+        // Swap draw lists every VBlank. Simple and reliable.
+        // Vertices are stored with draw_offset subtracted (screen-relative),
+        // so both double-buffer halves overlap at the same coords.
         {
             std::lock_guard<std::mutex> lock(draw_list_mutex_);
+            draw_lists_[draw_active_].frame_id = frame_count_;
+            draw_lists_[draw_active_].draw_env = draw_env_;
+            draw_lists_[draw_active_].display = display_;
             draw_active_ = 1 - draw_active_;
             draw_lists_[draw_active_].clear();
+            vram_frame_++;
         }
-        vram_frame_++;
 
         // Log frame stats
         frame_count_++;

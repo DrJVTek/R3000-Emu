@@ -898,7 +898,28 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         emu::logf(emu::LogLevel::info, "BUS", "DMA2 GPU dir=%d mode=%d madr=0x%08X bcr=0x%08X",
                             dir, mode, dma_[ch].madr, dma_[ch].bcr);
 
-                        if (dir == 1) // To GPU
+                        if (dir == 0) // From GPU (VRAM→RAM via GPUREAD)
+                        {
+                            if (mode == 0 || mode == 1) // Burst or Block
+                            {
+                                const uint32_t bs = dma_[ch].bcr & 0xFFFF;
+                                const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
+                                const uint32_t words = (mode == 0) ? bs : bs * bc;
+                                uint32_t ma = dma_[ch].madr & 0x1FFFFF;
+                                for (uint32_t i = 0; i < words; ++i)
+                                {
+                                    const uint32_t w = gpu_->mmio_read32(kGpuBase);
+                                    ram_[ma]     = (uint8_t)(w);
+                                    ram_[ma + 1] = (uint8_t)(w >> 8);
+                                    ram_[ma + 2] = (uint8_t)(w >> 16);
+                                    ram_[ma + 3] = (uint8_t)(w >> 24);
+                                    ma = (ma + 4) & 0x1FFFFF;
+                                }
+                                emu::logf(emu::LogLevel::info, "BUS", "DMA2 GPU→RAM: %u words to 0x%05X",
+                                    words, dma_[ch].madr & 0x1FFFFF);
+                            }
+                        }
+                        else // dir == 1: To GPU
                         {
                             if (mode == 0 || mode == 1) // Burst or Block
                             {

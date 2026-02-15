@@ -9,25 +9,28 @@
 
 ---
 
-## 📌 ÉTAT ACTUEL (2026-02-11) - VERSION v4: GTE FIXES APPLIQUÉS
+## 📌 ÉTAT ACTUEL (2026-02-14) - VERSION v5: RÉÉCRITURE COMPLÈTE GTE
 
 **À TESTER:** Relancer UE5 et vérifier si le demo mode fonctionne.
 
-Les logs du dernier test (05:34) montraient:
-- Bounds normaux: `X=[0..320] Y=[15..240]` (plus de -1024 à +1023)
-- 1242 triangles rendus correctement
-- Aucun warning SZ=0 avec v4
+### 🔧 Changements v5 (comparaison avec DuckStation)
 
-DuckStation fonctionne parfaitement → il y a peut-être encore un bug chez nous.
+7 bugs trouvés et corrigés par comparaison directe avec DuckStation:
 
-### 🔴 PROBLÈME: Polygons explosés + Menu debug disparu
+| # | Bug | Impact | Fix |
+|---|-----|--------|-----|
+| 1 | **push_sxy** mettait la nouvelle valeur dans SXYP au lieu de SXY2 | Vertices décalés d'un cran (RTPS cassé) | SXY2=new, SXYP=new |
+| 2 | **MVMVA** hardcodé R*V0+TR | Mauvais résultats si mx/vv/tv != 0 | Support 4×4×4 combinaisons |
+| 3 | **set_mac** ne faisait pas le shift | MAC values fausses pour GPL etc. | MAC = value >> shift |
+| 4 | **SZ** dépendait de sf | sf=0 → SZ non-divisé (trop grand) | Toujours z >> 12 |
+| 5 | **DQA/DQB** manquant | IR0 jamais mis à jour | Ajouté dans RTPS |
+| 6 | **UNR table** valeurs incorrectes | Division approximation fausse | Table exacte DuckStation |
+| 7 | **RTPT** stockage direct au lieu de shift register | SZ0 jamais mis à jour | RTPT appelle rtps_internal 3× |
 
-**Status**: Investigation des "polygons explosés" en mode démo 3D
+### 🔴 PROBLÈME ORIGINAL: Polygons explosés + Menu debug disparu
 
-**Symptômes**:
-1. En mode démo de Ridge Racer, les polygons 3D sont "explosés" (coordonnées énormes)
-2. Le menu debug (grille de déformation) ne s'affiche plus
-3. Les bounds GPU montrent `X=[-1024..1023] Y=[-1024..240] span=1379x1264`
+**Status v4**: Menu debug OK, polygons explosés en mode démo 3D
+**Status v5**: À tester
 
 ### 🔍 ANALYSE DES LOGS (v3)
 
@@ -62,12 +65,16 @@ Les vertices sont transformés avec une matrice de rotation qui produit des **Z 
 | v1 | UNR (buggy) | IR3 | Cassé |
 | v2 | UNR (fixé) | IR3 | Cassé |
 | v3 | UNR (fixé) | MAC3 | Cassé + debug logs |
-| v4 | Simple | MAC3 | **À TESTER** |
+| v4 | Simple | MAC3 | Menu OK, demo cassé |
+| v5 | UNR (DuckStation exact) | z >> 12 | **À TESTER** |
 
-**Version actuelle: v4 (simple_div)**
-- Division simple: `(h << 16) / sz`
-- SZ calculé depuis MAC3 (pas IR3)
-- Table UNR conservée mais non utilisée
+**Version actuelle: v5 (UNR_div, full_MVMVA, fixed_push_sxy)**
+- Division UNR hardware-accurate (table + Newton-Raphson, identique DuckStation)
+- SZ toujours depuis z >> 12 (pas MAC3 >> sf)
+- MVMVA supporte toutes les combinaisons matrice/vecteur/translation
+- push_sxy corrigé (SXY2 = nouvelle valeur, pas ancien SXYP)
+- RTPT utilise rtps_internal() 3× (shift register correct)
+- DQA/DQB depth cueing ajouté
 
 ### ⚠️ FIX APPLIQUÉ: SZ depuis MAC3 (pas IR3)
 

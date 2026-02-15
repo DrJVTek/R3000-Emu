@@ -39,6 +39,28 @@ class Gte
     // Retourne 1 si la commande est reconnue/implémentée, 0 sinon.
     int execute(uint32_t cop2_instruction);
 
+    // FLAG bit constants (public so gte_divide helper can access them)
+    static constexpr uint32_t FLAG_MAC1_OFLOW_POS = 1u << 30;
+    static constexpr uint32_t FLAG_MAC2_OFLOW_POS = 1u << 29;
+    static constexpr uint32_t FLAG_MAC3_OFLOW_POS = 1u << 28;
+    static constexpr uint32_t FLAG_MAC1_OFLOW_NEG = 1u << 27;
+    static constexpr uint32_t FLAG_MAC2_OFLOW_NEG = 1u << 26;
+    static constexpr uint32_t FLAG_MAC3_OFLOW_NEG = 1u << 25;
+    static constexpr uint32_t FLAG_IR1_SAT = 1u << 24;
+    static constexpr uint32_t FLAG_IR2_SAT = 1u << 23;
+    static constexpr uint32_t FLAG_IR3_SAT = 1u << 22;
+    static constexpr uint32_t FLAG_COLOR_R = 1u << 21;
+    static constexpr uint32_t FLAG_COLOR_G = 1u << 20;
+    static constexpr uint32_t FLAG_COLOR_B = 1u << 19;
+    static constexpr uint32_t FLAG_SZ3_OTZ_SAT = 1u << 18;
+    static constexpr uint32_t FLAG_DIV_OFLOW = 1u << 17;
+    static constexpr uint32_t FLAG_SX2_SAT = 1u << 16;
+    static constexpr uint32_t FLAG_SY2_SAT = 1u << 15;
+    static constexpr uint32_t FLAG_IR0_SAT = 1u << 14;
+    static constexpr uint32_t FLAG_MAC0_OFLOW_POS = 1u << 13;
+    static constexpr uint32_t FLAG_MAC0_OFLOW_NEG = 1u << 12;
+    static constexpr uint32_t FLAG_ERROR_BITS = 0x7F87E000u;
+
   private:
     // Index des registres GTE (data/control) pour rendre le code lisible en live.
     // Data regs (0..31):
@@ -130,10 +152,16 @@ class Gte
     int32_t vz(uint32_t n) const;
 
     void push_sxy(int32_t sx, int32_t sy);
-    void push_sz(uint32_t sz);
+    void push_sz(int32_t sz);
+    void push_color(int32_t r, int32_t g, int32_t b, uint8_t code);
 
+    void check_mac_overflow(int idx, int64_t raw);
     void set_mac(int idx, int64_t v);
+    void set_mac_shifted(int idx, int64_t raw, int shift);
     void set_ir(int idx, int32_t v, int lm);
+
+    // Internal RTPS for single vertex (called by both RTPS and RTPT)
+    void rtps_internal(const int32_t V[3], int sf, int lm, bool last);
 
     // Commandes (subset utile pour démarrer "matrices").
     void cmd_mvmva(uint32_t cmd);
@@ -158,6 +186,8 @@ class Gte
     void cmd_dcpl(uint32_t cmd);
     void cmd_dpct(uint32_t cmd);
     void cmd_ncct(uint32_t cmd);
+
+    uint32_t flag_{0};  // Accumulated during command execution
 
     uint32_t data_[32]{};
     uint32_t ctrl_[32]{};

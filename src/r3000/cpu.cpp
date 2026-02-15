@@ -3003,15 +3003,16 @@ Cpu::StepResult Cpu::step()
                             const int32_t den = (int32_t)gpr_[t];
                             if (den == 0)
                             {
-                                // Résultat "unpredictable" sur MIPS. On laisse hi/lo inchangés et
-                                // log.
-                                if (logger_)
-                                    rlog::logger_logf(
-                                        logger_,
-                                        rlog::Level::warn,
-                                        rlog::Category::exec,
-                                        "DIV by zero (HI/LO unchanged)"
-                                    );
+                                // PS1 hardware: div by zero → LO = num>=0 ? -1 : +1, HI = num
+                                lo_ = (num >= 0) ? 0xFFFFFFFFu : 0x00000001u;
+                                hi_ = (uint32_t)num;
+                                break;
+                            }
+                            if (num == (int32_t)0x80000000 && den == -1)
+                            {
+                                // PS1 hardware: INT32_MIN / -1 overflow → LO = INT32_MIN, HI = 0
+                                lo_ = 0x80000000u;
+                                hi_ = 0;
                                 break;
                             }
                             lo_ = (uint32_t)(num / den);
@@ -3026,13 +3027,9 @@ Cpu::StepResult Cpu::step()
                             const uint32_t den = gpr_[t];
                             if (den == 0)
                             {
-                                if (logger_)
-                                    rlog::logger_logf(
-                                        logger_,
-                                        rlog::Level::warn,
-                                        rlog::Category::exec,
-                                        "DIVU by zero (HI/LO unchanged)"
-                                    );
+                                // PS1 hardware: divu by zero → LO = 0xFFFFFFFF, HI = num
+                                lo_ = 0xFFFFFFFFu;
+                                hi_ = num;
                                 break;
                             }
                             lo_ = num / den;
