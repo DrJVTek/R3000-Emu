@@ -122,17 +122,19 @@ class UR3000EmuComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     bool bHleVectors{false};
 
-    // Bus tick batching: tick hardware every N CPU steps instead of every step.
-    // 1 = cycle-accurate (recommended with threaded mode), 32 = fast, 64 = faster but less accurate.
-    // With threaded mode enabled, BusTickBatch=1 is recommended for accurate timing.
+    // Bus tick batching: tick hardware every N cycles instead of every cycle.
+    // 1 = cycle-accurate but slow (~34M tick calls/sec), 32 = fast (~1M tick calls/sec).
+    // 32 is recommended: accurate enough for games, 100%+ speed on modern CPUs.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "1", ClampMax = "128"))
-    int32 BusTickBatch{1};
+    int32 BusTickBatch{32};
 
     // Cycle multiplier: cycles counted per CPU instruction.
-    // 1 = simplified (original), 2 = approximate real R3000, higher = slower game.
-    // If audio is too short compared to real hardware, increase this value.
+    // Real R3000A averages ~2-3 CPI. With CycleMultiplier=1, each instruction =
+    // 1 hardware cycle, so the game runs ~3x more instructions per VBlank than
+    // real hardware → physics/game logic runs too fast.
+    // 2 = recommended (approximate real R3000 average CPI).
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "1", ClampMax = "10"))
-    int32 CycleMultiplier{1};
+    int32 CycleMultiplier{2};
 
     // THREADED MODE (Recommended): Run emulation on a dedicated worker thread.
     // This uses Windows waitable timers for precise PS1 timing (33.8688 MHz).
@@ -260,6 +262,7 @@ class UR3000EmuComponent : public UActorComponent
     void SetupPadInput();
     void PollPadInput();
     bool bPadMappingAdded_{false};
+    bool bPawnInputDisabled_{false};
 
     emu::Core* Core_{nullptr};
     TAtomic<uint64> StepsExecuted_{0};

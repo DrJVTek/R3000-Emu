@@ -554,7 +554,7 @@ void Cdrom::set_log_sinks(const flog::Sink& cd_only, const flog::Sink& combined,
     has_clock_ = 1;
 
     // Version marker to verify rebuild - update this when making changes!
-    emu::logf(emu::LogLevel::info, "CD", "CDROM source v6 (vsync_stuck_detect)");
+    emu::logf(emu::LogLevel::warn, "CD", "CDROM source v6 (vsync_stuck_detect)");
 
     cd_log(
         log_cd_,

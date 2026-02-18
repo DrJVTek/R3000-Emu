@@ -407,7 +407,9 @@ void UR3000GpuComponent::RebuildMesh()
             Normals.Add(FaceNormal);
             Tangents.Add(FaceTangent);
 
-            // Vertex color: PS1 RGB (alpha = 1.0 for opaque, could encode flags)
+            // Vertex color: PS1 RGB is in sRGB gamma space.
+            // Convert sRGB→linear so UE5 renders correct brightness/contrast.
+            //Colors.Add(FLinearColor::FromSRGBColor(FColor(V.r, V.g, V.b, 255)));
             Colors.Add(FLinearColor(V.r / 255.0f, V.g / 255.0f, V.b / 255.0f, 1.0f));
 
             // ============================================================

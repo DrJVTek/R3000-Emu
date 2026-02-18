@@ -92,24 +92,32 @@ public:
 
     virtual uint32 Run() override
     {
-        emu::logf(emu::LogLevel::info, "CORE", "Emulation worker thread started");
+        emu::logf(emu::LogLevel::warn, "CORE", "Worker Run() entered (delta-time loop v25)");
 
-        // Track timing for precise pacing
         uint64 LocalTotalCycles = 0;
         uint64 LocalSteps = 0;
         uint64 NextPcSampleAt = (Owner->GetPcSampleIntervalSteps() > 0)
             ? static_cast<uint64>(Owner->GetPcSampleIntervalSteps()) : 0;
 
-        // Time tracking for waitable timer mode
-        const double StartTime = FPlatformTime::Seconds();
-        double LastLogTime = StartTime;
+        // Delta-time loop: CycleDebt tracks fractional cycles owed.
+        // Positive = behind real-time (must execute), negative = ahead (sleep).
+        double CycleDebt = 0.0;
+        double LastTime = FPlatformTime::Seconds();
+
+        // Timing stats (logged every 2 seconds)
+        double StatsTime = LastTime;
+        uint64 StatsCycles = 0;
+        uint64 StatsSteps = 0;
+        uint32 StatsVBlanks = 0;
 
         while (!Owner->bWorkerShouldStop_.Load())
         {
             // Check if emulation is paused
             if (!Owner->IsRunning() || Owner->bWorkerPaused_.Load())
             {
-                FPlatformProcess::Sleep(0.001f); // 1ms sleep when paused
+                FPlatformProcess::Sleep(0.001f);
+                LastTime = FPlatformTime::Seconds(); // reset so we don't accumulate debt while paused
+                CycleDebt = 0.0;
                 continue;
             }
 
@@ -117,121 +125,78 @@ public:
             if (!Core)
             {
                 FPlatformProcess::Sleep(0.001f);
+                LastTime = FPlatformTime::Seconds();
+                CycleDebt = 0.0;
                 continue;
             }
 
-            // Calculate how many cycles to run this iteration
-            uint64 TargetCycles = 0;
+            // Compute delta time since last iteration
+            const double Now = FPlatformTime::Seconds();
+            double DeltaTime = Now - LastTime;
+            LastTime = Now;
 
-            // FORCE wall-clock timing - audio-driven mode is broken when emu is slower than real-time
-            if (false /* Owner->IsAudioDrivenTiming() && Owner->GetAudioComp() */)
+            // Cap delta to 50ms to prevent spiral-of-death after hitches
+            if (DeltaTime > 0.05)
+                DeltaTime = 0.05;
+
+            // Accumulate cycle debt: how many PS1 cycles this wall-clock delta represents
+            CycleDebt += DeltaTime * kPS1CpuClock;
+
+            // Execute instructions until debt is paid off
+            while (CycleDebt > 0.0 && !Owner->bWorkerShouldStop_.Load())
             {
-                // AUDIO-DRIVEN MODE: pace to audio consumption (DISABLED)
-                UR3000AudioComponent* AudioComp = Owner->GetAudioComp();
-                const uint64 AudioSamplesConsumed = AudioComp->GetTotalGeneratedSamples() / 2;
-                const uint64 AudioDrivenCycles = AudioSamplesConsumed * kCyclesPerSample;
-
-                // Target buffer: keep ahead by AudioBufferTargetMs worth of samples
-                const uint32 BufferSamples = static_cast<uint32>(
-                    (Owner->GetAudioBufferTargetMs() / 1000.0f) * kSampleRate);
-                const uint64 BufferCycles = static_cast<uint64>(BufferSamples) * kCyclesPerSample;
-                const uint64 RequiredCycles = AudioDrivenCycles + BufferCycles;
-
-                if (LocalTotalCycles < RequiredCycles)
+                const auto Res = Core->step();
+                if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
                 {
-                    TargetCycles = RequiredCycles - LocalTotalCycles;
-                    // Cap catchup to 100ms worth
-                    const uint64 MaxCatchup = static_cast<uint64>(0.1 * kPS1CpuClock);
-                    if (TargetCycles > MaxCatchup)
-                    {
-                        emu::logf(emu::LogLevel::warn, "CORE",
-                            "Worker: audio catchup clamped from %llu to %llu cycles",
-                            (unsigned long long)TargetCycles, (unsigned long long)MaxCatchup);
-                        TargetCycles = MaxCatchup;
-                    }
-                }
-                else
-                {
-                    // Ahead of audio - but still tick bus to process CDROM/timer async events.
-                    // Without this, CDROM INT2 responses never arrive because pending_irq_delay_
-                    // only counts down in cdrom->tick() which requires bus.tick() to be called.
-                    r3000::Bus* Bus = Core ? Core->bus() : nullptr;
-                    if (Bus)
-                    {
-                        // Tick with ~1ms worth of cycles to keep hardware state progressing
-                        constexpr uint32 kIdleTickCycles = 33869; // ~1ms at 33.8688 MHz
-                        Bus->tick(kIdleTickCycles);
-                        LocalTotalCycles += kIdleTickCycles;
-                    }
-                    WaitPrecise(0.001); // 1ms
-                    continue;
-                }
-            }
-            else
-            {
-                // WAITABLE TIMER MODE: run at exact PS1 speed using OS timer
-                const double Now = FPlatformTime::Seconds();
-                const double Elapsed = Now - StartTime;
-                const uint64 TargetTotalCycles = static_cast<uint64>(Elapsed * kPS1CpuClock);
-
-                if (LocalTotalCycles < TargetTotalCycles)
-                {
-                    TargetCycles = TargetTotalCycles - LocalTotalCycles;
-                    // Cap to 50ms worth per iteration
-                    const uint64 MaxPerIter = static_cast<uint64>(0.05 * kPS1CpuClock);
-                    if (TargetCycles > MaxPerIter)
-                        TargetCycles = MaxPerIter;
-                }
-                else
-                {
-                    // Ahead of real time - but still tick bus for CDROM/timer async events.
-                    r3000::Bus* Bus = Core ? Core->bus() : nullptr;
-                    if (Bus)
-                    {
-                        constexpr uint32 kIdleTickCycles = 33869; // ~1ms at 33.8688 MHz
-                        Bus->tick(kIdleTickCycles);
-                        LocalTotalCycles += kIdleTickCycles;
-                    }
-                    const double AheadBy = (LocalTotalCycles - TargetTotalCycles) / kPS1CpuClock;
-                    if (AheadBy > 0.0001) // > 100us ahead
-                    {
-                        WaitPrecise(FMath::Min(AheadBy, 0.001)); // Max 1ms wait
-                    }
-                    continue;
-                }
-            }
-
-            // Execute cycles in batches
-            constexpr uint32 kBatchSize = 1024;
-            uint64 CyclesRan = 0;
-            const int32 CycleMult = FMath::Max(Owner->GetCycleMultiplier(), 1);
-
-            while (CyclesRan < TargetCycles && !Owner->bWorkerShouldStop_.Load())
-            {
-                const uint32 Batch = FMath::Min(kBatchSize, static_cast<uint32>(TargetCycles - CyclesRan));
-
-                for (uint32 i = 0; i < Batch; ++i)
-                {
-                    const auto Res = Core->step();
-                    if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
-                    {
-                        emu::logf(emu::LogLevel::warn, "CORE",
-                            "Worker: emu stopped kind=%d pc=0x%08X",
-                            (int)Res.kind, Res.pc);
-                        // Signal stop
-                        Owner->bWorkerPaused_.Store(true);
-                        break;
-                    }
+                    emu::logf(emu::LogLevel::warn, "CORE",
+                        "Worker: emu stopped kind=%d pc=0x%08X",
+                        (int)Res.kind, Res.pc);
+                    Owner->bWorkerPaused_.Store(true);
+                    break;
                 }
 
-                const uint64 BatchCycles = static_cast<uint64>(Batch) * CycleMult;
-                CyclesRan += BatchCycles;
-                LocalTotalCycles += BatchCycles;
-                LocalSteps += Batch;
+                const uint32 Cycles = Core->last_cycles();
+                CycleDebt -= static_cast<double>(Cycles);
+                LocalTotalCycles += Cycles;
+                ++LocalSteps;
             }
 
             // Update owner stats (atomic)
             Owner->UpdateStepsExecuted(LocalSteps, LocalTotalCycles);
+
+            // Periodic timing diagnostics (every 2 seconds)
+            {
+                const double StatsNow = FPlatformTime::Seconds();
+                const double StatsElapsed = StatsNow - StatsTime;
+                if (StatsElapsed >= 2.0)
+                {
+                    const uint64 DeltaCycles = LocalTotalCycles - StatsCycles;
+                    const uint64 DeltaSteps = LocalSteps - StatsSteps;
+                    const double CyclesPerSec = DeltaCycles / StatsElapsed;
+                    const double CPI = (DeltaSteps > 0) ? (double)DeltaCycles / (double)DeltaSteps : 0.0;
+                    const double SpeedPct = (CyclesPerSec / kPS1CpuClock) * 100.0;
+
+                    // Count VBlanks from bus
+                    r3000::Bus* Bus = Core->bus();
+                    const uint32 CurVBlanks = Bus ? Bus->vblank_count() : 0;
+                    const uint32 DeltaVBlanks = CurVBlanks - StatsVBlanks;
+                    const double VBlanksPerSec = DeltaVBlanks / StatsElapsed;
+
+                    emu::logf(emu::LogLevel::warn, "CORE",
+                        "TIMING: %.1f%% speed | %.2fM cyc/s (target %.2fM) | CPI=%.2f | %.1f VBl/s (target 60) | debt=%.0f cyc | steps=%llu",
+                        SpeedPct,
+                        CyclesPerSec / 1e6, kPS1CpuClock / 1e6,
+                        CPI,
+                        VBlanksPerSec,
+                        CycleDebt,
+                        (unsigned long long)LocalSteps);
+
+                    StatsTime = StatsNow;
+                    StatsCycles = LocalTotalCycles;
+                    StatsSteps = LocalSteps;
+                    StatsVBlanks = CurVBlanks;
+                }
+            }
 
             // PC sample logging
             if (NextPcSampleAt != 0 && LocalSteps >= NextPcSampleAt)
@@ -241,17 +206,13 @@ public:
                 const uint32 IStat = Bus ? Bus->irq_stat_raw() : 0u;
                 const uint32 IMask = Bus ? Bus->irq_mask_raw() : 0u;
 
-                const uint32 COP0Status = Cpu ? Cpu->cop0(12) : 0u;
-                const uint32 COP0Cause = Cpu ? Cpu->cop0(13) : 0u;
                 emu::logf(emu::LogLevel::info, "CORE",
-                    "Worker PC sample steps=%llu pc=0x%08X total_cycles=%llu i_stat=0x%08X i_mask=0x%08X sr=0x%08X cause=0x%08X",
+                    "Worker PC sample steps=%llu pc=0x%08X total_cycles=%llu i_stat=0x%08X i_mask=0x%08X",
                     (unsigned long long)LocalSteps,
                     (unsigned)Core->pc(),
                     (unsigned long long)LocalTotalCycles,
                     (unsigned)IStat,
-                    (unsigned)IMask,
-                    (unsigned)COP0Status,
-                    (unsigned)COP0Cause);
+                    (unsigned)IMask);
 
                 const uint64 StepInterval = static_cast<uint64>(FMath::Max(Owner->GetPcSampleIntervalSteps(), 1));
                 while (NextPcSampleAt != 0 && NextPcSampleAt <= LocalSteps)
@@ -263,9 +224,17 @@ public:
             audio::Spu* Spu = Bus ? Bus->spu() : nullptr;
             if (Spu)
                 Spu->flush_audio();
+
+            // If ahead of real time (negative debt), sleep to yield CPU
+            if (CycleDebt < 0.0)
+            {
+                const double AheadSeconds = -CycleDebt / kPS1CpuClock;
+                if (AheadSeconds > 0.0001) // > 100us ahead
+                    WaitPrecise(FMath::Min(AheadSeconds, 0.002));
+            }
         }
 
-        emu::logf(emu::LogLevel::info, "CORE", "Emulation worker thread exiting");
+        emu::logf(emu::LogLevel::warn, "CORE", "Emulation worker thread exiting");
         return 0;
     }
 
@@ -332,14 +301,21 @@ static void UELogCallback(emu::LogLevel Level, const char* Tag, const char* Msg,
         return;
     const auto* Files = static_cast<const UR3000EmuComponent::EmuLogFiles*>(User);
     if (Files->spu && std::strcmp(Tag, "SPU") == 0)
+    {
         std::fprintf(Files->spu, "[%hs] %hs\n", Tag, Msg);
+        std::fflush(Files->spu);
+    }
     if (Files->sys && (
             std::strcmp(Tag, "CPU") == 0 ||
             std::strcmp(Tag, "BUS") == 0 ||
             std::strcmp(Tag, "CORE") == 0 ||
             std::strcmp(Tag, "ISO") == 0 ||
-            std::strcmp(Tag, "GPU") == 0))
+            std::strcmp(Tag, "GPU") == 0 ||
+            std::strcmp(Tag, "GTE") == 0))
+    {
         std::fprintf(Files->sys, "[%hs] %hs\n", Tag, Msg);
+        std::fflush(Files->sys);
+    }
 }
 
 static const TCHAR* kPSXInputDir = TEXT("/Game/PSX/Input/");
@@ -879,33 +855,33 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
     const double BudgetSeconds = FMath::Max(BudgetMs, 1.0f) * 0.001;
     const double StartTimeLegacy = FPlatformTime::Seconds();
 
-    // Run in batches, checking time budget periodically.
-    constexpr uint32 kBatchSize = 4096;
+    // Run instructions, counting REAL cycles per instruction.
     uint64 CyclesRan = 0;
     uint64 LocalSteps = StepsExecuted_.Load();
     uint64 LocalTotalCycles = TotalCyclesExecuted_.Load();
 
     while (CyclesRan < TargetCycles)
     {
-        const uint32 Batch = FMath::Min(kBatchSize, static_cast<uint32>(TargetCycles - CyclesRan));
-
-        for (uint32 i = 0; i < Batch; ++i)
+        const auto Res = Core_->step();
+        if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
         {
-            const auto Res = Core_->step();
-            if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
-            {
-                UE_LOG(LogR3000Emu, Warning, TEXT("Emu stopped: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
-                bRunning = false;
-                CyclesLastFrame_.Store(static_cast<int32>(CyclesRan));
-                return;
-            }
+            UE_LOG(LogR3000Emu, Warning, TEXT("Emu stopped: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
+            bRunning = false;
+            CyclesLastFrame_.Store(static_cast<int32>(CyclesRan));
+            return;
         }
 
-        // Count actual cycles consumed (Batch instructions * CycleMultiplier cycles each)
-        const uint64 BatchCycles = static_cast<uint64>(Batch) * FMath::Max(CycleMultiplier, 1);
-        CyclesRan += BatchCycles;
-        LocalTotalCycles += BatchCycles;
-        LocalSteps += Batch;
+        const uint64 InstrCycles = Core_->last_cycles();
+        CyclesRan += InstrCycles;
+        LocalTotalCycles += InstrCycles;
+        ++LocalSteps;
+
+        // Check wall-clock budget every 4096 instructions
+        if ((LocalSteps & 0xFFF) == 0)
+        {
+            if (FPlatformTime::Seconds() - StartTimeLegacy >= BudgetSeconds)
+                break;
+        }
 
         if (NextPcSampleAt_ != 0 && LocalSteps >= NextPcSampleAt_)
         {
@@ -935,9 +911,6 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
                 NextPcSampleAt_ += StepInterval;
         }
 
-        // Check wall-clock budget every batch.
-        if (FPlatformTime::Seconds() - StartTimeLegacy >= BudgetSeconds)
-            break;
     }
 
     // Update atomic counters
@@ -1154,10 +1127,17 @@ void UR3000EmuComponent::PollPadInput()
         return;
     }
 
-    // Disable default pawn movement so gamepad inputs go to PS1 emulator only.
-    // Without this, the DefaultPawn captures A=jump, stick=fly, etc.
-    PC->SetIgnoreMoveInput(true);
-    PC->SetIgnoreLookInput(true);
+    // Disable default pawn input so gamepad buttons don't move the UE5 camera.
+    // We consume all gamepad input for the PS1 emulator.
+    if (!bPawnInputDisabled_)
+    {
+        if (APawn* Pawn = PC->GetPawn())
+        {
+            Pawn->DisableInput(PC);
+            bPawnInputDisabled_ = true;
+            UE_LOG(LogR3000Emu, Log, TEXT("PadInput: Disabled default pawn input (gamepad goes to PS1 only)"));
+        }
+    }
 
     // PS1 digital pad button bits (active-low: 0=pressed, 1=released)
     uint16_t Buttons = 0xFFFF;
@@ -1184,17 +1164,6 @@ void UR3000EmuComponent::PollPadInput()
     Check(13, EKeys::Gamepad_FaceButton_Right);      // Circle   (B)
     Check(14, EKeys::Gamepad_FaceButton_Bottom);     // Cross    (A)
     Check(15, EKeys::Gamepad_FaceButton_Left);       // Square   (X)
-
-    // One-time log to confirm polling is active
-    {
-        static bool bFirstPoll = true;
-        if (bFirstPoll)
-        {
-            UE_LOG(LogR3000Emu, Log, TEXT("PadInput: polling active, Pawn=%s"),
-                PC->GetPawn() ? *PC->GetPawn()->GetName() : TEXT("(none)"));
-            bFirstPoll = false;
-        }
-    }
 
     // Debug: log when any button is pressed (throttled)
     if (Buttons != 0xFFFF)

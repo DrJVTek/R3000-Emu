@@ -9,7 +9,172 @@
 
 ---
 
-## 📌 ÉTAT ACTUEL (2026-02-15) - SIO0 ROOT CAUSE FIXED (bus v12)
+## 📌 ÉTAT ACTUEL (2026-02-18) - VOITURE TROP RAPIDE (timing global OK, root counters suspects)
+
+### Résultat session: timing wall-clock parfait, physique toujours fausse
+
+**Problème confirmé:** Ridge Racer voiture trop rapide. Comparaison DuckStation confirme: bug chez nous.
+
+**Ce qui marche (vérifié par logs TIMING):**
+- ✅ 100% speed (33.87M cyc/s)
+- ✅ 59-60 VBl/s (NTSC correct)
+- ✅ Delta-time loop stable (debt ≈ 0)
+- ✅ BusTickBatch=32 → perf OK sur Ryzen 9 7950X3D
+- ✅ Pad input fonctionne (SIO0 v24)
+- ✅ Per-instruction cycles (GTE 5-44, MUL 13, DIV 36)
+
+**Ce qui NE marche PAS:**
+- ❌ Voiture va trop vite malgré timing global correct
+- ❌ DuckStation montre que le jeu DEVRAIT être plus lent → bug chez nous
+
+**Hypothèse principale: Root Counters (Timers) mal implémentés**
+- Le jeu lit probablement un hardware timer (root counter) pour calculer le delta-time physique
+- Si nos timers comptent trop vite/lent par rapport au vrai PS1, la physique est faussée
+- Le timing VBlank est correct (571,088 cycles) mais les valeurs lues par le jeu via timer registers pourraient être fausses
+
+**Piste de debug pour prochaine session:**
+1. Logger les accès timer du jeu: quand il lit timer.count (0x1F801100/1110/1120), logger la valeur retournée
+2. Comparer avec DuckStation: activer le log timer de DuckStation et comparer les valeurs
+3. Vérifier: mode du timer (sysclk vs sysclk/8 vs dotclock vs hblank), target value, reset-on-target
+4. Possibilité: timer overflow/wrap-around bug (count est uint32_t mais hardware est 16-bit)
+
+**Note perf:** `EmuLogLevel` doit être `warn` minimum pour voir les logs TIMING (pas `info`)
+
+### Changements cette session
+
+1. **Per-instruction cycle counting (cpu v7, gte v10):**
+   - GTE: cycles réels par commande (RTPS=15, RTPT=23, NCLIP=8, MVMVA=8, NCDT=44, etc.)
+   - MULT/MULTU: 13 cycles, DIV/DIVU: 36 cycles
+   - Tous les autres: 1 cycle
+   - `cpu.last_cycles()` retourne le coût de la dernière instruction
+   - CPI mesuré: ~1.0-1.17 (la plupart des instructions coûtent 1 cycle)
+
+2. **Delta-time worker thread (R3000EmuComponent.cpp):**
+   - Remplace l'ancien modèle absolute-time + idle Bus::tick phantom
+   - `double CycleDebt` accumule `DeltaTime * 33868800.0` chaque itération
+   - Execute `step()` tant que `CycleDebt > 0`, soustrait `last_cycles()`
+   - Si en avance (debt négatif), sleep via WaitableTimer
+   - Pause/resume reset proprement LastTime + CycleDebt
+
+3. **Timer refactoring (bus v25):**
+   - Bit 10 = `interrupt_request_n`, PAS un stop flag
+   - One-shot/repeat (bit 6) avec `irq_done` flag
+   - Pulse/toggle (bit 7) IRQ modes
+   - Sync/gate counting logic (`counting_enabled`)
+
+4. **BusTickBatch default 1→32:**
+   - Avec batch=1: 85% speed (34M appels bus.tick/sec)
+   - Avec batch=32: 100% speed (~1M appels bus.tick/sec)
+
+5. **Diagnostics TIMING** (niveau `warn`, system.log + UE_LOG):
+```
+TIMING: 100.0% speed | 33.87M cyc/s (target 33.87M) | CPI=1.17 | 59.5 VBl/s (target 60) | debt=-1 cyc
+```
+
+**Versions:**
+| Fichier | Version | Description |
+|---------|---------|-------------|
+| bus.cpp | v25 | timer_refactor + vblank_count() |
+| cpu.cpp | v7 | per_instr_cycles (last_instr_cycles_) |
+| gte.cpp | v10 | per_cmd_cycles (5-44 cycles) |
+| gpu.cpp | v7 | NTSC_timing, bit31_toggle |
+
+**⚠️ IMPORTANT:** timer.count est `uint32_t` dans notre code mais le hardware PS1 est **16-bit**. Vérifier si overflow/masking est correct.
+
+---
+
+## 📌 HISTORIQUE - PAD INPUT FIX (bus v24)
+
+### Investigation: Pad ne marche pas malgré SIO0 correct (bus v13→v23)
+
+**Symptôme:** Boutons Xbox gamepad détectés par UE5 (0xFFDF), SIO0 retourne les bons
+octets (buttons_lo=0xDF), mais le jeu Galaxian ne réagit pas.
+
+**Diagnostic (v21):**
+1. SIO0 transfers complets via polling (5 bytes, correct data)
+2. I_MASK = 0x000D → pas de SIO0 IRQ (bit 7) → BIOS SIO0 handler ne tourne pas
+3. v21 force I_MASK bit 7 → IRQ fires MAIS 8/10 perdus (IEc=0 pendant VBlank)
+4. 2 SIO0 exceptions arrivent au CPU (PC=0xBFC091AC) mais APRÈS le transfert
+5. Event 0xF0000009 (SIO0/pad) reste BUSY → le jeu ne voit jamais les boutons
+6. RESCUE force BUSY→READY après 50 VBlanks → mais déjà trop tard
+
+**Root cause:** La chaîne d'interruption SIO0 ne fonctionne pas à cause du timing:
+- Le BIOS VBlank handler poll SIO0 avec IEc=0 (interrupts off)
+- Les SIO0 IRQ s'empilent mais ne déclenchent pas d'exception
+- Quand RFE rétablit IEc=1, le transfert est fini
+- Le BIOS SIO0 handler trouve un transfert terminé → ne délivre pas l'événement
+- L'event 0xF0000009 reste BUSY → le jeu ignore le pad buffer
+
+**v22 résultat:** Forced I_MASK bit 7 + event delivery. RÉSULTAT: **BIOS bloqué pendant
+StartPAD init!** Le BIOS pad handler à PC=0x4478-0x4624 boucle avec s1=0x1F801040
+(SIO0 base), Status=0x40000404 (IEc=0). Le I_MASK bit 7 force confuse le dispatch.
+
+**v23 (actuel, NON COMPILÉ):** Retire I_MASK force + retire I_STAT bit 7 de ACK.
+Garde uniquement event delivery + I_STAT clear quand transfert termine.
+
+### 🔬 Analyse DuckStation SIO0 (référence, 2026-02-18)
+
+**Source:** `src/core/pad.cpp` (GitHub stenzek/duckstation)
+
+**Architecture fondamentalement différente de notre code:**
+
+| Aspect | DuckStation | Notre code (R3000-Emu) |
+|--------|-------------|----------------------|
+| **Timing transfert** | **DELAYED** via event scheduling (~500 ticks) | **IMMÉDIAT** dans sio0_write_data() |
+| **ACK timing** | 450 ticks controllers, 170 ticks memory cards | 88 cycles fixe |
+| **IRQ bits** | 3 séparés: TXINTEN, RXINTEN, ACKINTEN dans JOY_CTRL | Pas implémentés |
+| **State machine** | Idle → Transmitting → WaitingForACK → Idle | Phase 0-4 immédiat |
+| **IRQ trigger** | `InterruptController::SetLineState(IRQ::PAD, true)` | Direct i_stat_ bit 7 |
+| **Initial transfer** | **Delayed via scheduled event** (critical!) | Immédiat |
+
+**⚠️ BIOS COMPATIBILITY (commentaire DuckStation crucial):**
+```
+// Performing the transfer immediately will result in both the INTR bit and the
+// bit in the interrupt controller being discarded, since the BIOS hasn't yet
+// read the CTRL register to check if the IRQ is enabled. Therefore, the test
+// in (7) will fail, the BIOS will assume the controller is not connected.
+```
+
+**Séquence BIOS attendue (DuckStation):**
+1. BIOS configure JOY_CTRL (enable, select pad, set ACKINTEN)
+2. BIOS écrit 0x01 dans JOY_DATA → déclenche transfert **DELAYED**
+3. BIOS lit JOY_CTRL pour vérifier configuration
+4. Délai... transfert s'exécute
+5. ACK pulse → JOY_STAT IRQ bit set + I_STAT bit 7 set
+6. BIOS clear I_STAT bit 7
+7. BIOS vérifie si I_STAT bit 7 a été **re-set** par le prochain ACK
+8. Si oui → pad connecté. Si non → pas connecté.
+
+**Notre problème:** On fait le transfert IMMÉDIATEMENT (step 2), donc:
+- I_STAT bit 7 est set AVANT que le BIOS n'ait eu le temps de le clear (step 6)
+- Le BIOS clear I_STAT bit 7, il ne revient jamais (car transfert déjà fini)
+- Le BIOS conclut: **pad non connecté** → n'installe pas le handler → pad ignoré
+
+**Solution nécessaire:** Implémenter des transferts SIO0 **DELAYED** comme DuckStation:
+1. `sio0_write_data()` ne doit PAS répondre immédiatement
+2. Programmer un "transfer complete" event après ~500 ticks
+3. Le response byte arrive APRÈS le délai
+4. ACK pulse après 450 ticks supplémentaires
+5. I_STAT bit 7 set APRÈS l'ACK (pas pendant le transfert)
+
+### Hacks/Workarounds actifs dans bus.cpp (v23):
+
+| # | Hack | Lignes | But | Impact pad? | Status |
+|---|------|--------|-----|-------------|--------|
+| 1 | **RESCUE events** | ~1758 | Force events BUSY→READY après 50 VBlanks sans GPU prims | Oui: débloque 0xF0000009 mais trop tard | Actif |
+| 2 | **Auto I_MASK** | ~1816 | Force I_MASK=0x0075 si I_MASK reste 0 pendant 40 VBlanks | Non: I_MASK n'est jamais 0 | Actif |
+| 3 | **Cycle I_MASK** | ~1851 | Même que #2 mais basé sur cycles | Non | Actif |
+| 4 | ~~I_MASK bit 7 force~~ | ~~~250~~ | ~~Force SIO0 IRQ dans I_MASK~~ | ~~Causait blocage BIOS~~ | **RETIRÉ v23** |
+| 5 | **Event delivery** | ~301 | Délivre 0xF0000009 quand transfert pad termine | Oui: bidouille | Actif |
+| 6 | **I_STAT bit 7 clear** | ~302 | Clear SIO0 IRQ après transfert | Oui: empêche exception parasite | Actif |
+| 7 | **Fast CD timing** | cdrom.cpp | Delays CD ÷10 pour UE5 wall-clock | Non | Actif |
+| 8 | **shell_close_sent_** | cdrom.cpp | Pas d'INT5 au cold boot | Non | Actif |
+
+**Fichiers modifiés:** `src/r3000/bus.cpp` (v23, NON COMPILÉ), `src/r3000/cpu.cpp` (SIO0 exception trace)
+
+---
+
+## 📌 ÉTAT PRÉCÉDENT (2026-02-15) - SIO0 ROOT CAUSE FIXED (bus v12)
 
 ### ✅ ROOT CAUSE FIXED: SIO0 RXRDY/IRQ flag separation (bus v12)
 
@@ -192,6 +357,15 @@ Byte high (bits 8-15): L2 R2 L1 R1 Triangle Circle Cross Square
 
 **Debug:** `PadInput: buttons=0x%04X` dans les logs quand un bouton est pressé.
 
+**Flux complet (UE5 → émulateur):**
+1. **TickComponent** (game thread) appelle **PollPadInput()** à chaque frame.
+2. **PollPadInput()** récupère le `PlayerController` (world puis `GetFirstLocalPlayerController` en fallback), puis appelle `IsInputKeyDown(EKeys::Gamepad_*)` pour construire un masque 16 bits (actif bas).
+3. **Core_->set_pad_buttons(Buttons)** écrit dans **Bus::pad_buttons_** (atomic).
+4. Le **worker thread** (ou le mode legacy) exécute **Core->step()**; quand le jeu/BIOS lit JOY_DATA (0x1F801040), **Bus** répond via **sio0_write_data()** phases 3/4 en lisant **pad_buttons_**.
+5. Si aucun PlayerController: on envoie 0xFFFF (aucun bouton) pour éviter des touches "bloquées".
+
+**Si les manettes ne marchent pas sous UE5:** vérifier qu’un Game Mode est défini (World Settings → Game Mode Override) pour qu’un PlayerController existe. Log à chercher: `PadInput: No PlayerController found` ou `PadInput: polling active`.
+
 ### ⚠️ Bug Enhanced Input: GetPlayerInput() retourne null
 
 Enhanced Input ne fonctionnait pas pour le polling (`GetPlayerInput()` null).
@@ -246,9 +420,9 @@ via DMA2 GPUREAD et les copies échouaient silencieusement.
 |---------|---------|
 | `src/gpu/gpu.cpp` | v7 (even/odd field, PAL/NTSC timing) |
 | `src/gpu/gpu.h` | `even_odd_field_`, constantes PAL/NTSC |
-| `src/gte/gte.cpp` | v8 (lighting rewrite, projection flags, MAC0 overflow) |
+| `src/gte/gte.cpp` | **v9** (lighting diagnostics, sRGB fix) |
 | `src/r3000/cpu.cpp` | DIV/DIVU edge cases fixed |
-| `src/r3000/bus.cpp` | DMA2 GPU→RAM transfers, SIO0 RXRDY/IRQ split (v12) |
+| `src/r3000/bus.cpp` | **v24** (SIO0 delayed transfers, DuckStation-style) |
 
 ---
 
@@ -884,8 +1058,9 @@ Les fichiers suivants ont des marqueurs de version au démarrage:
 | Fichier | Log au démarrage | Version actuelle |
 |---------|------------------|------------------|
 | `src/emu/core.cpp` | `[CORE] R3000-Emu core vX` | v6 |
+| `src/gte/gte.cpp` | `[GTE] GTE source vX` | **v9** |
 | `src/r3000/cpu.cpp` | `[CPU] CPU source vX` | v6 |
-| `src/r3000/bus.cpp` | `[BUS] BUS source vX` | **v11** |
+| `src/r3000/bus.cpp` | `[BUS] BUS source vX` | **v12** |
 | `src/gpu/gpu.cpp` | `[GPU] GPU source vX` | v6 |
 | `src/cdrom/cdrom.cpp` | `[CD] CDROM source vX` | v6 |
 
@@ -898,6 +1073,11 @@ Les fichiers suivants ont des marqueurs de version au démarrage:
 - **v10**: Fix bounds check
 - **v11**: SIO0 CTRL reset/acknowledge, STAT IRQ bit fix (bit 8→9)
 - **v12**: SIO0 RXRDY/IRQ flag separation (ROOT CAUSE fix for stuck after logo)
+- **v13-v20**: SIO0 pad input debugging (global g_pad_buttons, ACK timing, IRQ tracing)
+- **v21**: Force I_MASK bit 7 for SIO0 IRQ (caused spurious exceptions)
+- **v22**: SIO0 event delivery on transfer complete + clear I_STAT bit 7 (pad input fix)
+- **v23**: Remove I_MASK bit 7 force + remove I_STAT from ACK (v22 caused BIOS stuck during StartPAD)
+- **v24**: DuckStation-style delayed SIO0 transfers (3-state machine, BAUD timing, ACK 450 ticks, TXINTEN/RXINTEN/ACKINTEN)
 
 **Quand modifier la version**:
 1. Après chaque fix appliqué aux sources

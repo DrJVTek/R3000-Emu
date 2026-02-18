@@ -100,6 +100,9 @@ class Core
     // Cycle multiplier for timing accuracy (1=simplified, 2=approximate real R3000)
     void set_cycle_multiplier(uint32_t n);
 
+    // Per-instruction cycle count from last step()
+    uint32_t last_cycles() const;
+
     // Boot milestone tracking (for debug comparison with DuckStation)
     struct BootMilestones
     {

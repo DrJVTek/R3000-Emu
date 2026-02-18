@@ -34,9 +34,8 @@ class Gte
     uint32_t swc2(uint32_t gte_reg) const;
 
     // Exécute une instruction COP2 "CO" (commande GTE).
-    // On attend typiquement le mot d'instruction complet (opcode 0x12 inclus), car les bits
-    // de contrôle (sf/lm/mx/v/tx) sont dedans.
-    // Retourne 1 si la commande est reconnue/implémentée, 0 sinon.
+    // Retourne le nombre de cycles GTE (>0) si la commande est reconnue, 0 sinon.
+    // Cycle counts match real PS1 hardware (PSX-SPX / DuckStation reference).
     int execute(uint32_t cop2_instruction);
 
     // FLAG bit constants (public so gte_divide helper can access them)

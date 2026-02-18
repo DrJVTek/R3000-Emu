@@ -9,8 +9,17 @@
 #include "../gpu/gpu.h"
 #include "../log/emu_log.h"
 
+// ---- Global pad button state (avoids Hot Reload class-layout issues) ----
+static std::atomic<uint16_t> g_pad_buttons{0xFFFFu};
+
 namespace r3000
 {
+
+void Bus::set_pad_buttons(uint16_t v) { g_pad_buttons.store(v, std::memory_order_relaxed); }
+uint16_t Bus::pad_buttons() const    { return g_pad_buttons.load(std::memory_order_relaxed); }
+
+// Debug: returns address of the global pad storage — call from both threads to verify same addr
+const void* Bus::pad_buttons_addr() { return (const void*)&g_pad_buttons; }
 
 // Forward declaration for use in CDROM IRQ callback.
 static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t cls_match);
@@ -33,7 +42,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::info, "BUS", "BUS source v12 (sio0_rxrdy_irq_split)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v25 (timer_refactor)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -150,6 +159,127 @@ static uint32_t phys_addr(uint32_t virt)
 // masked to the actual RAM size.
 static constexpr uint32_t kRamWindow = 0x00800000u; // 8 MB
 
+// ------------------ Timers (DuckStation-accurate) ------------------
+
+void Bus::timer_write_mode(int ch, uint16_t v)
+{
+    Timer& t = timers_[ch];
+
+    // PSX-SPX: writing mode register:
+    // - bits 0-9 are writable
+    // - bit 10 (interrupt_request_n) is NOT writable, preserved
+    // - bits 11-12 (reached flags) are NOT writable, preserved
+    // DuckStation WRITE_MASK = 0b1110001111111111 = 0xE3FF
+    // (preserves bits 10, 11, but bit 10 behavior: DuckStation doesn't force it)
+    // However, per PSX-SPX: "Set after Writing" means bit 10 → 1 on write.
+    // DuckStation's mask preserves bit 10 but then resets irq_done=false + clears IRQ line.
+    t.mode = (v & 0x03FFu) | 0x0400u; // bits 0-9 from write, force bit 10 to 1 (no IRQ)
+    t.count = 0;
+    t.irq_done = false;
+
+    // Determine clock source
+    const uint8_t clk_src = (v >> 8) & 3u;
+    if (ch == 2)
+        t.use_external_clock = (clk_src & 2) != 0; // bit 9 selects sysclk/8 for timer 2
+    else
+        t.use_external_clock = (clk_src & 1) != 0; // bit 8 selects dotclock/hblank for timer 0/1
+
+    // Clear IRQ line for this timer
+    // (DuckStation: SetLineState(TMRn, false))
+    // We don't have per-line state, but clearing i_stat is wrong here.
+    // Just reset the timer's IRQ contribution.
+
+    timer_update_counting(ch);
+}
+
+void Bus::timer_update_counting(int ch)
+{
+    Timer& t = timers_[ch];
+    const bool sync_enable = (t.mode & 0x0001u) != 0;
+
+    if (sync_enable)
+    {
+        const uint8_t sync_mode = (t.mode >> 1) & 3u;
+        if (ch == 2)
+        {
+            // Timer 2 sync modes: 0 or 3 = stop counter, 1 or 2 = free run
+            t.counting_enabled = (sync_mode == 1 || sync_mode == 2);
+        }
+        else
+        {
+            // Timer 0/1 sync modes (gate = HBlank for T0, VBlank for T1):
+            // 0 = pause while gate active
+            // 1 = reset on gate end (counting always enabled)
+            // 2 = reset+run on gate start, pause outside gate
+            // 3 = free run after gate end once
+            switch (sync_mode)
+            {
+                case 0: t.counting_enabled = !t.gate; break;
+                case 1: t.counting_enabled = true; break;
+                case 2: t.counting_enabled = t.gate; break;
+                case 3: t.counting_enabled = true; break; // simplified: always count
+            }
+        }
+    }
+    else
+    {
+        t.counting_enabled = true; // free run
+    }
+}
+
+void Bus::timer_check_irq(int ch, uint32_t old_count)
+{
+    Timer& t = timers_[ch];
+    bool irq_request = false;
+
+    // Check target hit
+    if (t.count >= t.target && (old_count < t.target || t.target == 0))
+    {
+        if (t.mode & 0x0010u) // irq_at_target
+            irq_request = true;
+        t.mode |= 0x0800u; // reached_target flag (bit 11)
+
+        if ((t.mode & 0x0008u) && t.target > 0) // reset_at_target
+            t.count %= t.target;
+    }
+
+    // Check overflow
+    if (t.count >= 0xFFFFu)
+    {
+        if (t.mode & 0x0020u) // irq_on_overflow
+            irq_request = true;
+        t.mode |= 0x1000u; // reached_overflow flag (bit 12)
+        t.count &= 0xFFFFu;
+    }
+
+    if (!irq_request) return;
+
+    // IRQ generation with proper one-shot/repeat and pulse/toggle (DuckStation logic)
+    const bool irq_pulse_n = (t.mode & 0x0080u) != 0; // bit 7: 0=pulse, 1=toggle
+    const bool irq_repeat  = (t.mode & 0x0040u) != 0;  // bit 6: 0=one-shot, 1=repeat
+
+    if (!irq_pulse_n)
+    {
+        // Pulse mode: brief IRQ pulse
+        if (!t.irq_done || irq_repeat)
+        {
+            i_stat_ |= (1u << (4 + ch)); // fire IRQ
+        }
+        t.irq_done = true;
+        t.mode |= 0x0400u; // interrupt_request_n = 1 (no IRQ pending)
+    }
+    else
+    {
+        // Toggle mode: XOR bit 10, fire only when bit 10 becomes 0
+        t.mode ^= 0x0400u; // toggle interrupt_request_n
+        if (!(t.mode & 0x0400u))
+        {
+            // bit 10 is now 0 → fire IRQ
+            i_stat_ |= (1u << (4 + ch));
+        }
+    }
+}
+
 // ------------------ SIO0 (minimal controller) ------------------
 uint16_t Bus::sio0_stat_value() const
 {
@@ -174,7 +304,22 @@ uint16_t Bus::sio0_stat_debug() const { return sio0_stat_value(); }
 uint16_t Bus::sio0_read_data()
 {
     uint16_t v = sio0_rx_ready_ ? (uint16_t)sio0_rx_data_ : 0x00FFu;
+    const uint8_t phase = sio0_tx_phase_;
     sio0_rx_ready_ = 0;
+
+    // Log what the game/BIOS actually reads back (first 50 reads with buttons pressed)
+    {
+        static uint32_t rd_log = 0;
+        const uint16_t btns = pad_buttons();
+        if (btns != 0xFFFFu && rd_log < 50)
+        {
+            ++rd_log;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0 READ data=0x%02X phase=%u rxrdy=%u btns=0x%04X (#%u)",
+                v, phase, (sio0_rx_ready_ ? 1u : 0u), btns, rd_log);
+        }
+    }
+
     return v;
 }
 
@@ -182,9 +327,11 @@ void Bus::sio0_write_ctrl(uint16_t v)
 {
     sio0_ctrl_ = v;
 
-    // Bit 6 (0x0040) = Reset: resets most JOY registers
+    // Bit 6 (0x0040) = Reset: soft-reset SIO (like DuckStation SoftReset)
     if (v & 0x0040u)
     {
+        if (sio0_state_ != Sio0State::Idle)
+            sio0_end_transfer();
         sio0_tx_phase_ = 0u;
         sio0_rx_ready_ = 0;
         sio0_irq_flag_ = 0;
@@ -194,54 +341,95 @@ void Bus::sio0_write_ctrl(uint16_t v)
         sio0_baud_     = 0;
         sio0_ctrl_     = 0;       // reset clears itself
         sio0_ack_countdown_ = 0;
+        sio0_transfer_countdown_ = 0;
+        sio0_tx_buf_full_ = 0;
+        sio0_tx_value_ = 0;
     }
 
-    // Bit 4 (0x0010) = Acknowledge: clears STAT IRQ flag (bit 9) only.
-    // IMPORTANT: does NOT clear RXRDY (bit 1). On real PS1, the BIOS pad handler
-    // writes CTRL ACK between bytes to clear the IRQ flag while still expecting
-    // to read the response byte via RXRDY polling.
+    // Bit 4 (0x0010) = Acknowledge: clears STAT IRQ flag (bit 9) AND I_STAT bit 7.
+    // This matches DuckStation: JOY_CTRL ACK clears INTR + SetLineState(false).
     if (v & 0x0010u)
     {
         sio0_irq_flag_ = 0;
+        i_stat_ &= ~(1u << 7); // clear I_STAT SIO0 bit (like DuckStation SetLineState false)
+    }
+
+    // Bit 1 (0x0002) = SELECT: if deasserted, reset device transfer state
+    if (!(v & 0x0002u))
+    {
+        sio0_tx_phase_ = 0u; // reset protocol phase (device deselected)
+    }
+
+    // If SELECT=0 or TXEN=0, abort any in-progress transfer
+    if (!(v & 0x0002u) || !(v & 0x0001u))
+    {
+        if (sio0_state_ != Sio0State::Idle)
+            sio0_end_transfer();
+    }
+    else
+    {
+        // SELECT=1 and TXEN=1: if we have data buffered, start transfer
+        if (sio0_state_ == Sio0State::Idle && sio0_can_transfer())
+            sio0_begin_transfer();
     }
 }
 
-void Bus::sio0_write_data(uint8_t v)
+// DuckStation-style: check if we can start a transfer
+bool Bus::sio0_can_transfer() const
 {
+    return sio0_tx_buf_full_ &&
+           (sio0_ctrl_ & 0x0002u) && // SELECT
+           (sio0_ctrl_ & 0x0001u);   // TXEN
+}
+
+// Start a byte transfer: move data from TX buffer, schedule transfer event
+void Bus::sio0_begin_transfer()
+{
+    sio0_tx_value_ = sio0_tx_buf_full_ ? sio0_data_ & 0xFF : 0xFF;
+    sio0_tx_buf_full_ = 0;
+    sio0_state_ = Sio0State::Transmitting;
+
+    // Transfer time = BAUD * 8 ticks (DuckStation: GetTransferTicks)
+    // BAUD is typically 0x0088 (136) for controllers → 136*8 = 1088 ticks
+    // Minimum: use 200 ticks if BAUD=0 (safety)
+    uint32_t xfer_ticks = (uint32_t)sio0_baud_ * 8u;
+    if (xfer_ticks < 200u) xfer_ticks = 200u;
+    sio0_transfer_countdown_ = xfer_ticks;
+}
+
+// Transfer complete: compute response, set RX buffer, schedule ACK
+void Bus::sio0_do_transfer()
+{
+    const uint8_t v = sio0_tx_value_;
     uint8_t resp = 0xFFu;
+    const uint32_t prev_phase = sio0_tx_phase_;
+
     switch (sio0_tx_phase_)
     {
         case 0:
-            // Expect 0x01 (start)
             resp = 0xFFu;
-            sio0_tx_phase_ = (v == 0x01u) ? 1u : 0u;
+            if (v == 0x01u)
+                sio0_tx_phase_ = 1u;
             break;
         case 1:
-            // Command byte (poll/config/etc). Reply with digital pad ID (0x41).
             (void)v;
-            resp = 0x41u;
+            resp = 0x41u; // digital pad ID
             sio0_tx_phase_ = 2u;
             break;
         case 2:
-            // Ack byte
-            resp = 0x5Au;
+            resp = 0x5Au; // access byte
             sio0_tx_phase_ = 3u;
             break;
         case 3:
         {
-            // Buttons low byte: Select L3 R3 Start Up Right Down Left
-            const uint16_t btns = pad_buttons_.load(std::memory_order_relaxed);
+            const uint16_t btns = pad_buttons();
             resp = (uint8_t)(btns & 0xFF);
-            if (btns != 0xFFFFu)
-                emu::logf(emu::LogLevel::info, "SIO0", "PAD read lo=0x%02X hi=0x%02X (buttons=0x%04X)",
-                    (btns & 0xFF), (btns >> 8), btns);
             sio0_tx_phase_ = 4u;
             break;
         }
         case 4:
         {
-            // Buttons high byte: L2 R2 L1 R1 Triangle Circle Cross Square
-            const uint16_t btns = pad_buttons_.load(std::memory_order_relaxed);
+            const uint16_t btns = pad_buttons();
             resp = (uint8_t)(btns >> 8);
             sio0_tx_phase_ = 0u;
             break;
@@ -251,18 +439,113 @@ void Bus::sio0_write_data(uint8_t v)
             sio0_tx_phase_ = 0u;
             break;
     }
+
+    // Put response in RX buffer
     sio0_rx_data_ = resp;
     sio0_rx_ready_ = 1;
-    sio0_irq_flag_ = 1;
-    // Start ACK sequence: controller asserts /ACK for ~100 cycles after receiving a byte.
-    // The BIOS pad handler polls STAT bit 7 to detect ACK. If we never assert ACK (bit 7 LOW),
-    // the BIOS thinks no controller is connected and enters a blocking WaitEvent path.
-    // After the ACK period, we raise SIO0 IRQ (I_STAT bit 7).
-    // Don't ACK the last byte (phase 0 = transfer complete, no more bytes expected).
-    if (sio0_tx_phase_ != 0u)
-        sio0_ack_countdown_ = 88; // ~88 CPU cycles ≈ controller ACK pulse
+
+    // RXINTEN: trigger IRQ when RX data arrives (CTRL bit 11, 0x0800)
+    if (sio0_ctrl_ & 0x0800u)
+    {
+        sio0_irq_flag_ = 1;
+        i_stat_ |= (1u << 7); // SIO0 IRQ
+    }
+
+    // Does the device ACK this byte? All bytes except the last one.
+    bool ack = (sio0_tx_phase_ != 0u);
+
+    if (!ack)
+    {
+        // No ACK: transfer ends here
+        sio0_end_transfer();
+
+        // Deliver SIO0 event when full pad transfer completes (phase 4→0)
+        if (prev_phase == 4u)
+        {
+            deliver_events_for_class(ram_, ram_size_, 0xF000'0009u);
+        }
+    }
     else
-        sio0_ack_countdown_ = 0; // last byte, no ACK
+    {
+        // Schedule ACK delay: 450 ticks for controllers (DuckStation)
+        sio0_state_ = Sio0State::WaitingForACK;
+        sio0_ack_countdown_ = 450;
+    }
+
+    // Trace SIO0 transfers
+    {
+        static uint32_t sio0_xfer_count = 0;
+        static uint32_t sio0_pressed_log = 0;
+        const uint16_t btns = pad_buttons();
+
+        if (prev_phase == 0 && sio0_tx_phase_ == 1u)
+        {
+            ++sio0_xfer_count;
+            if (sio0_xfer_count <= 20 || (sio0_xfer_count % 100 == 0))
+            {
+                emu::logf(emu::LogLevel::info, "BUS",
+                    "SIO0 xfer #%u START: btns=0x%04X baud=%u",
+                    sio0_xfer_count, btns, (unsigned)sio0_baud_);
+            }
+        }
+
+        if (btns != 0xFFFFu && prev_phase == 4u && sio0_pressed_log < 20)
+        {
+            ++sio0_pressed_log;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0 xfer COMPLETE: btns=0x%04X lo=0x%02X hi=0x%02X (#%u)",
+                btns, (unsigned)(btns & 0xFF), (unsigned)(btns >> 8), sio0_pressed_log);
+        }
+    }
+}
+
+// ACK pulse completed: set IRQ flag, trigger I_STAT if ACKINTEN
+void Bus::sio0_do_ack()
+{
+    // ACKINTEN: CTRL bit 12 (0x1000)
+    sio0_irq_flag_ = 1;
+    if (sio0_ctrl_ & 0x1000u)
+    {
+        i_stat_ |= (1u << 7); // SIO0 IRQ via ACK
+    }
+
+    sio0_end_transfer();
+
+    // If TX buffer has more data, start next transfer automatically (pipeline)
+    if (sio0_can_transfer())
+        sio0_begin_transfer();
+}
+
+void Bus::sio0_end_transfer()
+{
+    sio0_state_ = Sio0State::Idle;
+    sio0_transfer_countdown_ = 0;
+    sio0_ack_countdown_ = 0;
+}
+
+// DuckStation-style: write to JOY_DATA buffers the byte, starts transfer if ready
+void Bus::sio0_write_data(uint8_t v)
+{
+    if (sio0_tx_buf_full_)
+    {
+        static uint32_t overrun_log = 0;
+        if (overrun_log++ < 5)
+            emu::logf(emu::LogLevel::warn, "BUS", "SIO0 TX FIFO overrun (v=0x%02X)", v);
+    }
+
+    sio0_data_ = v;
+    sio0_tx_buf_full_ = 1;
+
+    // TXINTEN: trigger IRQ on TX write (CTRL bit 10, 0x0400)
+    if (sio0_ctrl_ & 0x0400u)
+    {
+        sio0_irq_flag_ = 1;
+        i_stat_ |= (1u << 7);
+    }
+
+    // If idle and conditions met, start transfer (delayed)
+    if (sio0_state_ == Sio0State::Idle && sio0_can_transfer())
+        sio0_begin_transfer();
 }
 
 // ================== READ FUNCTIONS ==================
@@ -557,12 +840,12 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         {
             switch (reg)
             {
-            case 0: out = timers_[ch].count; break;
+            case 0: out = (uint16_t)(timers_[ch].count & 0xFFFFu); break;
             case 1:
                 // Reading mode register returns current value then clears bits 11-12
                 // (target reached and overflow flags). This is PS1 hardware behavior.
                 out = timers_[ch].mode;
-                timers_[ch].mode &= ~0x1800u; // Clear bits 11 (0x800) and 12 (0x1000)
+                timers_[ch].mode &= ~0x1800u; // Clear bits 11 (reached_target) and 12 (reached_overflow)
                 break;
             case 2: out = timers_[ch].target; break;
             default: out = 0; break;
@@ -659,11 +942,15 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
             // CRITICAL: Log when VBlank (bit 0) is disabled
             if ((old_mask & 0x01) && !(i_mask_ & 0x01))
             {
-                emu::logf(emu::LogLevel::warn, "IRQ", "!!! VBlank DISABLED in I_MASK (0x%04X -> 0x%04X) !!!",
-                    (unsigned)old_mask, (unsigned)i_mask_);
-                // Also log to BUS category to appear in system.log
-                emu::logf(emu::LogLevel::warn, "BUS", "!!! I_MASK VBlank DISABLED (byte): 0x%04X -> 0x%04X !!!",
-                    (unsigned)old_mask, (unsigned)i_mask_);
+                {
+                static uint32_t imask_log = 0;
+                if (imask_log < 3)
+                {
+                    ++imask_log;
+                    emu::logf(emu::LogLevel::warn, "BUS", "I_MASK VBlank off (byte): 0x%04X -> 0x%04X (#%u)",
+                        (unsigned)old_mask, (unsigned)i_mask_, imask_log);
+                }
+            }
             }
         }
         return true;
@@ -768,11 +1055,15 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
             // CRITICAL: Log when VBlank (bit 0) is disabled - this causes VSync timeout!
             if ((old_mask & 0x01) && !(i_mask_ & 0x01))
             {
-                emu::logf(emu::LogLevel::warn, "IRQ", "!!! VBlank DISABLED in I_MASK (0x%04X -> 0x%04X) !!!",
-                    (unsigned)old_mask, (unsigned)i_mask_);
-                // Also log to BUS category to appear in system.log
-                emu::logf(emu::LogLevel::warn, "BUS", "!!! I_MASK VBlank DISABLED: 0x%04X -> 0x%04X !!!",
-                    (unsigned)old_mask, (unsigned)i_mask_);
+                {
+                static uint32_t imask_log2 = 0;
+                if (imask_log2 < 3)
+                {
+                    ++imask_log2;
+                    emu::logf(emu::LogLevel::warn, "BUS", "I_MASK VBlank off (word): 0x%04X -> 0x%04X (#%u)",
+                        (unsigned)old_mask, (unsigned)i_mask_, imask_log2);
+                }
+            }
             }
         }
         return true;
@@ -837,12 +1128,9 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         {
             switch (reg)
             {
-            case 0: timers_[ch].count = v; break;
-            case 1:
-                timers_[ch].mode = v;
-                timers_[ch].count = 0;
-                break;
-            case 2: timers_[ch].target = v; break;
+            case 0: timers_[ch].count = (uint16_t)v; break;
+            case 1: timer_write_mode(ch, (uint16_t)v); break;
+            case 2: timers_[ch].target = (uint16_t)v; break;
             }
         }
         return true;
@@ -1213,10 +1501,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
             switch (reg)
             {
             case 0: timers_[ch].count = (uint16_t)v; break;
-            case 1:
-                timers_[ch].mode = (uint16_t)v;
-                timers_[ch].count = 0;
-                break;
+            case 1: timer_write_mode(ch, (uint16_t)v); break;
             case 2: timers_[ch].target = (uint16_t)v; break;
             }
         }
@@ -1420,69 +1705,45 @@ void Bus::tick(uint32_t cycles)
 {
     static constexpr uint32_t kForceMaskAfterCycles = 600000u; // ~1 VBlank period worth of CPU cycles
 
-    // Tick timers
+    // Tick timers (DuckStation-style: counting_enabled + proper IRQ logic)
     for (int ch = 0; ch < 3; ++ch)
     {
-        if ((timers_[ch].mode & 0x0400) == 0) // Not stopped
-        {
-            uint32_t inc = cycles;
+        Timer& t = timers_[ch];
+        if (!t.counting_enabled) continue;
 
-            // Accumulator-based prescaler for dotclock/hblank modes
-            if (ch == 0 && (timers_[ch].mode & 0x0100))
+        uint32_t inc = cycles;
+
+        // Prescaler for external clock sources
+        if (t.use_external_clock)
+        {
+            if (ch == 0)
             {
-                // Dotclock: ~8 CPU cycles per dot
+                // Dotclock: ~8 CPU cycles per dot (320px mode)
                 timer_prescale_accum_[0] += cycles;
                 inc = timer_prescale_accum_[0] / 8;
                 timer_prescale_accum_[0] %= 8;
             }
-            else if (ch == 1 && (timers_[ch].mode & 0x0100))
+            else if (ch == 1)
             {
                 // HBlank: ~2150 CPU cycles per HBlank line
                 timer_prescale_accum_[1] += cycles;
                 inc = timer_prescale_accum_[1] / 2150;
                 timer_prescale_accum_[1] %= 2150;
             }
-            else if (ch == 2 && (timers_[ch].mode & 0x0100))
+            else // ch == 2
             {
-                // Timer 2 with prescaler: sysclock/8 (bit 8 set = use sysclock/8)
+                // Sysclock/8
                 timer_prescale_accum_[2] += cycles;
                 inc = timer_prescale_accum_[2] / 8;
                 timer_prescale_accum_[2] %= 8;
             }
-
-            uint32_t new_count = timers_[ch].count + inc;
-
-            // Check target hit
-            if ((timers_[ch].mode & 0x0008) && timers_[ch].target != 0)
-            {
-                if (timers_[ch].count < timers_[ch].target && new_count >= timers_[ch].target)
-                {
-                    timers_[ch].mode |= 0x0800; // Target reached flag
-                    if (timers_[ch].mode & 0x0010)
-                    {
-                        // IRQ on target
-                        i_stat_ |= (1u << (4 + ch));
-                    }
-                    if (timers_[ch].mode & 0x0008)
-                    {
-                        new_count = new_count - timers_[ch].target;
-                    }
-                }
-            }
-
-            // Check overflow
-            if (new_count > 0xFFFF)
-            {
-                timers_[ch].mode |= 0x1000; // Overflow flag
-                if (timers_[ch].mode & 0x0020)
-                {
-                    i_stat_ |= (1u << (4 + ch));
-                }
-                new_count &= 0xFFFF;
-            }
-
-            timers_[ch].count = (uint16_t)new_count;
         }
+
+        if (inc == 0) continue;
+
+        const uint32_t old_count = t.count;
+        t.count += inc;
+        timer_check_irq(ch, old_count);
     }
 
     // SPU tick (apply simple cycle delays without per-cycle loop)
@@ -1523,14 +1784,25 @@ void Bus::tick(uint32_t cycles)
         spu_->tick_cycles(cycles);
     }
 
-    // Tick SIO0 ACK countdown
-    if (sio0_ack_countdown_ > 0)
+    // Tick SIO0 state machine (DuckStation-style delayed transfers)
+    if (sio0_state_ == Sio0State::Transmitting && sio0_transfer_countdown_ > 0)
+    {
+        if (cycles >= sio0_transfer_countdown_)
+        {
+            sio0_transfer_countdown_ = 0;
+            sio0_do_transfer(); // execute the byte transfer
+        }
+        else
+        {
+            sio0_transfer_countdown_ -= cycles;
+        }
+    }
+    else if (sio0_state_ == Sio0State::WaitingForACK && sio0_ack_countdown_ > 0)
     {
         if (cycles >= sio0_ack_countdown_)
         {
             sio0_ack_countdown_ = 0;
-            // ACK period ended → raise SIO0 IRQ (I_STAT bit 7)
-            i_stat_ |= (1u << 7);
+            sio0_do_ack(); // ACK pulse ended
         }
         else
         {

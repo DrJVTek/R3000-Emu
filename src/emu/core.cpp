@@ -41,7 +41,7 @@ static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nul
 Core::Core(rlog::Logger* logger) : logger_(logger), cdrom_(logger), gpu_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::info, "CORE", "R3000-Emu core v6 (vsync_stuck_detect)");
+    emu::logf(emu::LogLevel::warn, "CORE", "R3000-Emu core v6 (vsync_stuck_detect)");
 }
 
 Core::~Core() = default;
@@ -361,26 +361,33 @@ r3000::Cpu* Core::cpu()
 
 void Core::set_pad_buttons(uint16_t v)
 {
-    if (bus_)
+    // Diagnostic: log first non-idle call with address verification
+    if (v != 0xFFFFu)
     {
-        bus_->set_pad_buttons(v);
-        // Diagnostic: confirm buttons reach the bus (first few non-idle calls)
-        if (v != 0xFFFFu)
+        static uint32_t log_count = 0;
+        if (log_count < 10)
         {
-            static uint32_t log_count = 0;
-            if (log_count < 10)
-            {
-                emu::logf(emu::LogLevel::info, "CORE", "set_pad_buttons(0x%04X) bus=%p", v, (void*)bus_.get());
-                ++log_count;
-            }
+            ++log_count;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "set_pad(0x%04X) bus=%p g_pad=%p (#%u)",
+                v, (void*)bus_.get(),
+                bus_ ? r3000::Bus::pad_buttons_addr() : nullptr,
+                log_count);
         }
     }
+    if (bus_)
+        bus_->set_pad_buttons(v);
 }
 
 void Core::set_cycle_multiplier(uint32_t n)
 {
     if (cpu_)
         cpu_->set_cycle_multiplier(n);
+}
+
+uint32_t Core::last_cycles() const
+{
+    return cpu_ ? cpu_->last_cycles() : 1;
 }
 
 bool Core::fast_boot_from_cd(char* err, size_t err_cap)

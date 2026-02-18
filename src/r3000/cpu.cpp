@@ -170,7 +170,7 @@ static int psx_is_mmio(uint32_t phys_addr)
 Cpu::Cpu(Bus& bus, rlog::Logger* logger) : bus_(bus), logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::info, "CPU", "CPU source v6 (vsync_stuck_detect)");
+    emu::logf(emu::LogLevel::warn, "CPU", "CPU source v7 (per_instr_cycles)");
 }
 
 void Cpu::set_hle_vectors(int enabled)
@@ -598,6 +598,18 @@ Cpu::StepResult Cpu::step()
 
         if (iec && (ip & im) != 0u)
         {
+            // Trace SIO0 IRQ delivery to CPU (first 10)
+            if (pending & (1u << 7))
+            {
+                static uint32_t sio0_exc_log = 0;
+                if (sio0_exc_log < 10)
+                {
+                    ++sio0_exc_log;
+                    emu::logf(emu::LogLevel::warn, "CPU",
+                        "SIO0 exception! PC=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
+                        pc_, bus_.irq_stat_raw(), bus_.irq_mask_raw(), sio0_exc_log);
+                }
+            }
             raise_exception(EXC_INT, 0, pc_);
             r.kind = StepResult::Kind::ok;
             r.instr = 0;
@@ -2444,14 +2456,16 @@ Cpu::StepResult Cpu::step()
     // NOTE: branch_just_scheduled_ is now reset at the top of step(), before the
     // IRQ check, so that delay-slot detection works correctly for exceptions.
 
-    // COP0 Count: utilisé par le BIOS pour des "delays" (busy-wait / timeouts).
-    // Si Count ne bouge jamais, le BIOS peut rester bloqué indéfiniment.
-    // Modèle simplifié: cycle_multiplier_ par instruction (default 2 approximates real R3000).
-    cop0_[COP0_COUNT] += cycle_multiplier_;
-    // Bus tick batching: keep CPU stepping cheap while advancing HW with correct cycle deltas.
-    // This is especially important in UE where we have a strict wall-clock budget per frame.
-    // Use cycle_multiplier_ to better match real timing (SPU sample generation, timers, etc).
-    bus_tick_accum_ += cycle_multiplier_;
+    // Per-instruction cycle counting.
+    // Base cost = 1 cycle for most instructions. GTE/MUL/DIV add extra cycles.
+    // last_instr_cycles_ is set during instruction execution (default 1).
+    const uint32_t instr_cycles = last_instr_cycles_;
+    last_instr_cycles_ = 1; // reset for next instruction
+
+    // COP0 Count: used by BIOS for delays (busy-wait / timeouts).
+    cop0_[COP0_COUNT] += instr_cycles;
+    // Bus tick: advance hardware by the real cycle count of this instruction.
+    bus_tick_accum_ += instr_cycles;
     if (bus_tick_accum_ >= bus_tick_batch_)
     {
         bus_.tick(bus_tick_accum_);
@@ -3071,7 +3085,7 @@ Cpu::StepResult Cpu::step()
                             break;
                         }
                     case 0x18:
-                        { // MULT (signed)
+                        { // MULT (signed) — ~13 cycles on real R3000
                             const uint32_t s = rs(instr);
                             const uint32_t t = rt(instr);
                             const int64_t a = (int32_t)gpr_[s];
@@ -3079,10 +3093,11 @@ Cpu::StepResult Cpu::step()
                             const int64_t p = a * b;
                             lo_ = (uint32_t)(p & 0xFFFF'FFFFll);
                             hi_ = (uint32_t)((uint64_t)p >> 32);
+                            last_instr_cycles_ = 13;
                             break;
                         }
                     case 0x19:
-                        { // MULTU (unsigned)
+                        { // MULTU (unsigned) — ~13 cycles on real R3000
                             const uint32_t s = rs(instr);
                             const uint32_t t = rt(instr);
                             const uint64_t a = (uint32_t)gpr_[s];
@@ -3090,10 +3105,11 @@ Cpu::StepResult Cpu::step()
                             const uint64_t p = a * b;
                             lo_ = (uint32_t)(p & 0xFFFF'FFFFull);
                             hi_ = (uint32_t)(p >> 32);
+                            last_instr_cycles_ = 13;
                             break;
                         }
                     case 0x1A:
-                        { // DIV (signed)
+                        { // DIV (signed) — 36 cycles on real R3000
                             const uint32_t s = rs(instr);
                             const uint32_t t = rt(instr);
                             const int32_t num = (int32_t)gpr_[s];
@@ -3103,6 +3119,7 @@ Cpu::StepResult Cpu::step()
                                 // PS1 hardware: div by zero → LO = num>=0 ? -1 : +1, HI = num
                                 lo_ = (num >= 0) ? 0xFFFFFFFFu : 0x00000001u;
                                 hi_ = (uint32_t)num;
+                                last_instr_cycles_ = 36;
                                 break;
                             }
                             if (num == (int32_t)0x80000000 && den == -1)
@@ -3110,14 +3127,16 @@ Cpu::StepResult Cpu::step()
                                 // PS1 hardware: INT32_MIN / -1 overflow → LO = INT32_MIN, HI = 0
                                 lo_ = 0x80000000u;
                                 hi_ = 0;
+                                last_instr_cycles_ = 36;
                                 break;
                             }
                             lo_ = (uint32_t)(num / den);
                             hi_ = (uint32_t)(num % den);
+                            last_instr_cycles_ = 36;
                             break;
                         }
                     case 0x1B:
-                        { // DIVU (unsigned)
+                        { // DIVU (unsigned) — 36 cycles on real R3000
                             const uint32_t s = rs(instr);
                             const uint32_t t = rt(instr);
                             const uint32_t num = gpr_[s];
@@ -3127,10 +3146,12 @@ Cpu::StepResult Cpu::step()
                                 // PS1 hardware: divu by zero → LO = 0xFFFFFFFF, HI = num
                                 lo_ = 0xFFFFFFFFu;
                                 hi_ = num;
+                                last_instr_cycles_ = 36;
                                 break;
                             }
                             lo_ = num / den;
                             hi_ = num % den;
+                            last_instr_cycles_ = 36;
                             break;
                         }
                     case 0x20:
@@ -4014,9 +4035,14 @@ Cpu::StepResult Cpu::step()
                     // Bit 25 of the instruction (= bit 4 of rs_field) marks a COP2 CO
                     // command.  Bits 24-21 carry sf/lm flags and are NOT always zero,
                     // so we must test the bit, not compare rs_field == 0x10.
-                    if (!gte_.execute(instr))
+                    const int gte_cycles = gte_.execute(instr);
+                    if (gte_cycles == 0)
                     {
                         raise_exception(EXC_RI, 0, r.pc);
+                    }
+                    else
+                    {
+                        last_instr_cycles_ = (uint32_t)gte_cycles;
                     }
                 }
                 else

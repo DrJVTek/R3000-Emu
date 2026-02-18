@@ -92,10 +92,12 @@ class Bus
     uint32_t cpu_pc() const { return cpu_pc_; }
 
     // Controller input: set pad button state (active-low, 0=pressed, 1=released).
-    // Thread-safe (atomic). Called from UE5 game thread, read by emulator worker thread.
+    // Uses a GLOBAL atomic to avoid Hot Reload class-layout mismatches in UE5.
+    // Called from UE5 game thread, read by emulator worker thread.
     // Bit layout: [Select L3 R3 Start Up Right Down Left | L2 R2 L1 R1 Tri Cir X Sqr]
-    void set_pad_buttons(uint16_t v) { pad_buttons_.store(v, std::memory_order_relaxed); }
-    uint16_t pad_buttons() const { return pad_buttons_.load(std::memory_order_relaxed); }
+    void set_pad_buttons(uint16_t v);
+    uint16_t pad_buttons() const;
+    static const void* pad_buttons_addr(); // debug: verify same storage
 
     // Debug: watch d'une adresse RAM (physique) - log les writes byte qui la touchent.
     // Exemple: pour watcher 0x8009A204 (KSEG0), donner phys=0x0009A204.
@@ -114,6 +116,7 @@ class Bus
     // Debug: raw access to I_STAT and I_MASK for diagnostic logging.
     uint32_t irq_stat_raw() const { return i_stat_; }
     uint32_t irq_mask_raw() const { return i_mask_; }
+    uint32_t vblank_count() const { return vblank_total_count_; }
 
     // Debug: SIO0 status for diagnostic tracing
     uint16_t sio0_stat_debug() const;
@@ -199,11 +202,18 @@ class Bus
 
     struct Timer
     {
-        uint16_t count;
-        uint16_t mode;
-        uint16_t target;
-        uint16_t _pad;
+        uint32_t count{0};       // 32-bit to detect overflow easily
+        uint16_t mode{0};
+        uint16_t target{0};
+        bool irq_done{false};        // one-shot: IRQ already fired (bit 6=0)
+        bool counting_enabled{true}; // gate/sync can pause counting
+        bool use_external_clock{false}; // dotclock/hblank/sysclk8
+        bool gate{false};            // current gate state (HBlank/VBlank)
     };
+
+    void timer_check_irq(int ch, uint32_t old_count);
+    void timer_write_mode(int ch, uint16_t v);
+    void timer_update_counting(int ch);
 
     uint8_t scratch_[kScratchSize]{};
     uint8_t io_[kIoSize]{};
@@ -217,8 +227,17 @@ class Bus
     uint32_t timer_prescale_accum_[3]{}; // prescaler accumulator (dotclock/hblank)
 
     void sio0_write_ctrl(uint16_t v);
+    void sio0_do_transfer();   // execute delayed byte transfer
+    void sio0_do_ack();        // ACK pulse completed
+    void sio0_begin_transfer(); // start a new transfer if possible
+    void sio0_end_transfer();   // return to idle
+    bool sio0_can_transfer() const; // check if conditions allow transfer
 
-    // SIO0 minimal state (enough for BIOS polling loops)
+    // SIO0 state machine (DuckStation-style delayed transfers)
+    // States: Idle → Transmitting (delayed) → WaitingForACK → Idle
+    enum class Sio0State : uint8_t { Idle, Transmitting, WaitingForACK };
+    Sio0State sio0_state_{Sio0State::Idle};
+
     uint16_t sio0_data_{0};
     uint16_t sio0_stat_{0x0005u}; // TXRDY|TXEMPTY by default
     uint16_t sio0_mode_{0};
@@ -227,11 +246,14 @@ class Bus
     uint8_t sio0_rx_data_{0xFF};
     uint8_t sio0_rx_ready_{0};    // RXRDY (STAT bit 1): data available in RX buffer
     uint8_t sio0_irq_flag_{0};    // IRQ flag (STAT bit 9): cleared by CTRL ACK bit
-    uint8_t sio0_tx_phase_{0};
-    uint32_t sio0_ack_countdown_{0}; // cycles until /ACK deasserts (0 = idle)
+    uint8_t sio0_tx_phase_{0};    // protocol phase: 0=idle, 1-4=pad transfer bytes
+    uint8_t sio0_tx_value_{0};    // value being transmitted (buffered from write)
+    uint8_t sio0_tx_buf_full_{0}; // TX buffer has data waiting
+    uint32_t sio0_transfer_countdown_{0}; // ticks until transfer completes
+    uint32_t sio0_ack_countdown_{0};      // ticks until ACK pulse ends
 
-    // Pad button state (active-low, 0xFFFF = all released). Thread-safe.
-    std::atomic<uint16_t> pad_buttons_{0xFFFFu};
+    // pad_buttons_ member REMOVED — now uses global g_pad_buttons in bus.cpp
+    // to avoid Hot Reload class-layout offset mismatch.
 
     // DMA controller (PS1) - minimal (suffisant pour BIOS init).
     // On implémente surtout DMA2 (GPU) linked-list pour déverrouiller les boucles BIOS qui attendent CHCR.

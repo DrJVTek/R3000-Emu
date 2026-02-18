@@ -78,7 +78,7 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3, uint32_t& flag_out)
 
 Gte::Gte()
 {
-    emu::logf(emu::LogLevel::info, "GTE", "GTE source v8 (RTPS_MAC0_overflow, IR3_order)");
+    emu::logf(emu::LogLevel::warn, "GTE", "GTE source v10 (per_cmd_cycles)");
     reset();
 }
 
@@ -1113,34 +1113,95 @@ int Gte::execute(uint32_t cop2_instruction)
     // Reset FLAG at start of every GTE command (DuckStation behavior)
     flag_ = 0;
 
-    // Debug counter for lighting commands
+    // Debug: count GTE command usage (log summary after 1000 calls)
+    static uint32_t gte_cmd_counts[64] = {};
     static int light_log_count = 0;
+    static bool gte_summary_logged = false;
 
-    int result = 0;
+    gte_cmd_counts[funct]++;
+    uint32_t total = 0;
+    for (int i = 0; i < 64; i++) total += gte_cmd_counts[i];
+    if (total == 1000 && !gte_summary_logged)
+    {
+        gte_summary_logged = true;
+        emu::logf(emu::LogLevel::warn, "GTE", "=== GTE command usage after 1000 calls ===");
+        for (int i = 0; i < 64; i++)
+        {
+            if (gte_cmd_counts[i] > 0)
+                emu::logf(emu::LogLevel::warn, "GTE", "  cmd 0x%02X: %u calls", i, gte_cmd_counts[i]);
+        }
+    }
+
+    // GTE command cycle counts (PSX-SPX / DuckStation reference).
+    // These represent the actual hardware execution time for each command.
+    int cycles = 0;
     switch (funct)
     {
-        case 0x06: cmd_nclip(cmd); result = 1; break;
-        case 0x0C: cmd_op(cmd); result = 1; break;
-        case 0x10: cmd_dpcs(cmd); result = 1; break;
-        case 0x11: cmd_intpl(cmd); result = 1; break;
-        case 0x12: cmd_mvmva(cmd); result = 1; break;
-        case 0x13: cmd_ncds(cmd); result = 1; break;
-        case 0x14: cmd_cdp(cmd); result = 1; break;
-        case 0x16: cmd_ncdt(cmd); result = 1; break;
-        case 0x1B: cmd_nccs(cmd); result = 1; break;
-        case 0x1C: cmd_cc(cmd); result = 1; break;
-        case 0x1E: cmd_ncs(cmd); result = 1; break;
-        case 0x20: cmd_nct(cmd); result = 1; break;
-        case 0x01: cmd_rtps(cmd); result = 1; break;
-        case 0x30: cmd_rtpt(cmd); result = 1; break;
-        case 0x2D: cmd_avsz3(cmd); result = 1; break;
-        case 0x2E: cmd_avsz4(cmd); result = 1; break;
-        case 0x28: cmd_sqr(cmd); result = 1; break;
-        case 0x29: cmd_dcpl(cmd); result = 1; break;
-        case 0x2A: cmd_dpct(cmd); result = 1; break;
-        case 0x3D: cmd_gpf(cmd); result = 1; break;
-        case 0x3E: cmd_gpl(cmd); result = 1; break;
-        case 0x3F: cmd_ncct(cmd); result = 1; break;
+        case 0x06: cmd_nclip(cmd); cycles = 8; break;
+        case 0x0C: cmd_op(cmd); cycles = 6; break;
+        case 0x10: cmd_dpcs(cmd); cycles = 8; break;
+        case 0x11: cmd_intpl(cmd); cycles = 8; break;
+        case 0x12:
+        {
+            // Log MVMVA when used with Light or Color matrices (lighting path)
+            const int mx = (cmd >> 17) & 3;
+            if (light_log_count < 10 && (mx == 1 || mx == 2))
+            {
+                ++light_log_count;
+                const int vv = (cmd >> 15) & 3;
+                const int tv = (cmd >> 13) & 3;
+                emu::logf(emu::LogLevel::warn, "GTE", "MVMVA #%d mx=%d(%s) vv=%d tv=%d L=(%d,%d,%d/%d,%d,%d/%d,%d,%d) BK=(%d,%d,%d) V=(%d,%d,%d)",
+                    light_log_count, mx, mx==1?"LLM":"LCM", vv, tv,
+                    s16(ctrl_[C_L11L12]), hi16(ctrl_[C_L11L12]), s16(ctrl_[C_L13L21]),
+                    hi16(ctrl_[C_L13L21]), s16(ctrl_[C_L22L23]), hi16(ctrl_[C_L22L23]),
+                    s16(ctrl_[C_L31L32]), hi16(ctrl_[C_L31L32]), s16(ctrl_[C_L33]),
+                    (int32_t)ctrl_[C_RBK], (int32_t)ctrl_[C_GBK], (int32_t)ctrl_[C_BBK],
+                    vx(0), vy(0), vz(0));
+            }
+            cmd_mvmva(cmd); cycles = 8; break;
+        }
+        case 0x13: // NCDS (19)
+        case 0x14: // CDP  (13)
+        case 0x16: // NCDT (44)
+        case 0x1B: // NCCS (17)
+        case 0x1C: // CC   (11)
+        case 0x1E: // NCS  (14)
+        case 0x20: // NCT  (30)
+        case 0x3F: // NCCT (39)
+        {
+            if (light_log_count < 10)
+            {
+                ++light_log_count;
+                emu::logf(emu::LogLevel::warn, "GTE", "LIGHT cmd=0x%02X #%d: L=(%d,%d,%d/%d,%d,%d/%d,%d,%d) BK=(%d,%d,%d) RGBC=0x%08X V0=(%d,%d,%d)",
+                    funct, light_log_count,
+                    s16(ctrl_[C_L11L12]), hi16(ctrl_[C_L11L12]), s16(ctrl_[C_L13L21]),
+                    hi16(ctrl_[C_L13L21]), s16(ctrl_[C_L22L23]), hi16(ctrl_[C_L22L23]),
+                    s16(ctrl_[C_L31L32]), hi16(ctrl_[C_L31L32]), s16(ctrl_[C_L33]),
+                    (int32_t)ctrl_[C_RBK], (int32_t)ctrl_[C_GBK], (int32_t)ctrl_[C_BBK],
+                    data_[D_RGBC], vx(0), vy(0), vz(0));
+            }
+            switch (funct)
+            {
+                case 0x13: cmd_ncds(cmd); cycles = 19; break;
+                case 0x14: cmd_cdp(cmd);  cycles = 13; break;
+                case 0x16: cmd_ncdt(cmd); cycles = 44; break;
+                case 0x1B: cmd_nccs(cmd); cycles = 17; break;
+                case 0x1C: cmd_cc(cmd);   cycles = 11; break;
+                case 0x1E: cmd_ncs(cmd);  cycles = 14; break;
+                case 0x20: cmd_nct(cmd);  cycles = 30; break;
+                case 0x3F: cmd_ncct(cmd); cycles = 39; break;
+            }
+            break;
+        }
+        case 0x01: cmd_rtps(cmd);  cycles = 15; break;
+        case 0x30: cmd_rtpt(cmd);  cycles = 23; break;
+        case 0x2D: cmd_avsz3(cmd); cycles = 5;  break;
+        case 0x2E: cmd_avsz4(cmd); cycles = 6;  break;
+        case 0x28: cmd_sqr(cmd);   cycles = 5;  break;
+        case 0x29: cmd_dcpl(cmd);  cycles = 8;  break;
+        case 0x2A: cmd_dpct(cmd);  cycles = 17; break;
+        case 0x3D: cmd_gpf(cmd);   cycles = 5;  break;
+        case 0x3E: cmd_gpl(cmd);   cycles = 5;  break;
         default: return 0;
     }
 
@@ -1149,7 +1210,7 @@ int Gte::execute(uint32_t cop2_instruction)
         flag_ |= (1u << 31);
     ctrl_[C_FLAG] = flag_;
 
-    return result;
+    return cycles;
 }
 
 } // namespace gte

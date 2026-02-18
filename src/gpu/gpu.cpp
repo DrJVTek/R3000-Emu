@@ -155,7 +155,7 @@ Gpu::Gpu(rlog::Logger* logger)
     , vram_(std::make_unique<uint16_t[]>(kVramPixels))
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::info, "GPU", "GPU source v7 (NTSC_timing, bit31_toggle)");
+    emu::logf(emu::LogLevel::warn, "GPU", "GPU source v7 (NTSC_timing, bit31_toggle)");
     status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
     vblank_div_ = 0;
