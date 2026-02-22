@@ -6,6 +6,7 @@
 #include "../audio/spu.h"
 #include "../audio/wav_writer.h"
 #include "../cdrom/cdrom.h"
+#include "../emu/hooks.h"
 #include "../gpu/gpu.h"
 #include "../log/emu_log.h"
 
@@ -901,6 +902,13 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     {
         const uint32_t mp = phys & (ram_size_ - 1);
         ram_[mp] = v;
+
+        // Fire write hooks (zero-cost when no hooks registered)
+        if (hooks_ && hooks_->has_write())
+        {
+            if (hooks_->on_write_has_wildcard || hooks_->watches_addr(mp))
+                hooks_->fire_write(mp, (uint32_t)v, 1);
+        }
         return true;
     }
 
@@ -1032,6 +1040,13 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         const uint32_t mp1 = (phys + 1u) & rm;
         ram_[mp0] = (uint8_t)(v & 0xFF);
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
+
+        // Fire write hooks (zero-cost when no hooks registered)
+        if (hooks_ && hooks_->has_write())
+        {
+            if (hooks_->on_write_has_wildcard || hooks_->watches_addr(mp0))
+                hooks_->fire_write(mp0, (uint32_t)v, 2);
+        }
         return true;
     }
 
@@ -1187,6 +1202,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
         ram_[mp2] = (uint8_t)((v >> 16) & 0xFF);
         ram_[mp3] = (uint8_t)((v >> 24) & 0xFF);
+
+        // Fire write hooks (zero-cost when no hooks registered)
+        if (hooks_ && hooks_->has_write())
+        {
+            if (hooks_->on_write_has_wildcard || hooks_->watches_addr(mp0))
+                hooks_->fire_write(mp0, v, 4);
+        }
         return true;
     }
 
@@ -1817,6 +1839,10 @@ void Bus::tick(uint32_t cycles)
         {
             i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
             ++vblank_total_count_;
+
+            // Fire VBlank hooks (zero-cost when no hooks registered)
+            if (hooks_ && hooks_->has_vblank())
+                hooks_->fire_vblank(vblank_total_count_);
 
             // ===== VBlank STUCK DETECTION =====
             // Check if GPU is making real frame progress (submitting primitives)

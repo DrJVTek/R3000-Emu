@@ -7,6 +7,12 @@
         "--package=agentvibes",
         "agentvibes-mcp-server"
       ]
+    },
+    "ghidra": {
+      "command": "python",
+      "args": [
+        "C:/tmp/GhidraMCP-release-1-4/bridge_mcp_ghidra.py"
+      ]
     }
   }
 }

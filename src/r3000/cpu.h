@@ -110,9 +110,9 @@ class Cpu
     void set_cycle_multiplier(uint32_t n) { cycle_multiplier_ = (n < 1) ? 1 : n; }
     uint32_t cycle_multiplier() const { return cycle_multiplier_; }
 
-    // Per-instruction cycle count: returns cycles consumed by the last step().
-    // GTE commands cost 5-44 cycles, MUL ~13, DIV ~36, other instructions 1.
-    uint32_t last_cycles() const { return last_instr_cycles_; }
+    // Per-instruction cycle count: returns multiplied cycles consumed by the last step().
+    // Raw cost (GTE 5-44, MUL 13, DIV 36, other 1) × cycle_multiplier_.
+    uint32_t last_cycles() const { return last_multiplied_cycles_; }
 
     // Debug: fichier de sortie texte (BIOS putc / syscalls "write-like" / etc).
     // Objectif: avoir un "console.log" séparé et facile à relire pendant le live.
@@ -332,8 +332,9 @@ class Cpu
 
     uint32_t bus_tick_accum_{0};
     uint32_t bus_tick_batch_{1}; // tick bus every N steps (1 = every step, 32 = batched)
-    uint32_t cycle_multiplier_{2}; // fallback CPI if not using per-instruction cycles
-    uint32_t last_instr_cycles_{1}; // cycles consumed by the last executed instruction
+    uint32_t cycle_multiplier_{2}; // CPI multiplier (real R3000 averages ~2 CPI)
+    uint32_t last_instr_cycles_{1}; // raw cycles set during instruction execution
+    uint32_t last_multiplied_cycles_{2}; // last_instr_cycles_ * cycle_multiplier_ (returned by last_cycles())
 
     std::FILE* compare_file_{nullptr};
 

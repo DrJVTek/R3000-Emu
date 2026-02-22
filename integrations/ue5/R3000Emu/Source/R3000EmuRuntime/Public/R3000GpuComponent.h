@@ -53,6 +53,13 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
     UTexture2D* GetVramTexture() const { return VramTexture_; }
 
+    // ------- Materials -------
+
+    /** Force refresh of material instances from current MatSemi0-3 / BaseMaterial slots.
+     *  Called automatically each frame, but you can call it manually after assigning materials in Blueprint. */
+    UFUNCTION(BlueprintCallable, Category = "R3000Emu|GPU|Materials")
+    void RefreshMaterials();
+
     // ------- Geometry mesh access -------
 
     /** The ProceduralMeshComponent that receives PS1 geometry each frame. */
@@ -69,9 +76,29 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
     bool IsDisplayEnabled() const;
 
-    /** Number of triangles in the last rendered frame. */
+    /** Number of triangles in the last rendered frame (all sections). */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
     int32 GetLastTriangleCount() const { return LastTriCount_; }
+
+    /** Number of opaque triangles (section 0) in the last frame. */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    int32 GetOpaqueTriCount() const { return SectionTriCount_[0]; }
+
+    /** Number of semi-transparent triangles (sections 1-4) in the last frame. */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    int32 GetSemiTransTriCount() const { return SectionTriCount_[1] + SectionTriCount_[2] + SectionTriCount_[3] + SectionTriCount_[4]; }
+
+    /** Number of non-empty mesh sections in the last frame (0-5). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    int32 GetMeshSectionCount() const { return LastSectionCount_; }
+
+    /** GPU frames per second (based on draw list swaps, not VBlank). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    float GetGpuFramesPerSecond() const { return GpuFps_; }
+
+    /** Per-section triangle count (0=opaque, 1-4=semi modes 0-3). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    int32 GetSectionTriCount(int32 Section) const { return (Section >= 0 && Section < kNumSections) ? SectionTriCount_[Section] : 0; }
 
     /** Number of VRAM texture uploads since start. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
@@ -122,9 +149,18 @@ public:
     bool bDebugMeshLog{false};
 
     /**
-     * Base material for PS1 rendering.
-     * Should be Unlit/Translucent with Disable Depth Test.
-     * Enable "Two Sided" to avoid holes from backface culling (PS1 has no culling).
+     * PS1 GPU materials — 5 slots for opaque + 4 semi-transparency blend modes.
+     * All materials share the same HLSL/vertex data layout (see UV docs below).
+     * Only the UE5 Blend Mode differs between them.
+     *
+     * ============================================================
+     * MESH SECTIONS:
+     * ============================================================
+     *   Section 0: Opaque/Masked — non-semi-transparent primitives
+     *   Section 1: Semi mode 0 — B/2 + F/2 (50% blend)
+     *   Section 2: Semi mode 1 — B + F     (additive)
+     *   Section 3: Semi mode 2 — B - F     (subtractive)
+     *   Section 4: Semi mode 3 — B + F/4   (25% additive)
      *
      * ============================================================
      * MATERIAL TEXTURE PARAMETERS:
@@ -187,8 +223,26 @@ public:
      *   2: 1.0*Back - 1.0*Front
      *   3: 1.0*Back + 0.25*Front
      */
+
+    /** Base material for opaque/masked primitives (section 0). Also used as fallback for semi-transparent slots left empty. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
     UMaterialInterface* BaseMaterial{nullptr};
+
+    /** Material for semi-transparency mode 0: B/2 + F/2. UE5 Blend Mode: Translucent, Opacity=0.5. Falls back to BaseMaterial if null. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UMaterialInterface* MatSemi0{nullptr};
+
+    /** Material for semi-transparency mode 1: B + F (additive). UE5 Blend Mode: Additive. Falls back to BaseMaterial if null. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UMaterialInterface* MatSemi1{nullptr};
+
+    /** Material for semi-transparency mode 2: B - F (subtractive). UE5 Blend Mode: Modulate (approx). Falls back to BaseMaterial if null. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UMaterialInterface* MatSemi2{nullptr};
+
+    /** Material for semi-transparency mode 3: B + F/4 (25% additive). UE5 Blend Mode: Additive, color*0.25. Falls back to BaseMaterial if null. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UMaterialInterface* MatSemi3{nullptr};
 
     // ------- VRAM Debug Viewer -------
 
@@ -266,16 +320,21 @@ private:
     void CreateVramTexture();
     void UpdateVramTexture();
     void RebuildMesh();
+    void EnsureMaterialInstances();  // Lazy-create/refresh MatInst_ from current material slots
     void CreateOrUpdateVramViewer();
     void DestroyVramViewer();
 
     gpu::Gpu* Gpu_{nullptr};
 
     // Geometry rendering
+    static constexpr int32 kNumSections = 5; // 0=opaque, 1-4=semi modes 0-3
     UPROPERTY()
     UProceduralMeshComponent* MeshComp_{nullptr};
     UPROPERTY()
-    UMaterialInstanceDynamic* MatInst_{nullptr};
+    TArray<UMaterialInstanceDynamic*> MatInst_;
+    // Track which source materials were used to create MatInst_, so we detect changes
+    UPROPERTY()
+    TArray<UMaterialInterface*> MatInstSource_;
 
     // VRAM texture (shared between geometry material + VRAM viewer)
     UPROPERTY()
@@ -285,6 +344,11 @@ private:
     uint32 LastVramWriteSeq_{0xFFFFFFFFu};
     uint32 LastVramFrame_{0xFFFFFFFFu};
     int32 LastTriCount_{0};
+    int32 SectionTriCount_[kNumSections]{0};
+    int32 LastSectionCount_{0};
+    float GpuFps_{0.0f};
+    double LastGpuFpsTime_{0.0};
+    uint32 LastGpuFpsFrame_{0};
     int32 VramUploadCount_{0};
 
     // VRAM debug viewer

@@ -58,6 +58,16 @@ class UR3000EmuComponent : public UActorComponent
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu")
     int32 GetCyclesLastFrame() const { return CyclesLastFrame_.Load(); }
 
+    /** Dev kit mode: boots from ExePath (PS-EXE) instead of BIOS/CD.
+     *  When true, ExePath is used to load the EXE directly.
+     *  When false, normal BIOS/CD boot is used (DiscPath + BiosPath). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
+    bool bDevKitMode{false};
+
+    /** Is the emulator in dev kit mode (EXE direct boot)? */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu")
+    bool IsDevKitMode() const { return bDevKitMode; }
+
     // Optional: BIOS path to boot on BeginPlay.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     FString BiosPath;
@@ -65,6 +75,12 @@ class UR3000EmuComponent : public UActorComponent
     // Optional: CD image path to insert after init.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     FString DiscPath;
+
+    // Optional: PS-EXE/CPE path for direct dev boot (no BIOS/CD needed).
+    // When set, takes priority over BiosPath/DiscPath/bFastBoot.
+    // Use this to load test ROMs compiled with PSn00bSDK.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
+    FString ExePath;
 
     // Optional: run N steps on BeginPlay (0 = don't run).
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")

@@ -12,6 +12,7 @@
 #include "../log/logger.h"
 #include "../r3000/bus.h"
 #include "../r3000/cpu.h"
+#include "hooks.h"
 
 namespace emu
 {
@@ -84,6 +85,9 @@ class Core
     // Fast boot: read SYSTEM.CNF from CD, load the EXE, set PC/GP/SP. Requires init_from_image() first.
     bool fast_boot_from_cd(char* err, size_t err_cap);
 
+    // Dev kit boot: load PS-EXE from file, set PC/GP/SP, init HLE kernel. Requires init_from_image() first.
+    bool fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap);
+
     // Step execution (1 instruction). Valid after init_from_image().
     r3000::Cpu::StepResult step();
 
@@ -93,6 +97,9 @@ class Core
 
     r3000::Bus* bus();
     r3000::Cpu* cpu();
+
+    // Hook system: register diagnostic hooks (memory watches, vblank callbacks, etc.)
+    Hooks& hooks() { return hooks_; }
 
     // Controller input (thread-safe, forwarded to Bus).
     void set_pad_buttons(uint16_t v);
@@ -123,6 +130,7 @@ class Core
 
     rlog::Logger* logger_{nullptr};
     BootMilestones milestones_{};
+    Hooks hooks_{};
 
     std::unique_ptr<uint8_t[]> ram_{};
     uint32_t ram_size_{0};

@@ -101,6 +101,9 @@ struct FrameStats
     uint32_t vram_to_cpu{0};
     uint32_t env_cmds{0};
     uint32_t total_words{0};
+    // Semi-transparency diagnostics
+    uint32_t semi_tris{0};         // Total semi-transparent triangles pushed
+    uint32_t semi_mode_count[4]{}; // Per-mode count (0-3)
 
     void reset()
     {
@@ -108,6 +111,8 @@ struct FrameStats
         vram_to_vram = cpu_to_vram = vram_to_cpu = 0;
         env_cmds = 0;
         total_words = 0;
+        semi_tris = 0;
+        semi_mode_count[0] = semi_mode_count[1] = semi_mode_count[2] = semi_mode_count[3] = 0;
     }
 };
 

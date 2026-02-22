@@ -195,6 +195,9 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
         return false;
     }
 
+    // Hook system: pass hooks to Bus for VBlank/write dispatch.
+    bus_->set_hooks(&hooks_);
+
     // Bus tracing options (diagnostic only).
     if (has_clock_)
         bus_->set_trace_vector_sink(iolog_, clock_);
@@ -267,6 +270,10 @@ r3000::Cpu::StepResult Core::step()
     const uint32_t pc_before = cpu_->pc();
     const auto res = cpu_->step();
     ++g_step_count;
+
+    // Fire per-instruction hooks (zero-cost when no hooks registered)
+    if (hooks_.has_step())
+        hooks_.fire_step(res.pc);
 
     // MILESTONE 1: BIOS → Shell/Game (PC goes from 0xBFCxxxxx to 0x800xxxxx)
     if (!milestones_.bios_to_shell_logged)
@@ -604,6 +611,73 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
     bus_->set_watch_ram_u32(0x0007'BCF4u, 1);
 
     emu::logf(emu::LogLevel::info, "CORE", "Fast boot: PC=0x%08X GP=0x%08X SP=0x%08X", pc0, gp0, cpu_->gpr(29));
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Dev kit boot: load PS-EXE from file + HLE kernel init
+// ---------------------------------------------------------------------------
+bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
+{
+    if (!cpu_ || !bus_ || !ram_)
+    {
+        set_err(err, err_cap, "core not initialized");
+        return false;
+    }
+
+    // 1. Load EXE file into RAM
+    loader::LoadedImage img{};
+    if (!loader::load_file_into_ram(exe_path, loader::Format::auto_detect,
+            ram_.get(), ram_size_, &img, err, err_cap))
+    {
+        return false; // err already set by loader
+    }
+
+    // 2. Set CPU state from EXE header
+    cpu_->set_pc(img.entry_pc);
+    if (img.has_gp)
+        cpu_->set_gpr(28, img.gp);
+    if (img.has_sp)
+        cpu_->set_gpr(29, img.sp);
+    else
+        cpu_->set_gpr(29, 0x801F'FF00u);
+
+    // 3. Initialize minimal hardware state (same as fast_boot_from_cd)
+
+    cpu_->set_hle_vectors(1);
+    cpu_->set_use_gpu_vblank(1);
+
+    // I_MASK: VBLANK(0) + DMA(3)
+    {
+        r3000::Bus::MemFault mf{};
+        bus_->write_u32(0x1F80'1074u, 0x0009u, mf); // bits 0+3
+    }
+
+    // COP0 Status: IEc=1, IM2=1, IM0=1
+    cpu_->set_cop0(12, (1u << 0) | (1u << 8) | (1u << 10));
+
+    // PCB/TCB kernel structures
+    {
+        constexpr uint32_t kPcbAddr = 0x0200u;
+        constexpr uint32_t kTcbAddr = 0x0300u;
+        constexpr uint32_t kTcbSize = 0xC0u;
+
+        std::memset(ram_.get() + kPcbAddr, 0, 0x10);
+        std::memset(ram_.get() + kTcbAddr, 0, kTcbSize);
+
+        auto w32 = [&](uint32_t addr, uint32_t val) {
+            std::memcpy(ram_.get() + addr, &val, 4);
+        };
+        w32(kTcbAddr, 0x4000u);
+        w32(kTcbAddr + 0x94, (1u << 2) | (1u << 10));
+        w32(kPcbAddr, 0x80000000u | kTcbAddr);
+        w32(0x108, 0x80000000u | kPcbAddr);
+
+        cpu_->set_hle_tcb_addr(kTcbAddr);
+    }
+
+    emu::logf(emu::LogLevel::info, "CORE", "Dev kit boot: %s PC=0x%08X SP=0x%08X",
+        exe_path, img.entry_pc, cpu_->gpr(29));
     return true;
 }
 

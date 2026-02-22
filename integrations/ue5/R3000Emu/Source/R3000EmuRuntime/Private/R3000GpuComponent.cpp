@@ -106,7 +106,7 @@ float UR3000GpuComponent::GetEffectivePixelScale() const
 void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
 {
     UE_LOG(LogR3000Gpu, Warning, TEXT("BindGpu called. InGpu=%p (was Gpu_=%p)"), InGpu, Gpu_);
-    emu::logf(emu::LogLevel::info, "GPU", "GpuComponent v8 (uniform_hd_scale)");
+    emu::logf(emu::LogLevel::info, "GPU", "GpuComponent v11 (run_based_sections)");
 
     Gpu_ = InGpu;
 
@@ -132,15 +132,10 @@ void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
     if (!VramTexture_)
         CreateVramTexture();
 
-    // ---- Geometry material instance ----
-    if (BaseMaterial && !MatInst_)
-    {
-        MatInst_ = UMaterialInstanceDynamic::Create(BaseMaterial, this);
-        if (MatInst_ && VramTexture_)
-            MatInst_->SetTextureParameterValue(TEXT("VramTexture"), VramTexture_);
-    }
+    // ---- Geometry material instances (5 sections) ----
+    EnsureMaterialInstances();
 
-    // Warn if no material assigned - mesh will be invisible!
+    // Warn if no material assigned at all
     if (!BaseMaterial)
     {
         UE_LOG(LogR3000Gpu, Error, TEXT("WARNING: BaseMaterial is NULL! Assign a material in the Blueprint or mesh will be invisible."));
@@ -151,8 +146,74 @@ void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
     if (bShowVramViewer)
         CreateOrUpdateVramViewer();
 
-    UE_LOG(LogR3000Gpu, Log, TEXT("GPU bound. MeshComp=%d VramTex=%d Mat=%d VramViewer=%d"),
-        MeshComp_ != nullptr, VramTexture_ != nullptr, MatInst_ != nullptr, bShowVramViewer);
+    UE_LOG(LogR3000Gpu, Log, TEXT("GPU bound. MeshComp=%d VramTex=%d Mat[0..4]=%d%d%d%d%d VramViewer=%d"),
+        MeshComp_ != nullptr, VramTexture_ != nullptr,
+        MatInst_.IsValidIndex(0) && MatInst_[0] != nullptr,
+        MatInst_.IsValidIndex(1) && MatInst_[1] != nullptr,
+        MatInst_.IsValidIndex(2) && MatInst_[2] != nullptr,
+        MatInst_.IsValidIndex(3) && MatInst_[3] != nullptr,
+        MatInst_.IsValidIndex(4) && MatInst_[4] != nullptr, bShowVramViewer);
+}
+
+// ===================================================================
+// Material instance management — lazy create/refresh
+// ===================================================================
+void UR3000GpuComponent::EnsureMaterialInstances()
+{
+    // Resolve source material for each section: specific slot → BaseMaterial fallback
+    UMaterialInterface* Wanted[kNumSections] = {
+        BaseMaterial,
+        MatSemi0 ? MatSemi0 : BaseMaterial,
+        MatSemi1 ? MatSemi1 : BaseMaterial,
+        MatSemi2 ? MatSemi2 : BaseMaterial,
+        MatSemi3 ? MatSemi3 : BaseMaterial,
+    };
+
+    // Initialize arrays on first call
+    if (MatInst_.Num() != kNumSections)
+    {
+        MatInst_.SetNum(kNumSections);
+        MatInstSource_.SetNum(kNumSections);
+        for (int32 s = 0; s < kNumSections; ++s)
+        {
+            MatInst_[s] = nullptr;
+            MatInstSource_[s] = nullptr;
+        }
+    }
+
+    // (Re)create dynamic instances if the source material changed or wasn't set
+    for (int32 s = 0; s < kNumSections; ++s)
+    {
+        if (!Wanted[s])
+            continue;
+
+        // Already created from this exact source? Skip.
+        if (MatInst_[s] && MatInstSource_[s] == Wanted[s])
+            continue;
+
+        // Source changed or first time — (re)create
+        MatInst_[s] = UMaterialInstanceDynamic::Create(Wanted[s], this);
+        MatInstSource_[s] = Wanted[s];
+        if (MatInst_[s] && VramTexture_)
+            MatInst_[s]->SetTextureParameterValue(TEXT("VramTexture"), VramTexture_);
+
+        UE_LOG(LogR3000Gpu, Log, TEXT("MatInst_[%d] (re)created from %s"), s,
+            *Wanted[s]->GetName());
+    }
+}
+
+void UR3000GpuComponent::RefreshMaterials()
+{
+    // Force re-evaluation by clearing source tracking
+    MatInstSource_.SetNum(kNumSections);
+    for (int32 s = 0; s < kNumSections; ++s)
+        MatInstSource_[s] = nullptr;
+
+    EnsureMaterialInstances();
+
+    UE_LOG(LogR3000Gpu, Log, TEXT("RefreshMaterials: Mat[0..4]=%d%d%d%d%d"),
+        MatInst_[0] != nullptr, MatInst_[1] != nullptr, MatInst_[2] != nullptr,
+        MatInst_[3] != nullptr, MatInst_[4] != nullptr);
 }
 
 // ===================================================================
@@ -315,50 +376,55 @@ void UR3000GpuComponent::RebuildMesh()
         return;
     }
 
+    // Lazy-(re)create material instances if slots were assigned after BindGpu
+    // (e.g., Blueprint BeginPlay sets MatSemi0-3 after InitEmulator already called BindGpu)
+    EnsureMaterialInstances();
+
     // Log first time we receive primitives (confirms GPU bridge working)
     static bool bFirstPrimitives = true;
     if (bFirstPrimitives)
     {
-        UE_LOG(LogR3000Gpu, Warning, TEXT("GPU: First primitives received! %d triangles. MatInst=%d"), NumCmds, MatInst_ != nullptr ? 1 : 0);
-        emu::logf(emu::LogLevel::info, "GPU", "UE5 First primitives! %d tris, MatInst=%s", NumCmds, MatInst_ ? "OK" : "NULL (INVISIBLE!)");
+        const bool bHasMat0 = MatInst_.IsValidIndex(0) && MatInst_[0] != nullptr;
+        UE_LOG(LogR3000Gpu, Warning, TEXT("GPU: First primitives received! %d triangles. Mat[0]=%d"), NumCmds, bHasMat0 ? 1 : 0);
+        emu::logf(emu::LogLevel::info, "GPU", "UE5 First primitives! %d tris, Mat[0]=%s", NumCmds, bHasMat0 ? "OK" : "NULL (INVISIBLE!)");
         bFirstPrimitives = false;
     }
 
-    const int32 NumVerts = NumCmds * 3;
+    // ── Run-based sectioning ──────────────────────────────────────────
+    // Walk the draw list linearly. A new mesh section is created only when
+    // the blend mode (material index) changes. Consecutive primitives with
+    // the same mode share one section → minimum draw calls while preserving
+    // PS1 painter's algorithm order via depth (ZStep).
+    //
+    // Material mapping: 0=opaque(BaseMaterial), 1-4=semi modes 0-3 (MatSemi0-3)
 
-    TArray<FVector> Vertices;
-    TArray<int32> Triangles;
-    TArray<FVector> Normals;
-    TArray<FVector2D> UV0;
-    TArray<FVector2D> UV1;
-    TArray<FVector2D> UV2;
-    TArray<FVector2D> UV3;
-    TArray<FLinearColor> Colors;
-    TArray<FProcMeshTangent> Tangents;
+    // Per-section vertex buffers (reused across runs via swap)
+    struct RunSection
+    {
+        TArray<FVector> Vertices;
+        TArray<int32> Triangles;
+        TArray<FVector> Normals;
+        TArray<FVector2D> UV0, UV1, UV2, UV3;
+        TArray<FLinearColor> Colors;
+        TArray<FProcMeshTangent> Tangents;
+        int32 MatIdx{0};  // Which material (0=opaque, 1-4=semi modes)
 
-    Vertices.Reserve(NumVerts);
-    Triangles.Reserve(NumVerts);
-    Normals.Reserve(NumVerts);
-    UV0.Reserve(NumVerts);
-    UV1.Reserve(NumVerts);
-    UV2.Reserve(NumVerts);
-    UV3.Reserve(NumVerts);
-    Colors.Reserve(NumVerts);
-    Tangents.Reserve(NumVerts);
+        void Reserve(int32 NumTris)
+        {
+            const int32 N = NumTris * 3;
+            Vertices.Reserve(N); Triangles.Reserve(N); Normals.Reserve(N);
+            UV0.Reserve(N); UV1.Reserve(N); UV2.Reserve(N); UV3.Reserve(N);
+            Colors.Reserve(N); Tangents.Reserve(N);
+        }
+    };
 
-    // Normals face -X so the front of the mesh faces a camera looking down +X
     const FVector FaceNormal(-1.0f, 0.0f, 0.0f);
     const FProcMeshTangent FaceTangent(0.0f, 1.0f, 0.0f);
 
     // PS1→UE5 coordinate transform
-    // Vertices are now screen-relative (draw_offset subtracted in GPU).
-    // Both double-buffer halves map to (0..width, 0..height).
-    // Origin = center of PS1 screen resolution for centering.
     const gpu::DisplayConfig& Disp = DrawList.display;
     const float OriginX = 0.5f * static_cast<float>(Disp.width());
     const float OriginY = 0.5f * static_cast<float>(Disp.height());
-
-    // Compute effective scale: uniform HD or manual
     const float EffScale = GetEffectivePixelScale();
 
     if (bDebugMeshLog)
@@ -370,31 +436,43 @@ void UR3000GpuComponent::RebuildMesh()
             EffScale, HdName, OriginX, OriginY);
     }
 
+    // Collect runs: walk draw list, flush section on material change
+    TArray<RunSection> Runs;
+    Runs.Reserve(32);  // Typical: 5-20 material transitions per frame
+
+    int32 CurMatIdx = -1;  // Force first primitive to open a run
+    RunSection* Cur = nullptr;
     float Ps1MinX = 1e9f, Ps1MaxX = -1e9f, Ps1MinY = 1e9f, Ps1MaxY = -1e9f;
+    int32 SemiTriCounts[kNumSections] = {};
 
     for (int32 i = 0; i < NumCmds; ++i)
     {
         const gpu::DrawCmd& Cmd = DrawList.cmds[i];
-        // PS1 uses painter's algorithm: later triangles are drawn on top.
-        // With depth buffer, we need REVERSE order: later triangles = smaller depth (closer to camera)
         const float Depth = static_cast<float>(NumCmds - 1 - i) * ZStep;
+
+        const bool bSemiTrans = (Cmd.flags & 2) != 0;
+        const int32 MatIdx = bSemiTrans ? 1 + (Cmd.semi_mode & 3) : 0;
+        SemiTriCounts[MatIdx]++;
+
+        // New section needed?
+        if (MatIdx != CurMatIdx)
+        {
+            Runs.AddDefaulted();
+            Cur = &Runs.Last();
+            Cur->MatIdx = MatIdx;
+            Cur->Reserve(64);  // Reasonable initial reserve
+            CurMatIdx = MatIdx;
+        }
+
+        const int32 BaseVert = Cur->Vertices.Num();
 
         for (int32 j = 0; j < 3; ++j)
         {
             const gpu::DrawVertex& V = Cmd.v[j];
 
-            // GPU draw commands store absolute drawing buffer coords (draw offset is baked into vertices).
-            // No adjustment needed here - the vertices are already in screen-space.
-            float vx = static_cast<float>(V.x);
-            float vy = static_cast<float>(V.y);
-
-            // Drawing buffer coords → clip-relative (origin at display center or clip top-left) → UE5
-            // +0.5: PS1 uses pixel-center convention (coords at pixel centers)
-            float dx = (vx + 0.5f) - OriginX;
-            float dy = (vy + 0.5f) - OriginY;
-            float px = dx * EffScale + DisplayOffset.X;
-            float py = -dy * EffScale + DisplayOffset.Y;
-            Vertices.Add(FVector(Depth, px, py));
+            const float dx = (static_cast<float>(V.x) + 0.5f) - OriginX;
+            const float dy = (static_cast<float>(V.y) + 0.5f) - OriginY;
+            Cur->Vertices.Add(FVector(Depth, dx * EffScale + DisplayOffset.X, -dy * EffScale + DisplayOffset.Y));
 
             if (bDebugMeshLog)
             {
@@ -404,89 +482,42 @@ void UR3000GpuComponent::RebuildMesh()
                 Ps1MaxY = FMath::Max(Ps1MaxY, static_cast<float>(V.y));
             }
 
-            Normals.Add(FaceNormal);
-            Tangents.Add(FaceTangent);
+            Cur->Normals.Add(FaceNormal);
+            Cur->Tangents.Add(FaceTangent);
+            Cur->Colors.Add(FLinearColor(V.r / 255.0f, V.g / 255.0f, V.b / 255.0f, 1.0f));
 
-            // Vertex color: PS1 RGB is in sRGB gamma space.
-            // Convert sRGB→linear so UE5 renders correct brightness/contrast.
-            //Colors.Add(FLinearColor::FromSRGBColor(FColor(V.r, V.g, V.b, 255)));
-            Colors.Add(FLinearColor(V.r / 255.0f, V.g / 255.0f, V.b / 255.0f, 1.0f));
+            Cur->UV0.Add(FVector2D(static_cast<float>(V.u), static_cast<float>(V.v)));
 
-            // ============================================================
-            // TEXTURE DATA FOR MATERIAL (all in PIXELS, not normalized)
-            // ============================================================
-            //
-            // PS1 VRAM is 1024x512 pixels (16-bit per pixel)
-            // Texture pages are 256x256 in texture coords, but actual VRAM size depends on depth:
-            //   4-bit:  64x256 VRAM pixels (256 texels packed, 4 texels per 16-bit word)
-            //   8-bit: 128x256 VRAM pixels (256 texels, 2 texels per 16-bit word)
-            //  15-bit: 256x256 VRAM pixels (direct color, 1 texel per 16-bit word)
-            //
-            // UV0: Texture coords (u, v) in pixels 0-255 within texture page
-            // UV1: Texture page base in VRAM pixels (X: 0,64,128...960  Y: 0 or 256)
-            // UV2: CLUT position in VRAM pixels (X: 0,16,32...1008  Y: 0-511)
-            // UV3.x: Texture mode: 0=no texture (flat/gouraud), 1=4-bit, 2=8-bit, 3=15-bit direct
-            // UV3.y: Flags packed: bits[1:0]=semi_mode(0-3), bit2=is_semi_transparent, bit3=is_raw_texture
-            //
-            // VRAM texture is 1024x512 BGRA8. To sample:
-            //   - Compute VRAM pixel coords: vramX = tpBaseX + (u * scale), vramY = tpBaseY + v
-            //   - Scale depends on tex depth: 4-bit=0.25, 8-bit=0.5, 15-bit=1.0
-            //   - For 4/8-bit: read index from VRAM, then lookup CLUT[index] at clutPos
-            // ============================================================
-
-            // UV0: texture coords (u, v) as raw pixel values 0-255
-            UV0.Add(FVector2D(static_cast<float>(V.u), static_cast<float>(V.v)));
-
-            // UV1: texture page base in VRAM (pixels)
-            // texpage bits 0-3 = X base (multiply by 64)
-            // texpage bit 4 = Y base (0 or 256)
             const float TpBaseX = static_cast<float>((Cmd.texpage & 0xF) * 64);
             const float TpBaseY = static_cast<float>(((Cmd.texpage >> 4) & 1) * 256);
-            UV1.Add(FVector2D(TpBaseX, TpBaseY));
+            Cur->UV1.Add(FVector2D(TpBaseX, TpBaseY));
 
-            // UV2: CLUT position in VRAM (pixels)
-            // clut bits 0-5 = X position / 16
-            // clut bits 6-14 = Y position
             const float ClutX = static_cast<float>((Cmd.clut & 0x3F) * 16);
             const float ClutY = static_cast<float>((Cmd.clut >> 6) & 0x1FF);
-            UV2.Add(FVector2D(ClutX, ClutY));
+            Cur->UV2.Add(FVector2D(ClutX, ClutY));
 
-            // UV3: texture mode + flags
-            // X = texture depth mode: 0=none (flat/gouraud color only), 1=4-bit, 2=8-bit, 3=15-bit
-            // Y = packed flags: bits[1:0]=semi_mode, bit2=is_semi_trans, bit3=is_raw_texture
             const bool bTextured = (Cmd.flags & 1) != 0;
-            const bool bSemiTrans = (Cmd.flags & 2) != 0;
             const bool bRawTexture = (Cmd.flags & 4) != 0;
             const float TexMode = bTextured ? static_cast<float>(Cmd.tex_depth + 1) : 0.0f;
             const float FlagsPacked = static_cast<float>(
-                (Cmd.semi_mode & 0x3) |           // bits 0-1: semi mode
-                (bSemiTrans ? 0x4 : 0) |          // bit 2: is semi-transparent
-                (bRawTexture ? 0x8 : 0)           // bit 3: is raw texture (no color modulation)
+                (Cmd.semi_mode & 0x3) |
+                (bSemiTrans ? 0x4 : 0) |
+                (bRawTexture ? 0x8 : 0)
             );
-            UV3.Add(FVector2D(TexMode, FlagsPacked));
+            Cur->UV3.Add(FVector2D(TexMode, FlagsPacked));
 
-            // Winding order: PS1 has no backface culling, but UE5 does.
-            // The Y inversion (-dy) flips winding, so we reverse vertex order:
-            // Instead of 0,1,2 we add 0,2,1 to get correct CCW winding in UE5.
             static const int32 WindingRemap[3] = {0, 2, 1};
-            Triangles.Add(i * 3 + WindingRemap[j]);
+            Cur->Triangles.Add(BaseVert + WindingRemap[j]);
         }
 
-        // Log first 3 tris with full vertex coords (PS1 -> UE5)
         if (bDebugMeshLog && i < 3)
         {
             const gpu::DrawVertex& Va = Cmd.v[0];
             const gpu::DrawVertex& Vb = Cmd.v[1];
             const gpu::DrawVertex& Vc = Cmd.v[2];
-            float dxa = (static_cast<float>(Va.x) + 0.5f) - OriginX, dya = (static_cast<float>(Va.y) + 0.5f) - OriginY;
-            float dxb = (static_cast<float>(Vb.x) + 0.5f) - OriginX, dyb = (static_cast<float>(Vb.y) + 0.5f) - OriginY;
-            float dxc = (static_cast<float>(Vc.x) + 0.5f) - OriginX, dyc = (static_cast<float>(Vc.y) + 0.5f) - OriginY;
-            emu::logf(emu::LogLevel::info, "GPU", "  Tri[%d]: PS1 v0=(%d,%d) v1=(%d,%d) v2=(%d,%d) -> UE5 (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) | tex=%d semi=%d",
-                i, Va.x, Va.y, Vb.x, Vb.y, Vc.x, Vc.y,
-                dxa * EffScale + DisplayOffset.X, -dya * EffScale + DisplayOffset.Y,
-                dxb * EffScale + DisplayOffset.X, -dyb * EffScale + DisplayOffset.Y,
-                dxc * EffScale + DisplayOffset.X, -dyc * EffScale + DisplayOffset.Y,
-                (Cmd.flags & 1) ? 1 : 0, (Cmd.flags & 2) ? 1 : 0);
+            emu::logf(emu::LogLevel::info, "GPU", "  Tri[%d] mat=%d: PS1 (%d,%d)(%d,%d)(%d,%d) | tex=%d semi=%d smode=%d",
+                i, MatIdx, Va.x, Va.y, Vb.x, Vb.y, Vc.x, Vc.y,
+                (Cmd.flags & 1) ? 1 : 0, (Cmd.flags & 2) ? 1 : 0, Cmd.semi_mode);
         }
     }
 
@@ -496,43 +527,67 @@ void UR3000GpuComponent::RebuildMesh()
             Ps1MinX, Ps1MaxX, Ps1MinY, Ps1MaxY, Ps1MaxX - Ps1MinX, Ps1MaxY - Ps1MinY);
     }
 
+    // ── Create mesh sections in draw order ───────────────────────────
     MeshComp_->ClearAllMeshSections();
-    MeshComp_->CreateMeshSection_LinearColor(
-        0, Vertices, Triangles, Normals, UV0, UV1, UV2, UV3,
-        Colors, Tangents, false /*bCreateCollision*/);
+    int32 TotalTris = 0;
 
-    // Force bounds update and log mesh info
+    for (int32 r = 0; r < Runs.Num(); ++r)
+    {
+        const RunSection& Run = Runs[r];
+        if (Run.Vertices.Num() == 0)
+            continue;
+
+        MeshComp_->CreateMeshSection_LinearColor(
+            r, Run.Vertices, Run.Triangles, Run.Normals,
+            Run.UV0, Run.UV1, Run.UV2, Run.UV3,
+            Run.Colors, Run.Tangents, false /*bCreateCollision*/);
+
+        // Assign the correct material for this run's blend mode
+        if (MatInst_.IsValidIndex(Run.MatIdx) && MatInst_[Run.MatIdx])
+            MeshComp_->SetMaterial(r, MatInst_[Run.MatIdx]);
+
+        TotalTris += Run.Triangles.Num() / 3;
+    }
+    MeshComp_->MarkRenderStateDirty();
+
     if (bDebugMeshLog)
     {
         FBoxSphereBounds Bounds = MeshComp_->Bounds;
-        emu::logf(emu::LogLevel::info, "GPU", "MeshCreated: Verts=%d Tris=%d Bounds=Origin(%.1f,%.1f,%.1f) Extent(%.1f,%.1f,%.1f)",
-            Vertices.Num(), Triangles.Num() / 3,
+        emu::logf(emu::LogLevel::info, "GPU", "MeshCreated: %d tris, %d sections (runs) [opq=%d s0=%d s1=%d s2=%d s3=%d] Bounds=(%.1f,%.1f,%.1f)±(%.1f,%.1f,%.1f)",
+            TotalTris, Runs.Num(),
+            SemiTriCounts[0], SemiTriCounts[1], SemiTriCounts[2], SemiTriCounts[3], SemiTriCounts[4],
             Bounds.Origin.X, Bounds.Origin.Y, Bounds.Origin.Z,
             Bounds.BoxExtent.X, Bounds.BoxExtent.Y, Bounds.BoxExtent.Z);
     }
 
-    if (MatInst_)
+    // Warn if no materials assigned
+    if (!MatInst_.IsValidIndex(0) || !MatInst_[0])
     {
-        MeshComp_->SetMaterial(0, MatInst_);
-        MeshComp_->MarkRenderStateDirty(); // Force render state update after material change
-        if (bDebugMeshLog)
-            emu::logf(emu::LogLevel::info, "GPU", "SetMaterial: MatInst_=%p BaseMaterial=%s MeshVisible=%d",
-                (void*)MatInst_, BaseMaterial ? TCHAR_TO_UTF8(*BaseMaterial->GetName()) : "NULL",
-                MeshComp_->IsVisible() ? 1 : 0);
-    }
-    else
-    {
-        // ALWAYS warn when no material - this makes the mesh invisible!
         static bool bWarnedNoMat = false;
         if (!bWarnedNoMat)
         {
-            UE_LOG(LogR3000Gpu, Error, TEXT("GPU RebuildMesh: No material! %d triangles built but INVISIBLE. Set BaseMaterial in Blueprint!"), NumCmds);
-            emu::logf(emu::LogLevel::error, "GPU", "RebuildMesh: No material! %d tris INVISIBLE. Set BaseMaterial in Blueprint!", NumCmds);
+            UE_LOG(LogR3000Gpu, Error, TEXT("GPU RebuildMesh: No BaseMaterial! %d triangles may be INVISIBLE."), NumCmds);
+            emu::logf(emu::LogLevel::error, "GPU", "RebuildMesh: No BaseMaterial! %d tris may be INVISIBLE!", NumCmds);
             bWarnedNoMat = true;
         }
     }
 
-    LastTriCount_ = NumCmds;
+    LastTriCount_ = TotalTris;
+    for (int32 s = 0; s < kNumSections; ++s)
+        SectionTriCount_[s] = SemiTriCounts[s];
+    LastSectionCount_ = Runs.Num();
+
+    // Compute GPU FPS (frames with actual draw commands per second)
+    const double Now = FPlatformTime::Seconds();
+    const double GpuElapsed = Now - LastGpuFpsTime_;
+    if (GpuElapsed >= 1.0)
+    {
+        const uint32 CurrentGpuFrame = DrawList.frame_id;
+        const uint32 DeltaFrames = CurrentGpuFrame - LastGpuFpsFrame_;
+        GpuFps_ = static_cast<float>(DeltaFrames / GpuElapsed);
+        LastGpuFpsTime_ = Now;
+        LastGpuFpsFrame_ = CurrentGpuFrame;
+    }
 }
 
 // ===================================================================
@@ -736,3 +791,4 @@ bool UR3000GpuComponent::IsDisplayEnabled() const
 {
     return Gpu_ ? Gpu_->display_config().display_enabled : false;
 }
+

@@ -155,12 +155,18 @@ class Gte
     void push_color(int32_t r, int32_t g, int32_t b, uint8_t code);
 
     void check_mac_overflow(int idx, int64_t raw);
+    int64_t sign_extend_mac(int idx, int64_t v);  // 44-bit truncation + overflow check
     void set_mac(int idx, int64_t v);
     void set_mac_shifted(int idx, int64_t raw, int shift);
     void set_ir(int idx, int32_t v, int lm);
 
     // Internal RTPS for single vertex (called by both RTPS and RTPT)
     void rtps_internal(const int32_t V[3], int sf, int lm, bool last);
+
+    // DuckStation InterpolateColor pattern: MAC+(FC-MAC)*IR0
+    void interpolate_color(int64_t in1, int64_t in2, int64_t in3, int shift, int lm);
+    // Internal DPCS (takes raw RGB bytes, used by DPCS and DPCT)
+    void dpcs_internal(const uint8_t color[3], int shift, int lm);
 
     // Commandes (subset utile pour démarrer "matrices").
     void cmd_mvmva(uint32_t cmd);

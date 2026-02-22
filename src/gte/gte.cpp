@@ -78,7 +78,7 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3, uint32_t& flag_out)
 
 Gte::Gte()
 {
-    emu::logf(emu::LogLevel::warn, "GTE", "GTE source v10 (per_cmd_cycles)");
+    emu::logf(emu::LogLevel::warn, "GTE", "GTE source v11 (color_diag)");
     reset();
 }
 
@@ -93,12 +93,80 @@ void Gte::reset()
 
 uint32_t Gte::read_data(uint32_t idx) const
 {
-    return data_[idx & 31u];
+    idx &= 31u;
+    switch (idx)
+    {
+    case D_SXYP: // reg 15: mirror of SXY2 (DuckStation: return r32[14])
+        return data_[D_SXY2];
+    case D_IRGB: // reg 28: computed from IR1/IR2/IR3 (same as ORGB)
+    case D_ORGB: // reg 29: computed from IR1/IR2/IR3
+    {
+        // DuckStation: clamp(IR / 0x80, 0, 0x1F) — signed division
+        const auto c5 = [](int32_t ir) -> uint32_t {
+            int32_t v = ir / 0x80;
+            if (v < 0) v = 0;
+            if (v > 0x1F) v = 0x1F;
+            return (uint32_t)v;
+        };
+        return c5((int32_t)data_[D_IR1])
+             | (c5((int32_t)data_[D_IR2]) << 5)
+             | (c5((int32_t)data_[D_IR3]) << 10);
+    }
+    case D_LZCR: // reg 31: count leading zeros/ones of LZCS
+    {
+        const uint32_t lzcs = data_[D_LZCS];
+        uint32_t val = ((int32_t)lzcs < 0) ? ~lzcs : lzcs;
+        return (val == 0u) ? 32 : count_leading_zeros(val);
+    }
+    default:
+        return data_[idx];
+    }
 }
 
 void Gte::write_data(uint32_t idx, uint32_t v)
 {
-    data_[idx & 31u] = v;
+    idx &= 31u;
+    switch (idx)
+    {
+    case 1:  // VZ0
+    case 3:  // VZ1
+    case 5:  // VZ2
+    case 8:  // IR0
+    case 9:  // IR1
+    case 10: // IR2
+    case 11: // IR3
+        // sign-extend 16-bit value to 32-bit (DuckStation behavior)
+        data_[idx] = (uint32_t)(int32_t)(int16_t)(uint16_t)v;
+        return;
+    case 7:  // OTZ
+    case 16: // SZ0
+    case 17: // SZ1
+    case 18: // SZ2
+    case 19: // SZ3
+        // zero-extend 16-bit value (DuckStation behavior)
+        data_[idx] = (uint32_t)(uint16_t)v;
+        return;
+    case D_SXYP: // reg 15: writing pushes the SXY FIFO
+        data_[D_SXY0] = data_[D_SXY1];
+        data_[D_SXY1] = data_[D_SXY2];
+        data_[D_SXY2] = v;
+        return;
+    case D_IRGB: // reg 28: packed 5-bit per component → sets IR1/IR2/IR3
+        data_[D_IRGB] = v & 0x7FFFu;
+        data_[D_IR1] = (uint32_t)(int32_t)(int16_t)(uint16_t)((v & 0x1Fu) * 0x80u);
+        data_[D_IR2] = (uint32_t)(int32_t)(int16_t)(uint16_t)(((v >> 5) & 0x1Fu) * 0x80u);
+        data_[D_IR3] = (uint32_t)(int32_t)(int16_t)(uint16_t)(((v >> 10) & 0x1Fu) * 0x80u);
+        return;
+    case D_LZCS: // reg 30: store value, LZCR computed on read
+        data_[D_LZCS] = v;
+        return;
+    case D_ORGB: // reg 29: read-only
+    case D_LZCR: // reg 31: read-only
+        return;
+    default:
+        data_[idx] = v;
+        return;
+    }
 }
 
 uint32_t Gte::read_ctrl(uint32_t idx) const
@@ -108,7 +176,29 @@ uint32_t Gte::read_ctrl(uint32_t idx) const
 
 void Gte::write_ctrl(uint32_t idx, uint32_t v)
 {
-    ctrl_[idx & 31u] = v;
+    idx &= 31u;
+    switch (idx)
+    {
+    // Single 16-bit control regs that need sign-extension (DuckStation behavior)
+    case 4:  // R33     (C_R33)
+    case 12: // L33     (C_L33)
+    case 20: // LB3/LR33 (C_LB3)
+    case 26: // H       (C_H)
+    case 27: // DQA     (C_DQA)
+    case 29: // ZSF3    (C_ZSF3)
+    case 30: // ZSF4    (C_ZSF4)
+        ctrl_[idx] = (uint32_t)(int32_t)(int16_t)(uint16_t)v;
+        return;
+    case 31: // FLAG
+        ctrl_[idx] = v & 0x7FFFF000u;
+        // Update error bit (bit 31 = OR of error bits)
+        if (ctrl_[idx] & FLAG_ERROR_BITS)
+            ctrl_[idx] |= (1u << 31);
+        return;
+    default:
+        ctrl_[idx] = v;
+        return;
+    }
 }
 
 void Gte::lwc2(uint32_t gte_reg, uint32_t word)
@@ -260,6 +350,25 @@ void Gte::push_color(int32_t r, int32_t g, int32_t b, uint8_t code)
     else if (b > 255) { cb = 255; flag_ |= FLAG_COLOR_B; }
     else cb = (uint8_t)b;
 
+    // Diagnostic: log first 20 color outputs + any black results (tunnels debug)
+    static int color_log_count = 0;
+    const bool is_black = (cr == 0 && cg == 0 && cb == 0);
+    static int black_count = 0;
+    if (color_log_count < 20 || (is_black && black_count < 10))
+    {
+        if (is_black) ++black_count;
+        ++color_log_count;
+        emu::logf(emu::LogLevel::warn, "GTE",
+            "push_color #%d: raw(%d,%d,%d) -> clamped(%u,%u,%u) code=%02X RGBC=0x%08X IR=(%d,%d,%d) MAC=(%d,%d,%d) FC=(%d,%d,%d) IR0=%d%s",
+            color_log_count, r, g, b, cr, cg, cb, code,
+            data_[D_RGBC],
+            (int32_t)data_[D_IR1], (int32_t)data_[D_IR2], (int32_t)data_[D_IR3],
+            (int32_t)data_[D_MAC1], (int32_t)data_[D_MAC2], (int32_t)data_[D_MAC3],
+            (int32_t)ctrl_[C_RFC], (int32_t)ctrl_[C_GFC], (int32_t)ctrl_[C_BFC],
+            (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu),
+            is_black ? " BLACK!" : "");
+    }
+
     shift_rgb_pipeline(data_);
     data_[D_RGB2] = pack_rgbc(cr, cg, cb, code);
 }
@@ -283,6 +392,17 @@ void Gte::check_mac_overflow(int idx, int64_t raw)
         if (raw > MAC_MAX) flag_ |= pos_flag;
         if (raw < MAC_MIN) flag_ |= neg_flag;
     }
+}
+
+// sign_extend_mac: Emulates the 44-bit accumulator on real GTE hardware.
+// DuckStation calls this SignExtendMACResult — it checks overflow flags on the
+// intermediate value, then sign-extends (truncates) to 44 bits. This MUST be
+// called between each addition in a dot-product to match hardware behavior.
+int64_t Gte::sign_extend_mac(int idx, int64_t v)
+{
+    check_mac_overflow(idx, v);
+    // Sign-extend from 44 bits: shift left 20 then arithmetic shift right 20
+    return (v << (64 - 44)) >> (64 - 44);
 }
 
 // set_mac: DuckStation behavior - check overflow on raw value, store shifted value
@@ -401,9 +521,9 @@ void Gte::cmd_mvmva(uint32_t cmd)
     // MAC = T*4096 + M*V (translation is shifted left by 12)
     // For tv=2 (FC), DuckStation uses a special "buggy" path.
     // We implement the standard path for now which works for most games.
-    const int64_t mac1 = ((int64_t)T[0] << 12) + (int64_t)m[0][0] * Vx + (int64_t)m[0][1] * Vy + (int64_t)m[0][2] * Vz;
-    const int64_t mac2 = ((int64_t)T[1] << 12) + (int64_t)m[1][0] * Vx + (int64_t)m[1][1] * Vy + (int64_t)m[1][2] * Vz;
-    const int64_t mac3 = ((int64_t)T[2] << 12) + (int64_t)m[2][0] * Vx + (int64_t)m[2][1] * Vy + (int64_t)m[2][2] * Vz;
+    const int64_t mac1 = sign_extend_mac(1, sign_extend_mac(1, ((int64_t)T[0] << 12) + (int64_t)m[0][0] * Vx) + (int64_t)m[0][1] * Vy) + (int64_t)m[0][2] * Vz;
+    const int64_t mac2 = sign_extend_mac(2, sign_extend_mac(2, ((int64_t)T[1] << 12) + (int64_t)m[1][0] * Vx) + (int64_t)m[1][1] * Vy) + (int64_t)m[1][2] * Vz;
+    const int64_t mac3 = sign_extend_mac(3, sign_extend_mac(3, ((int64_t)T[2] << 12) + (int64_t)m[2][0] * Vx) + (int64_t)m[2][1] * Vy) + (int64_t)m[2][2] * Vz;
 
     const int shift = sf ? 12 : 0;
     set_mac_shifted(1, mac1, shift);
@@ -436,9 +556,9 @@ void Gte::rtps_internal(const int32_t V[3], int sf, int lm, bool last)
     const int shift = sf ? 12 : 0;
 
     // dot3: (TR << 12) + R * V  (full 64-bit precision, matches DuckStation)
-    const int64_t x = ((int64_t)trx << 12) + (int64_t)r11 * V[0] + (int64_t)r12 * V[1] + (int64_t)r13 * V[2];
-    const int64_t y = ((int64_t)try_ << 12) + (int64_t)r21 * V[0] + (int64_t)r22 * V[1] + (int64_t)r23 * V[2];
-    const int64_t z = ((int64_t)trz << 12) + (int64_t)r31 * V[0] + (int64_t)r32 * V[1] + (int64_t)r33 * V[2];
+    const int64_t x = sign_extend_mac(1, sign_extend_mac(1, ((int64_t)trx << 12) + (int64_t)r11 * V[0]) + (int64_t)r12 * V[1]) + (int64_t)r13 * V[2];
+    const int64_t y = sign_extend_mac(2, sign_extend_mac(2, ((int64_t)try_ << 12) + (int64_t)r21 * V[0]) + (int64_t)r22 * V[1]) + (int64_t)r23 * V[2];
+    const int64_t z = sign_extend_mac(3, sign_extend_mac(3, ((int64_t)trz << 12) + (int64_t)r31 * V[0]) + (int64_t)r32 * V[1]) + (int64_t)r33 * V[2];
 
     // DuckStation: check 44-bit overflow on raw value, then store >> shift
     set_mac_shifted(1, x, shift);
@@ -639,92 +759,72 @@ void Gte::cmd_op(uint32_t cmd)
     set_ir(3, (int32_t)data_[D_MAC3], lm);
 }
 
-void Gte::cmd_dpcs(uint32_t cmd)
+// InterpolateColor: DuckStation's InterpolateColor pattern.
+// in_MAC = input color values (pre-computed, unshifted).
+// Step 1: IR = clamp((FC << 12) - in_MAC) >> shift  (lm=false → full range)
+// Step 2: MAC = (IR * IR0 + in_MAC) >> shift        (lm from instruction)
+void Gte::interpolate_color(int64_t in1, int64_t in2, int64_t in3, int shift, int lm)
 {
-    const int sf = (cmd >> 19) & 1;
-    const int lm = (cmd >> 10) & 1;
-    const int shift = sf ? 12 : 0;
-
-    int32_t r, g, b;
-    uint8_t code = 0;
-    unpack_rgbc(data_[D_RGBC], r, g, b, code);
-
-    // DuckStation: MAC1 = ((R << 16) + IR0 * (FC - R*16)) >> sf
-    // Step 1: MAC = R/G/B << 16 (color shifted to 1.27.4 -> 1.31.0 via <<16)
-    // Step 2: interpolate toward FC using IR0
-    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
     const int64_t fc1 = (int32_t)ctrl_[C_RFC];
     const int64_t fc2 = (int32_t)ctrl_[C_GFC];
     const int64_t fc3 = (int32_t)ctrl_[C_BFC];
 
-    // MAC = color << 16
-    const int64_t col1 = (int64_t)r << 16;
-    const int64_t col2 = (int64_t)g << 16;
-    const int64_t col3 = (int64_t)b << 16;
+    // Step 1: (FC << 12) - in_MAC, set MAC and IR (lm=false for this step)
+    set_mac_shifted(1, (fc1 << 12) - in1, shift);
+    set_mac_shifted(2, (fc2 << 12) - in2, shift);
+    set_mac_shifted(3, (fc3 << 12) - in3, shift);
+    set_ir(1, (int32_t)data_[D_MAC1], false);
+    set_ir(2, (int32_t)data_[D_MAC2], false);
+    set_ir(3, (int32_t)data_[D_MAC3], false);
 
-    // Interpolate: MAC = col + IR0 * (FC - col) (FC is already in 1.27.4 format)
-    // DuckStation: TruncateAndSetMAC<1>((s64(fc_r) << 12) - col_r, shift);
-    //             TruncateAndSetMAC<1>(col_r + IR0 * s32(MAC1), shift);
-    const int64_t diff1 = (fc1 << 12) - col1;
-    const int64_t diff2 = (fc2 << 12) - col2;
-    const int64_t diff3 = (fc3 << 12) - col3;
-    // Check overflow on diff (intermediate step)
-    check_mac_overflow(1, diff1);
-    check_mac_overflow(2, diff2);
-    check_mac_overflow(3, diff3);
-
-    const int64_t mac1 = col1 + ir0 * (int32_t)(diff1 >> shift);
-    const int64_t mac2 = col2 + ir0 * (int32_t)(diff2 >> shift);
-    const int64_t mac3 = col3 + ir0 * (int32_t)(diff3 >> shift);
-
-    set_mac_shifted(1, mac1, shift);
-    set_mac_shifted(2, mac2, shift);
-    set_mac_shifted(3, mac3, shift);
+    // Step 2: IR_clamped * IR0 + in_MAC (DuckStation uses clamped IR from step 1)
+    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
+    set_mac_shifted(1, (int64_t)(int32_t)data_[D_IR1] * ir0 + in1, shift);
+    set_mac_shifted(2, (int64_t)(int32_t)data_[D_IR2] * ir0 + in2, shift);
+    set_mac_shifted(3, (int64_t)(int32_t)data_[D_IR3] * ir0 + in3, shift);
     set_ir(1, (int32_t)data_[D_MAC1], lm);
     set_ir(2, (int32_t)data_[D_MAC2], lm);
     set_ir(3, (int32_t)data_[D_MAC3], lm);
+}
 
+void Gte::dpcs_internal(const uint8_t color[3], int shift, int lm)
+{
+    // [MAC1,MAC2,MAC3] = [R,G,B] SHL 16
+    set_mac(1, (int64_t)color[0] << 16);
+    set_mac(2, (int64_t)color[1] << 16);
+    set_mac(3, (int64_t)color[2] << 16);
+
+    // InterpolateColor
+    interpolate_color(data_[D_MAC1], data_[D_MAC2], data_[D_MAC3], shift, lm);
+
+    // Push color
+    uint8_t code = (uint8_t)((data_[D_RGBC] >> 24) & 0xFFu);
     push_color((int32_t)data_[D_MAC1] >> 4, (int32_t)data_[D_MAC2] >> 4, (int32_t)data_[D_MAC3] >> 4, code);
+}
+
+void Gte::cmd_dpcs(uint32_t cmd)
+{
+    const int shift = ((cmd >> 19) & 1) ? 12 : 0;
+    const int lm = (cmd >> 10) & 1;
+    const uint8_t color[3] = {
+        (uint8_t)(data_[D_RGBC] & 0xFFu),
+        (uint8_t)((data_[D_RGBC] >> 8) & 0xFFu),
+        (uint8_t)((data_[D_RGBC] >> 16) & 0xFFu),
+    };
+    dpcs_internal(color, shift, lm);
 }
 
 void Gte::cmd_intpl(uint32_t cmd)
 {
-    const int sf = (cmd >> 19) & 1;
+    const int shift = ((cmd >> 19) & 1) ? 12 : 0;
     const int lm = (cmd >> 10) & 1;
-    const int shift = sf ? 12 : 0;
 
-    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
-    const int64_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
-    const int64_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
-    const int64_t ir3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
-
-    // FC is full 32-bit signed
-    const int64_t fc1 = (int32_t)ctrl_[C_RFC];
-    const int64_t fc2 = (int32_t)ctrl_[C_GFC];
-    const int64_t fc3 = (int32_t)ctrl_[C_BFC];
-
-    // DuckStation pattern: diff = (FC << 12) - (IR << 12), then MAC = IR*16 + IR0 * (diff >> sf)
-    const int64_t col1 = ir1 << 12;
-    const int64_t col2 = ir2 << 12;
-    const int64_t col3 = ir3 << 12;
-
-    const int64_t diff1 = (fc1 << 12) - col1;
-    const int64_t diff2 = (fc2 << 12) - col2;
-    const int64_t diff3 = (fc3 << 12) - col3;
-    check_mac_overflow(1, diff1);
-    check_mac_overflow(2, diff2);
-    check_mac_overflow(3, diff3);
-
-    const int64_t mac1 = col1 + ir0 * (int32_t)(diff1 >> shift);
-    const int64_t mac2 = col2 + ir0 * (int32_t)(diff2 >> shift);
-    const int64_t mac3 = col3 + ir0 * (int32_t)(diff3 >> shift);
-
-    set_mac_shifted(1, mac1, shift);
-    set_mac_shifted(2, mac2, shift);
-    set_mac_shifted(3, mac3, shift);
-    set_ir(1, (int32_t)data_[D_MAC1], lm);
-    set_ir(2, (int32_t)data_[D_MAC2], lm);
-    set_ir(3, (int32_t)data_[D_MAC3], lm);
+    // [MAC1,MAC2,MAC3] = [IR1,IR2,IR3] SHL 12, then InterpolateColor
+    interpolate_color(
+        (int64_t)(int32_t)data_[D_IR1] << 12,
+        (int64_t)(int32_t)data_[D_IR2] << 12,
+        (int64_t)(int32_t)data_[D_IR3] << 12,
+        shift, lm);
 
     uint8_t code = (uint8_t)((data_[D_RGBC] >> 24) & 0xFFu);
     push_color((int32_t)data_[D_MAC1] >> 4, (int32_t)data_[D_MAC2] >> 4, (int32_t)data_[D_MAC3] >> 4, code);
@@ -746,9 +846,9 @@ void Gte::cmd_ncs(uint32_t cmd)
     const int32_t l32 = hi16(ctrl_[C_L31L32]);
     const int32_t l33 = s16(ctrl_[C_L33]);
 
-    int64_t mac1 = (int64_t)l11 * nx + (int64_t)l12 * ny + (int64_t)l13 * nz;
-    int64_t mac2 = (int64_t)l21 * nx + (int64_t)l22 * ny + (int64_t)l23 * nz;
-    int64_t mac3 = (int64_t)l31 * nx + (int64_t)l32 * ny + (int64_t)l33 * nz;
+    int64_t mac1 = sign_extend_mac(1, (int64_t)l11 * nx + (int64_t)l12 * ny) + (int64_t)l13 * nz;
+    int64_t mac2 = sign_extend_mac(2, (int64_t)l21 * nx + (int64_t)l22 * ny) + (int64_t)l23 * nz;
+    int64_t mac3 = sign_extend_mac(3, (int64_t)l31 * nx + (int64_t)l32 * ny) + (int64_t)l33 * nz;
     set_mac_shifted(1, mac1, 12);
     set_mac_shifted(2, mac2, 12);
     set_mac_shifted(3, mac3, 12);
@@ -775,9 +875,9 @@ void Gte::cmd_ncs(uint32_t cmd)
     const int32_t i2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
     const int32_t i3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
 
-    mac1 = (rbk << 12) + (int64_t)lr1 * i1 + (int64_t)lr2 * i2 + (int64_t)lr3 * i3;
-    mac2 = (gbk << 12) + (int64_t)lg1 * i1 + (int64_t)lg2 * i2 + (int64_t)lg3 * i3;
-    mac3 = (bbk << 12) + (int64_t)lb1 * i1 + (int64_t)lb2 * i2 + (int64_t)lb3 * i3;
+    mac1 = sign_extend_mac(1, sign_extend_mac(1, (rbk << 12) + (int64_t)lr1 * i1) + (int64_t)lr2 * i2) + (int64_t)lr3 * i3;
+    mac2 = sign_extend_mac(2, sign_extend_mac(2, (gbk << 12) + (int64_t)lg1 * i1) + (int64_t)lg2 * i2) + (int64_t)lg3 * i3;
+    mac3 = sign_extend_mac(3, sign_extend_mac(3, (bbk << 12) + (int64_t)lb1 * i1) + (int64_t)lb2 * i2) + (int64_t)lb3 * i3;
     set_mac_shifted(1, mac1, 12);
     set_mac_shifted(2, mac2, 12);
     set_mac_shifted(3, mac3, 12);
@@ -823,9 +923,9 @@ void Gte::cmd_nccs(uint32_t cmd)
     const int32_t l32 = hi16(ctrl_[C_L31L32]);
     const int32_t l33 = s16(ctrl_[C_L33]);
 
-    int64_t mac1 = (int64_t)l11 * nx + (int64_t)l12 * ny + (int64_t)l13 * nz;
-    int64_t mac2 = (int64_t)l21 * nx + (int64_t)l22 * ny + (int64_t)l23 * nz;
-    int64_t mac3 = (int64_t)l31 * nx + (int64_t)l32 * ny + (int64_t)l33 * nz;
+    int64_t mac1 = sign_extend_mac(1, (int64_t)l11 * nx + (int64_t)l12 * ny) + (int64_t)l13 * nz;
+    int64_t mac2 = sign_extend_mac(2, (int64_t)l21 * nx + (int64_t)l22 * ny) + (int64_t)l23 * nz;
+    int64_t mac3 = sign_extend_mac(3, (int64_t)l31 * nx + (int64_t)l32 * ny) + (int64_t)l33 * nz;
     set_mac_shifted(1, mac1, 12);
     set_mac_shifted(2, mac2, 12);
     set_mac_shifted(3, mac3, 12);
@@ -851,9 +951,9 @@ void Gte::cmd_nccs(uint32_t cmd)
     const int32_t i2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
     const int32_t i3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
 
-    mac1 = (rbk << 12) + (int64_t)lr1 * i1 + (int64_t)lr2 * i2 + (int64_t)lr3 * i3;
-    mac2 = (gbk << 12) + (int64_t)lg1 * i1 + (int64_t)lg2 * i2 + (int64_t)lg3 * i3;
-    mac3 = (bbk << 12) + (int64_t)lb1 * i1 + (int64_t)lb2 * i2 + (int64_t)lb3 * i3;
+    mac1 = sign_extend_mac(1, sign_extend_mac(1, (rbk << 12) + (int64_t)lr1 * i1) + (int64_t)lr2 * i2) + (int64_t)lr3 * i3;
+    mac2 = sign_extend_mac(2, sign_extend_mac(2, (gbk << 12) + (int64_t)lg1 * i1) + (int64_t)lg2 * i2) + (int64_t)lg3 * i3;
+    mac3 = sign_extend_mac(3, sign_extend_mac(3, (bbk << 12) + (int64_t)lb1 * i1) + (int64_t)lb2 * i2) + (int64_t)lb3 * i3;
     set_mac_shifted(1, mac1, 12);
     set_mac_shifted(2, mac2, 12);
     set_mac_shifted(3, mac3, 12);
@@ -943,9 +1043,9 @@ void Gte::cmd_cc(uint32_t cmd)
     const int32_t vi2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
     const int32_t vi3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
 
-    const int64_t mac1 = (rbk << 12) + (int64_t)lr1 * vi1 + (int64_t)lr2 * vi2 + (int64_t)lr3 * vi3;
-    const int64_t mac2 = (gbk << 12) + (int64_t)lg1 * vi1 + (int64_t)lg2 * vi2 + (int64_t)lg3 * vi3;
-    const int64_t mac3 = (bbk << 12) + (int64_t)lb1 * vi1 + (int64_t)lb2 * vi2 + (int64_t)lb3 * vi3;
+    const int64_t mac1 = sign_extend_mac(1, sign_extend_mac(1, (rbk << 12) + (int64_t)lr1 * vi1) + (int64_t)lr2 * vi2) + (int64_t)lr3 * vi3;
+    const int64_t mac2 = sign_extend_mac(2, sign_extend_mac(2, (gbk << 12) + (int64_t)lg1 * vi1) + (int64_t)lg2 * vi2) + (int64_t)lg3 * vi3;
+    const int64_t mac3 = sign_extend_mac(3, sign_extend_mac(3, (bbk << 12) + (int64_t)lb1 * vi1) + (int64_t)lb2 * vi2) + (int64_t)lb3 * vi3;
     set_mac_shifted(1, mac1, 12);
     set_mac_shifted(2, mac2, 12);
     set_mac_shifted(3, mac3, 12);
@@ -973,9 +1073,9 @@ void Gte::cmd_ncds(uint32_t cmd)
     const int32_t l32 = hi16(ctrl_[C_L31L32]);
     const int32_t l33 = s16(ctrl_[C_L33]);
 
-    int64_t mac1 = (int64_t)l11 * nx + (int64_t)l12 * ny + (int64_t)l13 * nz;
-    int64_t mac2 = (int64_t)l21 * nx + (int64_t)l22 * ny + (int64_t)l23 * nz;
-    int64_t mac3 = (int64_t)l31 * nx + (int64_t)l32 * ny + (int64_t)l33 * nz;
+    int64_t mac1 = sign_extend_mac(1, (int64_t)l11 * nx + (int64_t)l12 * ny) + (int64_t)l13 * nz;
+    int64_t mac2 = sign_extend_mac(2, (int64_t)l21 * nx + (int64_t)l22 * ny) + (int64_t)l23 * nz;
+    int64_t mac3 = sign_extend_mac(3, (int64_t)l31 * nx + (int64_t)l32 * ny) + (int64_t)l33 * nz;
     set_mac_shifted(1, mac1, 12);
     set_mac_shifted(2, mac2, 12);
     set_mac_shifted(3, mac3, 12);
@@ -1001,9 +1101,9 @@ void Gte::cmd_ncds(uint32_t cmd)
     const int32_t i2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
     const int32_t i3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
 
-    mac1 = (rbk << 12) + (int64_t)lr1 * i1 + (int64_t)lr2 * i2 + (int64_t)lr3 * i3;
-    mac2 = (gbk << 12) + (int64_t)lg1 * i1 + (int64_t)lg2 * i2 + (int64_t)lg3 * i3;
-    mac3 = (bbk << 12) + (int64_t)lb1 * i1 + (int64_t)lb2 * i2 + (int64_t)lb3 * i3;
+    mac1 = sign_extend_mac(1, sign_extend_mac(1, (rbk << 12) + (int64_t)lr1 * i1) + (int64_t)lr2 * i2) + (int64_t)lr3 * i3;
+    mac2 = sign_extend_mac(2, sign_extend_mac(2, (gbk << 12) + (int64_t)lg1 * i1) + (int64_t)lg2 * i2) + (int64_t)lg3 * i3;
+    mac3 = sign_extend_mac(3, sign_extend_mac(3, (bbk << 12) + (int64_t)lb1 * i1) + (int64_t)lb2 * i2) + (int64_t)lb3 * i3;
     set_mac_shifted(1, mac1, 12);
     set_mac_shifted(2, mac2, 12);
     set_mac_shifted(3, mac3, 12);
@@ -1011,7 +1111,7 @@ void Gte::cmd_ncds(uint32_t cmd)
     set_ir(2, (int32_t)data_[D_MAC2], lm);
     set_ir(3, (int32_t)data_[D_MAC3], lm);
 
-    // Step 3: CC - RGBC * IR (color modulation)
+    // Step 3: [MAC1,MAC2,MAC3] = [R*IR1,G*IR2,B*IR3] SHL 4 (DuckStation: no MAC set, just compute)
     int32_t r, g, b;
     uint8_t code = 0;
     unpack_rgbc(data_[D_RGBC], r, g, b, code);
@@ -1020,46 +1120,12 @@ void Gte::cmd_ncds(uint32_t cmd)
     const int32_t ci2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
     const int32_t ci3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
 
-    // (R << 4) * IR -> 1.27.4 format
-    const int64_t col1 = (int64_t)(r << 4) * ci1;
-    const int64_t col2 = (int64_t)(g << 4) * ci2;
-    const int64_t col3 = (int64_t)(b << 4) * ci3;
-    set_mac_shifted(1, col1, 12);
-    set_mac_shifted(2, col2, 12);
-    set_mac_shifted(3, col3, 12);
-    set_ir(1, (int32_t)data_[D_MAC1], lm);
-    set_ir(2, (int32_t)data_[D_MAC2], lm);
-    set_ir(3, (int32_t)data_[D_MAC3], lm);
+    const int32_t in_mac1 = (r * ci1) << 4;
+    const int32_t in_mac2 = (g * ci2) << 4;
+    const int32_t in_mac3 = (b * ci3) << 4;
 
-    // Step 4: DPCS - interpolate toward FC using IR0
-    const int32_t ir0 = (int32_t)(int16_t)(data_[D_IR0] & 0xFFFFu);
-    const int64_t fc1 = (int32_t)ctrl_[C_RFC];
-    const int64_t fc2 = (int32_t)ctrl_[C_GFC];
-    const int64_t fc3 = (int32_t)ctrl_[C_BFC];
-
-    // MAC already holds color * IR >> 12, which is in 1.19.12 format
-    // Need to shift up to 1.27.4: MAC << 4 == (MAC stored) << 16 from original
-    const int64_t cv1 = (int64_t)(int32_t)data_[D_MAC1] << 4;
-    const int64_t cv2 = (int64_t)(int32_t)data_[D_MAC2] << 4;
-    const int64_t cv3 = (int64_t)(int32_t)data_[D_MAC3] << 4;
-
-    const int64_t diff1 = (fc1 << 12) - (cv1 << 12);
-    const int64_t diff2 = (fc2 << 12) - (cv2 << 12);
-    const int64_t diff3 = (fc3 << 12) - (cv3 << 12);
-    check_mac_overflow(1, diff1);
-    check_mac_overflow(2, diff2);
-    check_mac_overflow(3, diff3);
-
-    mac1 = (cv1 << 12) + ir0 * (int32_t)(diff1 >> 12);
-    mac2 = (cv2 << 12) + ir0 * (int32_t)(diff2 >> 12);
-    mac3 = (cv3 << 12) + ir0 * (int32_t)(diff3 >> 12);
-
-    set_mac_shifted(1, mac1, 12);
-    set_mac_shifted(2, mac2, 12);
-    set_mac_shifted(3, mac3, 12);
-    set_ir(1, (int32_t)data_[D_MAC1], lm);
-    set_ir(2, (int32_t)data_[D_MAC2], lm);
-    set_ir(3, (int32_t)data_[D_MAC3], lm);
+    // Step 4: InterpolateColor (FC-MAC)*IR0 + MAC
+    interpolate_color(in_mac1, in_mac2, in_mac3, 12, lm);
 
     push_color((int32_t)data_[D_MAC1] >> 4, (int32_t)data_[D_MAC2] >> 4, (int32_t)data_[D_MAC3] >> 4, code);
 }
@@ -1082,27 +1148,81 @@ void Gte::cmd_ncdt(uint32_t cmd)
 
 void Gte::cmd_cdp(uint32_t cmd)
 {
-    cmd_cc(cmd);
-    cmd_dpcs(cmd);
+    // CDP = BK + LCM*IR → RGBC*IR<<4 → InterpolateColor
+    const int lm = (cmd >> 10) & 1;
+
+    // Step 1: BK + LCM * IR
+    const int32_t lr1 = s16(ctrl_[C_LR1LR2]);
+    const int32_t lr2 = hi16(ctrl_[C_LR1LR2]);
+    const int32_t lr3 = s16(ctrl_[C_LR3LG1]);
+    const int32_t lg1 = hi16(ctrl_[C_LR3LG1]);
+    const int32_t lg2 = s16(ctrl_[C_LG2LG3]);
+    const int32_t lg3 = hi16(ctrl_[C_LG2LG3]);
+    const int32_t lb1 = s16(ctrl_[C_LB1LB2]);
+    const int32_t lb2 = hi16(ctrl_[C_LB1LB2]);
+    const int32_t lb3 = s16(ctrl_[C_LB3]);
+    const int64_t rbk = (int32_t)ctrl_[C_RBK];
+    const int64_t gbk = (int32_t)ctrl_[C_GBK];
+    const int64_t bbk = (int32_t)ctrl_[C_BBK];
+
+    const int32_t i1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
+    const int32_t i2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
+    const int32_t i3 = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+
+    set_mac_shifted(1, sign_extend_mac(1, sign_extend_mac(1, (rbk << 12) + (int64_t)lr1*i1) + (int64_t)lr2*i2) + (int64_t)lr3*i3, 12);
+    set_mac_shifted(2, sign_extend_mac(2, sign_extend_mac(2, (gbk << 12) + (int64_t)lg1*i1) + (int64_t)lg2*i2) + (int64_t)lg3*i3, 12);
+    set_mac_shifted(3, sign_extend_mac(3, sign_extend_mac(3, (bbk << 12) + (int64_t)lb1*i1) + (int64_t)lb2*i2) + (int64_t)lb3*i3, 12);
+    set_ir(1, (int32_t)data_[D_MAC1], lm);
+    set_ir(2, (int32_t)data_[D_MAC2], lm);
+    set_ir(3, (int32_t)data_[D_MAC3], lm);
+
+    // Step 2: [R*IR1,G*IR2,B*IR3] SHL 4
+    int32_t r, g, b;
+    uint8_t code = 0;
+    unpack_rgbc(data_[D_RGBC], r, g, b, code);
+    const int32_t in1 = (r * (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu)) << 4;
+    const int32_t in2 = (g * (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu)) << 4;
+    const int32_t in3 = (b * (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu)) << 4;
+
+    // Step 3: InterpolateColor
+    interpolate_color(in1, in2, in3, 12, lm);
+    push_color((int32_t)data_[D_MAC1] >> 4, (int32_t)data_[D_MAC2] >> 4, (int32_t)data_[D_MAC3] >> 4, code);
 }
 
 void Gte::cmd_dcpl(uint32_t cmd)
 {
-    const uint32_t save = data_[D_RGBC];
-    data_[D_RGBC] = data_[D_RGB2];
-    cmd_dpcs(cmd);
-    data_[D_RGBC] = save;
+    // DCPL = [R*IR1,G*IR2,B*IR3] SHL 4 → InterpolateColor
+    const int shift = ((cmd >> 19) & 1) ? 12 : 0;
+    const int lm = (cmd >> 10) & 1;
+
+    int32_t r, g, b;
+    uint8_t code = 0;
+    unpack_rgbc(data_[D_RGBC], r, g, b, code);
+
+    const int32_t in1 = (r * (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu)) << 4;
+    const int32_t in2 = (g * (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu)) << 4;
+    const int32_t in3 = (b * (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu)) << 4;
+
+    interpolate_color(in1, in2, in3, shift, lm);
+    push_color((int32_t)data_[D_MAC1] >> 4, (int32_t)data_[D_MAC2] >> 4, (int32_t)data_[D_MAC3] >> 4, code);
 }
 
 void Gte::cmd_dpct(uint32_t cmd)
 {
-    const uint32_t save = data_[D_RGBC];
+    // DPCT = DPCS × 3, each time reading CURRENT RGB0 (FIFO shifts between iterations)
+    const int shift = ((cmd >> 19) & 1) ? 12 : 0;
+    const int lm = (cmd >> 10) & 1;
     for (int i = 0; i < 3; ++i)
     {
-        data_[D_RGBC] = data_[D_RGB0 + (uint32_t)i];
-        cmd_dpcs(cmd);
+        // Always read current RGB0 (data_[D_RGB0]) — after each push_color, FIFO shifts
+        const uint32_t rgb0 = data_[D_RGB0];
+        const uint8_t color[3] = {
+            (uint8_t)(rgb0 & 0xFFu),
+            (uint8_t)((rgb0 >> 8) & 0xFFu),
+            (uint8_t)((rgb0 >> 16) & 0xFFu),
+        };
+        dpcs_internal(color, shift, lm);
     }
-    data_[D_RGBC] = save;
 }
 
 int Gte::execute(uint32_t cop2_instruction)

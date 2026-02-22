@@ -15,6 +15,7 @@
 #endif
 
 #include "emu/core.h"
+#include "emu/hooks.h"
 #include "loader/loader.h"
 #include "log/emu_log.h"
 #include "log/filelog.h"
@@ -43,6 +44,44 @@ static int has_flag(int argc, char** argv, const char* flag)
     return 0;
 }
 
+// --- Hook: RAM address watch (logs value each VBlank when it changes) ---
+struct AddrWatchCtx
+{
+    r3000::Bus* bus;
+    uint32_t    phys_addr;
+    uint32_t    last_value;
+    std::FILE*  log_file;
+};
+
+static void addr_watch_on_vblank(uint32_t vblank_count, void* user)
+{
+    auto* ctx = static_cast<AddrWatchCtx*>(user);
+    const uint8_t* ram = ctx->bus->ram_ptr();
+    const uint32_t a = ctx->phys_addr;
+
+    // Read u32 little-endian
+    const uint32_t val = (uint32_t)ram[a]
+                       | ((uint32_t)ram[a + 1] << 8)
+                       | ((uint32_t)ram[a + 2] << 16)
+                       | ((uint32_t)ram[a + 3] << 24);
+
+    if (val != ctx->last_value)
+    {
+        std::fprintf(ctx->log_file, "VBlank #%u: [0x%08X] = 0x%08X (%d)\n",
+            vblank_count, ctx->phys_addr, val, (int32_t)val);
+        std::fflush(ctx->log_file);
+        ctx->last_value = val;
+    }
+}
+
+static void addr_watch_on_write(uint32_t phys_addr, uint32_t value, uint32_t size, void* user)
+{
+    auto* ctx = static_cast<AddrWatchCtx*>(user);
+    std::fprintf(ctx->log_file, "WRITE [0x%08X] = 0x%08X (size=%u)\n",
+        phys_addr, value, size);
+    std::fflush(ctx->log_file);
+}
+
 static void print_usage(void)
 {
     std::fprintf(
@@ -66,6 +105,8 @@ static void print_usage(void)
         "  --bus-tick-batch=N    Tick HW every N CPU steps (1=accurate, 32=fast)\n"
         "  --stop-on-pc=ADDR     Stop when PC hits ADDR (hex ok)\n"
         "  --emu-log-level=LVL   Set emu log level (error|warn|info|debug|trace)\n"
+        "  --watch-addr=ADDR     Watch RAM address (physical, hex ok) — log changes each VBlank\n"
+        "  --watch-writes        Also log every write to watched address (verbose!)\n"
         "  --reg-trace=START:END[:WATCH]  Trace registers in PC range, optionally watch for value\n"
         "                        Example: --reg-trace=0x8004AB00:0x8004AC00:0x35096\n"
     );
@@ -444,7 +485,61 @@ int main(int argc, char** argv)
         }
     }
 
-    emu::logf(emu::LogLevel::info, "MAIN", "Run start PC=0x%08X", core.pc());
+    // --- Hook system: register watches ---
+    AddrWatchCtx watch_ctx{};
+    std::FILE* watch_log_f = nullptr;
+    const char* watch_addr_s = arg_value(argc, argv, "--watch-addr=");
+    if (watch_addr_s && core.bus())
+    {
+        const uint32_t watch_phys = (uint32_t)std::strtoul(watch_addr_s, nullptr, 0);
+        watch_log_f = std::fopen("logs/watch.log", "wb");
+        if (watch_log_f)
+        {
+            watch_ctx.bus = core.bus();
+            watch_ctx.phys_addr = watch_phys;
+            watch_ctx.last_value = 0xDEADBEEFu;
+            watch_ctx.log_file = watch_log_f;
+
+            core.hooks().add_vblank(addr_watch_on_vblank, &watch_ctx);
+            emu::logf(emu::LogLevel::info, "HOOK", "VBlank watch on phys 0x%08X -> logs/watch.log", watch_phys);
+
+            if (has_flag(argc, argv, "--watch-writes"))
+            {
+                core.hooks().add_write(addr_watch_on_write, &watch_ctx, watch_phys);
+                emu::logf(emu::LogLevel::info, "HOOK", "Write watch on phys 0x%08X", watch_phys);
+            }
+        }
+    }
+
+    // --- Auto-input: timed button presses to navigate menus ---
+    // PS1 pad active-low: 0xFFFF = all released, bit clear = pressed
+    // Bit layout: [Select L3 R3 Start Up Right Down Left | L2 R2 L1 R1 Tri Cir X Sqr]
+    static constexpr uint16_t kPadX     = (1u << 14);
+    static constexpr uint16_t kPadStart = (1u << 3);
+    static constexpr uint16_t kAllUp    = 0xFFFFu;
+
+    struct AutoInput { uint32_t vblank_press; uint32_t vblank_release; uint16_t buttons; };
+    // Timeline (at ~60 Hz):
+    //   ~30s (1800 vb) = press X to skip intro
+    //   ~32s (1920 vb) = press X again (menu confirm)
+    //   ~34s (2040 vb) = press X (car select / start race)
+    //   ~50s (3000 vb) = press X (accelerate — hold for a few seconds)
+    AutoInput auto_inputs[] = {
+        { 1800, 1830, kPadX },      // X press ~30s
+        { 1920, 1950, kPadX },      // X press ~32s
+        { 2040, 2070, kPadX },      // X press ~34s
+        { 2200, 2230, kPadX },      // X press ~36.7s
+        { 2400, 2430, kPadX },      // X press ~40s
+        { 2600, 2630, kPadX },      // X press ~43.3s
+        { 2800, 2830, kPadX },      // X press ~46.7s
+        { 3000, 6000, kPadX },      // Hold X ~50s-100s (accelerate!)
+    };
+    const int auto_input_count = (int)(sizeof(auto_inputs) / sizeof(auto_inputs[0]));
+    const int use_auto_input = has_flag(argc, argv, "--auto-input");
+    uint32_t last_auto_vblank = 0;
+
+    emu::logf(emu::LogLevel::info, "MAIN", "Run start PC=0x%08X%s", core.pc(),
+        use_auto_input ? " (auto-input enabled)" : "");
 
     rlog::logger_logf(
         &logger, rlog::Level::info, rlog::Category::exec, "R3000 run start (PC=0x%08X)", core.pc()
@@ -455,6 +550,23 @@ int main(int argc, char** argv)
     for (;;)
     {
         const auto res = core.step();
+
+        // Auto-input: check vblank count and set pad buttons
+        if (use_auto_input && core.bus())
+        {
+            const uint32_t vb = core.bus()->vblank_count();
+            if (vb != last_auto_vblank)
+            {
+                last_auto_vblank = vb;
+                uint16_t pad = kAllUp;
+                for (int i = 0; i < auto_input_count; ++i)
+                {
+                    if (vb >= auto_inputs[i].vblank_press && vb < auto_inputs[i].vblank_release)
+                        pad &= ~auto_inputs[i].buttons; // clear bit = pressed
+                }
+                core.set_pad_buttons(pad);
+            }
+        }
         if (res.kind == r3000::Cpu::StepResult::Kind::ok)
         {
             ++steps;
@@ -512,6 +624,8 @@ int main(int argc, char** argv)
         }
     }
 
+    if (watch_log_f)
+        std::fclose(watch_log_f);
     if (outtext)
         std::fclose(outtext);
     if (cdlog_f)

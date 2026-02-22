@@ -2458,13 +2458,14 @@ Cpu::StepResult Cpu::step()
 
     // Per-instruction cycle counting.
     // Base cost = 1 cycle for most instructions. GTE/MUL/DIV add extra cycles.
-    // last_instr_cycles_ is set during instruction execution (default 1).
-    const uint32_t instr_cycles = last_instr_cycles_;
+    // cycle_multiplier_ scales to approximate real R3000 CPI (~2 average).
+    const uint32_t instr_cycles = last_instr_cycles_ * cycle_multiplier_;
     last_instr_cycles_ = 1; // reset for next instruction
+    last_multiplied_cycles_ = instr_cycles; // store for last_cycles() getter
 
     // COP0 Count: used by BIOS for delays (busy-wait / timeouts).
     cop0_[COP0_COUNT] += instr_cycles;
-    // Bus tick: advance hardware by the real cycle count of this instruction.
+    // Bus tick: advance hardware (timers, VBlank, SPU, SIO).
     bus_tick_accum_ += instr_cycles;
     if (bus_tick_accum_ >= bus_tick_batch_)
     {

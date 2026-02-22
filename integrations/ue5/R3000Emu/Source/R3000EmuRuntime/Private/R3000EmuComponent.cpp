@@ -16,9 +16,11 @@
 #include <cstring>
 
 #include "emu/core.h"
+#include "emu/hooks.h"
 #include "r3000/bus.h"
 #include "r3000/cpu.h"
 #include "audio/spu.h"
+#include "loader/loader.h"
 #include "log/filelog.h"
 #include "util/file_util.h"
 
@@ -309,6 +311,7 @@ static void UELogCallback(emu::LogLevel Level, const char* Tag, const char* Msg,
             std::strcmp(Tag, "CPU") == 0 ||
             std::strcmp(Tag, "BUS") == 0 ||
             std::strcmp(Tag, "CORE") == 0 ||
+            std::strcmp(Tag, "HOOK") == 0 ||
             std::strcmp(Tag, "ISO") == 0 ||
             std::strcmp(Tag, "GPU") == 0 ||
             std::strcmp(Tag, "GTE") == 0))
@@ -537,10 +540,64 @@ void UR3000EmuComponent::InitEmulator()
     Core_->set_putchar_callback(&UR3000EmuComponent::PutcharCB, this);
 
     // Init core.
-    // In fastboot mode we intentionally DO NOT load BIOS, to avoid any possibility of BIOS code/audio
-    // influencing the run. (Fastboot uses HLE vectors + kernel data instead.)
-    if (bFastBoot)
+    // Priority: bDevKitMode (EXE direct boot with HLE) > bFastBoot (CD fast boot) > BIOS boot.
+    if (bDevKitMode)
     {
+        // DEV KIT MODE: init core (allocates RAM), then load EXE + HLE kernel.
+        // Like a real DTL-H2000: BIOS kernel is initialized, then EXE is loaded on top.
+        if (ExePath.IsEmpty())
+        {
+            UE_LOG(LogR3000Emu, Error, TEXT("bDevKitMode=true but ExePath is empty!"));
+            emu::logf(emu::LogLevel::error, "CORE", "bDevKitMode=true but ExePath is empty");
+            return;
+        }
+
+        // Init core with dummy entry (will be overridden by fast_boot_from_exe)
+        loader::LoadedImage Img{};
+        Img.entry_pc = 0x80010000u;
+        Img.has_sp = 1;
+        Img.sp = 0x801FFFF0u;
+
+        emu::Core::InitOptions Opt{};
+        Opt.pretty = bTraceASM ? 1 : 0;
+        Opt.trace_io = bTraceIO ? 1 : 0;
+        Opt.hle_vectors = 1; // Dev kit always uses HLE
+        Opt.loop_detectors = bLoopDetectors ? 1 : 0;
+        Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
+
+        if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
+        {
+            UE_LOG(LogR3000Emu, Error, TEXT("Core init (devkit) failed: %hs"), err[0] ? err : "unknown error");
+            return;
+        }
+
+        // Load BIOS ROM data (if available) so PsyQ FntLoad can read the font.
+        // We don't EXECUTE the BIOS — HLE handles syscalls — but the ROM data
+        // must be mapped at 0xBFC00000 for library functions that read from it.
+        if (!BiosPath.IsEmpty())
+        {
+            BiosBytes_.Reset();
+            if (FFileHelper::LoadFileToArray(BiosBytes_, *BiosPath))
+            {
+                Core_->set_bios_copy(BiosBytes_.GetData(), (uint32)BiosBytes_.Num(), err, sizeof(err));
+                UE_LOG(LogR3000Emu, Log, TEXT("DevKit: BIOS ROM loaded for font data (%d bytes)"), BiosBytes_.Num());
+            }
+        }
+
+        // Load EXE + initialize HLE kernel (PCB/TCB, I_MASK, COP0)
+        FTCHARToUTF8 ExeUtf8(*ExePath);
+        if (!Core_->fast_boot_from_exe(ExeUtf8.Get(), err, sizeof(err)))
+        {
+            UE_LOG(LogR3000Emu, Error, TEXT("Dev kit EXE boot failed: %hs"), err[0] ? err : "unknown error");
+            return;
+        }
+
+        Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
+        UE_LOG(LogR3000Emu, Log, TEXT("Dev kit boot OK: %s → PC=0x%08X"), *ExePath, Core_->pc());
+    }
+    else if (bFastBoot)
+    {
+        // Fast boot: skip BIOS, load game EXE from CD's SYSTEM.CNF
         loader::LoadedImage Img{};
         Img.entry_pc = 0x80000000u;
         Img.has_gp = 0;
@@ -586,8 +643,8 @@ void UR3000EmuComponent::InitEmulator()
         }
     }
 
-    // Optional disc insert.
-    if (!DiscPath.IsEmpty())
+    // Optional disc insert (skip in dev kit mode — no CD needed).
+    if (!bDevKitMode && !DiscPath.IsEmpty())
     {
         FTCHARToUTF8 DiscUtf8(*DiscPath);
         if (!Core_->insert_disc(DiscUtf8.Get(), err, sizeof(err)))
@@ -599,15 +656,15 @@ void UR3000EmuComponent::InitEmulator()
             UE_LOG(LogR3000Emu, Log, TEXT("CD inserted."));
         }
     }
-    else
+    else if (!bDevKitMode)
     {
         emu::logf(emu::LogLevel::warn, "CORE", "UE DiscPath is empty (no disc inserted)");
     }
 
-    // Fast boot: skip BIOS, load game EXE directly from CD.
-    emu::logf(emu::LogLevel::info, "CORE", "UE fastboot request=%d (bFastBoot) hle_vectors(bios)=%d",
-        bFastBoot ? 1 : 0, bHleVectors ? 1 : 0);
-    if (bFastBoot && Core_)
+    // Fast boot: skip BIOS, load game EXE directly from CD (skip in dev kit mode).
+    emu::logf(emu::LogLevel::info, "CORE", "UE fastboot request=%d (bFastBoot) hle_vectors(bios)=%d devkit=%d",
+        bFastBoot ? 1 : 0, bHleVectors ? 1 : 0, bDevKitMode ? 1 : 0);
+    if (!bDevKitMode && bFastBoot && Core_)
     {
         char fberr[256];
         fberr[0] = '\0';
@@ -621,6 +678,61 @@ void UR3000EmuComponent::InitEmulator()
             UE_LOG(LogR3000Emu, Error, TEXT("Fast boot failed: %hs"), fberr[0] ? fberr : "unknown");
             emu::logf(emu::LogLevel::error, "CORE", "UE fastboot FAILED: %s", fberr[0] ? fberr : "unknown");
         }
+    }
+
+    // --- Hook: physics watch (Ridge Racer car struct at 0x80080194) ---
+    // Watch all physics variables each VBlank to find the 800 mph root cause.
+    // Car struct offsets: +0x82=gear, +0x84=rpm, +0xA0=speed, +0xA4=speed_delta,
+    //                     +0xB0=torque, +0xB4=drive_mode
+    if (Core_ && Core_->bus())
+    {
+        static struct {
+            r3000::Bus* bus;
+            uint32_t    car_base; // physical addr of car struct (0x00080194)
+            int32_t     last_speed;
+            int32_t     last_rpm;
+            int32_t     last_torque;
+            int32_t     last_delta;
+        } s_phys;
+        s_phys = { Core_->bus(), 0x00080194u, -1, -1, -1, -1 };
+
+        Core_->hooks().add_vblank([](uint32_t vblank, void* user) {
+            auto* ctx = decltype(&s_phys)(user);
+            const uint8_t* ram = ctx->bus->ram_ptr();
+            auto rd32 = [&](uint32_t off) -> int32_t {
+                uint32_t a = ctx->car_base + off;
+                return (int32_t)((uint32_t)ram[a]
+                    | ((uint32_t)ram[a+1] << 8)
+                    | ((uint32_t)ram[a+2] << 16)
+                    | ((uint32_t)ram[a+3] << 24));
+            };
+            auto rd16 = [&](uint32_t off) -> int16_t {
+                uint32_t a = ctx->car_base + off;
+                return (int16_t)((uint16_t)ram[a] | ((uint16_t)ram[a+1] << 8));
+            };
+
+            int32_t speed      = rd32(0xA0);
+            int32_t speed_delta= rd32(0xA4);
+            int32_t rpm        = rd32(0x84);
+            int32_t torque     = rd32(0xB0);
+            int16_t gear       = rd16(0x82);
+            int32_t drive_mode = rd32(0xB4);
+
+            // Log when speed or key values change
+            if (speed != ctx->last_speed || rpm != ctx->last_rpm
+                || torque != ctx->last_torque || speed_delta != ctx->last_delta)
+            {
+                emu::logf(emu::LogLevel::warn, "HOOK",
+                    "VB#%u spd=%d(/%d) delta=%d rpm=%d torq=%d gear=%d drv=%d",
+                    vblank, speed, speed/8, speed_delta, rpm, torque, (int)gear, drive_mode);
+                ctx->last_speed  = speed;
+                ctx->last_rpm    = rpm;
+                ctx->last_torque = torque;
+                ctx->last_delta  = speed_delta;
+            }
+        }, &s_phys);
+
+        emu::logf(emu::LogLevel::warn, "HOOK", "Physics watch on car 0x%08X (spd/rpm/torq/delta/gear/drv)", 0x80080194u);
     }
 
     // Optional run N steps immediately.

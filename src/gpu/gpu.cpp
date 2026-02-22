@@ -209,6 +209,13 @@ void Gpu::push_triangle(
     cmd.semi_mode = semi_mode;
     cmd.tex_depth = tex_depth;
     draw_lists_[draw_active_].push(cmd);
+
+    // Track semi-transparency stats
+    if (flags & 2)
+    {
+        frame_stats_.semi_tris++;
+        frame_stats_.semi_mode_count[semi_mode & 3]++;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +287,11 @@ int Gpu::tick_vblank(uint32_t cycles)
                 (int)draw_env_.offset_x, (int)draw_env_.offset_y,
                 display_.display_x, display_.display_y, display_.width(), display_.height(),
                 draw_lists_[1 - draw_active_].cmds.size());
+            if (s.semi_tris > 0)
+                emu::logf(emu::LogLevel::info, "GPU", "  SEMI: %u tris [mode0=%u mode1=%u mode2=%u mode3=%u] texpage_raw=0x%06X",
+                    s.semi_tris, s.semi_mode_count[0], s.semi_mode_count[1],
+                    s.semi_mode_count[2], s.semi_mode_count[3],
+                    draw_env_.texpage_raw);
         }
         prev_frame_stats_ = frame_stats_;  // Save before reset for stuck detection
         frame_stats_.reset();
@@ -789,6 +801,26 @@ void Gpu::gp0_polygon()
     if (textured) flags |= 1;
     if (semi)     flags |= 2;
 
+    // Debug: log first semi-transparent primitives with full texpage info
+    if (semi)
+    {
+        static int semi_log_count = 0;
+        if (semi_log_count++ < 20)
+        {
+            emu::logf(emu::LogLevel::warn, "GPU",
+                "SEMI_POLY cmd=0x%02X textured=%d tp=0x%04X texpage_attr=0x%04X texpage_raw=0x%06X → semi_mode=%u",
+                cmd, textured ? 1 : 0, tp, texpage_attr, draw_env_.texpage_raw, semi_mode);
+        }
+    }
+
+    // Textured polygons update GPUSTAT bits 0-10 from their texpage attribute
+    // (real hardware mirrors this — affects subsequent non-textured/rect primitives)
+    if (textured)
+    {
+        draw_env_.texpage_raw = (draw_env_.texpage_raw & ~0x7FFu) | (texpage_attr & 0x7FFu);
+        status_ = (status_ & ~0x7FFu) | (texpage_attr & 0x7FFu);
+    }
+
     // Push first triangle (v0, v1, v2)
     push_triangle(
         vx[0], vy[0], cr[0], cg[0], cb[0], tu[0], tv[0],
@@ -956,6 +988,18 @@ void Gpu::gp0_rect()
     if (textured) flags |= 1;
     if (semi)     flags |= 2;
     if (raw)      flags |= 4;
+
+    // Debug: log first semi-transparent rects
+    if (semi)
+    {
+        static int semi_rect_log = 0;
+        if (semi_rect_log++ < 20)
+        {
+            emu::logf(emu::LogLevel::warn, "GPU",
+                "SEMI_RECT cmd=0x%02X textured=%d tp=0x%04X texpage_raw=0x%06X → semi_mode=%u",
+                cmd, textured ? 1 : 0, tp, draw_env_.texpage_raw, semi_mode);
+        }
+    }
 
     // Rectangle corners
     int16_t x1 = (int16_t)(x + w);

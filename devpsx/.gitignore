@@ -1,0 +1,6 @@
+# Build artifacts (keep .c and Makefile only)
+*.o
+*.elf
+*.map
+*.dep
+*.ps-exe

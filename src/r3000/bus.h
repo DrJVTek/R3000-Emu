@@ -7,6 +7,8 @@
 #include "../log/filelog.h"
 #include "../log/logger.h"
 
+namespace emu { struct Hooks; }
+
 namespace cdrom
 {
 class Cdrom;
@@ -133,6 +135,9 @@ class Bus
     // GPU access (for UE5 display bridge)
     gpu::Gpu* gpu() const { return gpu_; }
 
+    // Hook system: set by Core for VBlank/write dispatch.
+    void set_hooks(emu::Hooks* h) { hooks_ = h; }
+
     // Enable WAV output for audio debugging
     void enable_wav_output(const char* path);
 
@@ -155,6 +160,8 @@ class Bus
     rlog::Logger* logger_{nullptr};
 
     // SPU (full implementation)
+    emu::Hooks* hooks_{nullptr};
+
     audio::Spu* spu_{nullptr};
     audio::WavWriter* wav_writer_{nullptr};
     bool spu_owned_{false};  // true if we created the SPU
