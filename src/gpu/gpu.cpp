@@ -1,4 +1,5 @@
 #include "gpu.h"
+#include "gte_correlation.h"
 #include "../log/emu_log.h"
 #include "../util/file_util.h"
 
@@ -155,7 +156,7 @@ Gpu::Gpu(rlog::Logger* logger)
     , vram_(std::make_unique<uint16_t[]>(kVramPixels))
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "GPU", "GPU source v7 (NTSC_timing, bit31_toggle)");
+    emu::logf(emu::LogLevel::warn, "GPU", "GPU source v13 (double_buf_corr)");
     status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
     vblank_div_ = 0;
@@ -210,6 +211,126 @@ void Gpu::push_triangle(
     cmd.tex_depth = tex_depth;
     draw_lists_[draw_active_].push(cmd);
 
+    // 3D reconstruction: correlate with GTE snapshot
+    // GTE records SXY = raw screen coords (no draw offset).
+    // gp0_polygon adds draw offset before calling push_triangle, then
+    // push_triangle subtracts it again (cmd.v = vertex - offset).
+    // So cmd.v == original GTE SXY == the key recorded by GTE. Match!
+    if (gte_corr_)
+    {
+        GteSxyKey key{};
+        key.sx[0] = cmd.v[0].x; key.sy[0] = cmd.v[0].y;
+        key.sx[1] = cmd.v[1].x; key.sy[1] = cmd.v[1].y;
+        key.sx[2] = cmd.v[2].x; key.sy[2] = cmd.v[2].y;
+
+        // Diagnostic: log first lookups with table state to debug empty-table issue
+        static int lookup_diag = 0;
+        if (lookup_diag < 20 && frame_count_ > 30)
+        {
+            emu::logf(emu::LogLevel::warn, "GPU",
+                "CORR_LOOKUP #%d f=%u tbl_size=%u rec=%u key=(%d,%d)(%d,%d)(%d,%d) ofs=(%d,%d)",
+                lookup_diag, frame_count_,
+                (unsigned)gte_corr_->size(), gte_corr_->frame_records(),
+                key.sx[0], key.sy[0], key.sx[1], key.sy[1], key.sx[2], key.sy[2],
+                (int)draw_env_.offset_x, (int)draw_env_.offset_y);
+            if (lookup_diag < 3 && gte_corr_->size() > 0)
+                gte_corr_->dump_first_entries(5);
+            ++lookup_diag;
+        }
+
+        DrawCmd3D cmd3d{};
+        auto* corr = gte_corr_->lookup_mut(key);
+        bool swapped = false;
+
+        // Quad second-triangle fix: PS1 quads split as (v0,v1,v2)+(v1,v3,v2).
+        // The GTE FIFO after 4 RTPS calls holds (v1,v2,v3), but the GPU's
+        // second triangle sends vertices in order (v1,v3,v2) — positions 1&2
+        // are swapped vs the FIFO. Try swapped key as fallback.
+        if (!corr)
+        {
+            GteSxyKey swapped_key{};
+            swapped_key.sx[0] = key.sx[0]; swapped_key.sy[0] = key.sy[0];
+            swapped_key.sx[1] = key.sx[2]; swapped_key.sy[1] = key.sy[2]; // swap 1↔2
+            swapped_key.sx[2] = key.sx[1]; swapped_key.sy[2] = key.sy[1];
+            corr = gte_corr_->lookup_mut(swapped_key);
+            if (corr) swapped = true;
+        }
+
+        if (corr)
+        {
+            cmd3d.origin = PrimOrigin::origin_3d;
+            const auto& snap = corr->snapshot;
+            if (!swapped)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    cmd3d.verts_3d[i] = snap.vertices[i];
+                    cmd3d.sz[i] = snap.sz[i];
+                }
+                frame_stats_.corr_hit++;
+            }
+            else
+            {
+                // Swapped match: GTE FIFO was (v1,v2,v3) but GPU wants (v1,v3,v2).
+                // Vertex 0 stays, swap vertices 1↔2 to match GPU triangle order.
+                cmd3d.verts_3d[0] = snap.vertices[0];
+                cmd3d.verts_3d[1] = snap.vertices[2]; // GTE slot 2 → GPU slot 1
+                cmd3d.verts_3d[2] = snap.vertices[1]; // GTE slot 1 → GPU slot 2
+                cmd3d.sz[0] = snap.sz[0];
+                cmd3d.sz[1] = snap.sz[2];
+                cmd3d.sz[2] = snap.sz[1];
+                frame_stats_.corr_hit_swap++;
+            }
+            cmd3d.transform = snap.transform;
+
+            // Diagnostic: log first N hits with full 3D data
+            static int hit_log = 0;
+            if (hit_log < 10 && frame_count_ > 200)
+            {
+                const auto& v0 = cmd3d.verts_3d[0];
+                const auto& v1 = cmd3d.verts_3d[1];
+                const auto& v2 = cmd3d.verts_3d[2];
+                const auto& t = snap.transform;
+                int32_t cz0 = (t.rt[6]*v0.vx + t.rt[7]*v0.vy + t.rt[8]*v0.vz) / 4096 + t.tr[2];
+                int32_t cz1 = (t.rt[6]*v1.vx + t.rt[7]*v1.vy + t.rt[8]*v1.vz) / 4096 + t.tr[2];
+                int32_t cz2 = (t.rt[6]*v2.vx + t.rt[7]*v2.vy + t.rt[8]*v2.vz) / 4096 + t.tr[2];
+                emu::logf(emu::LogLevel::warn, "GPU",
+                    "CORR HIT #%d f=%u tex=%d swap=%d sxy=(%d,%d)(%d,%d)(%d,%d) "
+                    "model=(%d,%d,%d)(%d,%d,%d)(%d,%d,%d) "
+                    "TR=(%d,%d,%d) camZ=(%d,%d,%d)",
+                    hit_log, frame_count_, (flags & 1) ? 1 : 0, swapped ? 1 : 0,
+                    key.sx[0], key.sy[0], key.sx[1], key.sy[1], key.sx[2], key.sy[2],
+                    v0.vx, v0.vy, v0.vz, v1.vx, v1.vy, v1.vz, v2.vx, v2.vy, v2.vz,
+                    t.tr[0], t.tr[1], t.tr[2], cz0, cz1, cz2);
+                ++hit_log;
+            }
+        }
+        else
+        {
+            frame_stats_.corr_miss++;
+            // Diagnostic: log missed lookups — early misses + gameplay misses
+            static int miss_log = 0;
+            static int miss_log_late = 0;
+            const bool early = (miss_log < 10 && gte_corr_->size() > 10);
+            const bool late  = (miss_log_late < 20 && frame_count_ > 500
+                                && gte_corr_->size() > 100 && frame_stats_.corr_miss <= 3);
+            if (early || late)
+            {
+                emu::logf(emu::LogLevel::warn, "GPU",
+                    "CORR MISS #%d/%d f=%u tex=%d key=(%d,%d)(%d,%d)(%d,%d) tbl=%u rec=%u hit=%u ofs=(%d,%d)",
+                    miss_log, miss_log_late, frame_count_, (flags & 1) ? 1 : 0,
+                    key.sx[0], key.sy[0], key.sx[1], key.sy[1], key.sx[2], key.sy[2],
+                    (unsigned)gte_corr_->size(), gte_corr_->frame_records(), gte_corr_->frame_hits(),
+                    (int)draw_env_.offset_x, (int)draw_env_.offset_y);
+                if ((early && miss_log == 0) || (late && miss_log_late == 0))
+                    gte_corr_->dump_first_entries(5);
+                if (early) ++miss_log;
+                if (late) ++miss_log_late;
+            }
+        }
+        draw_lists_[draw_active_].push_3d(cmd3d);
+    }
+
     // Track semi-transparency stats
     if (flags & 2)
     {
@@ -257,6 +378,46 @@ int Gpu::tick_vblank(uint32_t cycles)
             draw_lists_[draw_active_].display = display_;
             draw_active_ = 1 - draw_active_;
             draw_lists_[draw_active_].clear();
+            // Diagnostic: log correlation stats before clearing
+            if (gte_corr_)
+            {
+                const auto rec = gte_corr_->frame_records();
+                const auto hit = gte_corr_->frame_hits();
+                const auto sz  = gte_corr_->size();
+                const auto& dl = draw_lists_[1 - draw_active_];
+                const auto ncmds = dl.cmds.size();
+                const auto n3d = dl.cmds_3d.size();
+                // Count 3D vs 2D primitives in the draw list
+                uint32_t cnt_3d = 0, cnt_2d_hud = 0, cnt_2d_rect = 0, cnt_2d_line = 0;
+                for (size_t i = 0; i < n3d; ++i)
+                {
+                    switch (dl.cmds_3d[i].origin)
+                    {
+                    case PrimOrigin::origin_3d:      ++cnt_3d; break;
+                    case PrimOrigin::origin_2d_hud:  ++cnt_2d_hud; break;
+                    case PrimOrigin::origin_2d_rect: ++cnt_2d_rect; break;
+                    case PrimOrigin::origin_2d_line: ++cnt_2d_line; break;
+                    }
+                }
+                // Log ONGOING: every frame for first 30, then every 100 frames
+                static int corr_log = 0;
+                const bool do_log = (corr_log < 30 && (ncmds > 0 || rec > 0))
+                    || (frame_count_ % 100 == 0 && ncmds > 0);
+                if (do_log)
+                {
+                    const int pct = (ncmds > 0) ? (int)(cnt_3d * 100 / ncmds) : 0;
+                    emu::logf(emu::LogLevel::warn, "GPU",
+                        "CORR f=%u: %u cmds (3D:%u=%d%% hud:%u rect:%u line:%u) "
+                        "GTE_rec=%u GTE_hit=%u tbl=%u",
+                        frame_count_, (unsigned)ncmds, cnt_3d, pct, cnt_2d_hud,
+                        cnt_2d_rect, cnt_2d_line, rec, hit, (unsigned)sz);
+                    ++corr_log;
+                }
+                // Double-buffered swap: write→read, clear new write.
+                // Games DMA previous frame's OT first, then GTE computes new frame.
+                // GPU looks up in both tables so cross-frame matches work.
+                gte_corr_->swap_frame();
+            }
             vram_frame_++;
         }
 
@@ -292,6 +453,19 @@ int Gpu::tick_vblank(uint32_t cycles)
                     s.semi_tris, s.semi_mode_count[0], s.semi_mode_count[1],
                     s.semi_mode_count[2], s.semi_mode_count[3],
                     draw_env_.texpage_raw);
+
+            // 3D reconstruction: per-frame correlation summary (uses counters from push_triangle)
+            if (gte_corr_)
+            {
+                const uint32_t total_corr = s.corr_hit + s.corr_hit_swap + s.corr_miss;
+                if (total_corr > 0)
+                {
+                    const int pct = (int)((s.corr_hit + s.corr_hit_swap) * 100 / total_corr);
+                    emu::logf(emu::LogLevel::info, "GPU",
+                        "  3D_CORR: hit=%u swap=%u miss=%u (%d%% matched) | GTE: %u projections",
+                        s.corr_hit, s.corr_hit_swap, s.corr_miss, pct, gte_corr_->frame_records());
+                }
+            }
         }
         prev_frame_stats_ = frame_stats_;  // Save before reset for stuck detection
         frame_stats_.reset();

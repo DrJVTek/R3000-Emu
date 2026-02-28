@@ -19,6 +19,9 @@ compile_commands.json
 *.ilk
 *.sln
 
+# static library output (linked by UE5)
+lib/
+
 # example build outputs
 examples/**/build/
 

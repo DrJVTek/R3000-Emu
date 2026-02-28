@@ -7,6 +7,7 @@
 
 #include "../cdrom/cdrom.h"
 #include "../gpu/gpu.h"
+#include "../gpu/gte_correlation.h"
 #include "../loader/loader.h"
 #include "../log/filelog.h"
 #include "../log/logger.h"
@@ -97,6 +98,8 @@ class Core
 
     r3000::Bus* bus();
     r3000::Cpu* cpu();
+    gte::Gte* gte();  // nullptr before init_from_image()
+    gpu::GteCorrelationTable& gte_correlation() { return gte_corr_table_; }
 
     // Hook system: register diagnostic hooks (memory watches, vblank callbacks, etc.)
     Hooks& hooks() { return hooks_; }
@@ -131,6 +134,7 @@ class Core
     rlog::Logger* logger_{nullptr};
     BootMilestones milestones_{};
     Hooks hooks_{};
+    gpu::GteCorrelationTable gte_corr_table_{};
 
     std::unique_ptr<uint8_t[]> ram_{};
     uint32_t ram_size_{0};

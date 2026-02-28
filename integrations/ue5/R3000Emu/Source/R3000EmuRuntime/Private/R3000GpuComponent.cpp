@@ -742,8 +742,22 @@ void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         // DON'T return - continue for debugging
     }
 
-    // Upload VRAM texture if it changed (dirty tracking via write sequence)
+    // Always upload VRAM texture (shared with 3D component even when 2D is disabled)
     UpdateVramTexture();
+
+    // If disabled, hide mesh but keep VRAM updates running
+    if (!bEnabled)
+    {
+        if (MeshComp_ && MeshComp_->IsVisible())
+            MeshComp_->SetVisibility(false);
+        // Still track frame count so we don't rebuild a stale backlog on re-enable
+        LastVramFrame_ = Gpu_->vram_frame_count();
+        return;
+    }
+
+    // Re-show mesh if it was hidden by bEnabled toggle
+    if (MeshComp_ && !MeshComp_->IsVisible())
+        MeshComp_->SetVisibility(true);
 
     // Rebuild geometry mesh when a new frame is ready
     const uint32 CurrentFrame = Gpu_->vram_frame_count();

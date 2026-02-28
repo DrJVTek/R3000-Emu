@@ -106,6 +106,11 @@ public:
 
     // ------- Rendering settings -------
 
+    /** Enable/disable this 2D renderer at runtime. When disabled, mesh is hidden but VRAM texture
+     *  continues to be updated (shared with 3D component). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    bool bEnabled{true};
+
     /** Enable uniform HD scaling: output is always the same size regardless of PS1 resolution.
      *  When enabled, PixelScale is computed automatically based on HD definition.
      *  PS1 resolutions (256, 320, 512, 640) are all scaled to fill the target size. */

@@ -1,6 +1,7 @@
 #include "R3000EmuComponent.h"
 #include "R3000AudioComponent.h"
 #include "R3000GpuComponent.h"
+#include "R3000Gpu3DComponent.h"
 
 #include "Logging/LogMacros.h"
 #include "Containers/StringConv.h"
@@ -314,6 +315,7 @@ static void UELogCallback(emu::LogLevel Level, const char* Tag, const char* Msg,
             std::strcmp(Tag, "HOOK") == 0 ||
             std::strcmp(Tag, "ISO") == 0 ||
             std::strcmp(Tag, "GPU") == 0 ||
+            std::strcmp(Tag, "GPU3D") == 0 ||
             std::strcmp(Tag, "GTE") == 0))
     {
         std::fprintf(Files->sys, "[%hs] %hs\n", Tag, Msg);
@@ -443,9 +445,49 @@ bool UR3000EmuComponent::BootBiosInternal()
     return true;
 }
 
+void UR3000EmuComponent::LoadCoreDll()
+{
+    if (CoreDllHandle_)
+        return; // already loaded
+
+    // Plugin Binaries/Win64/ is where Build.cs copies r3000_core.dll
+    const FString PluginBinDir = FPaths::ConvertRelativePathToFull(
+        FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("R3000Emu/Binaries/Win64")));
+
+    FPlatformProcess::PushDllDirectory(*PluginBinDir);
+    CoreDllHandle_ = FPlatformProcess::GetDllHandle(TEXT("r3000_core.dll"));
+    FPlatformProcess::PopDllDirectory(*PluginBinDir);
+
+    if (CoreDllHandle_)
+    {
+        UE_LOG(LogR3000Emu, Log, TEXT("[R3000] Loaded r3000_core.dll from %s"), *PluginBinDir);
+    }
+    else
+    {
+        UE_LOG(LogR3000Emu, Error, TEXT("[R3000] FAILED to load r3000_core.dll from %s"), *PluginBinDir);
+    }
+}
+
+void UR3000EmuComponent::UnloadCoreDll()
+{
+    if (CoreDllHandle_)
+    {
+        // Free twice: once for our GetDllHandle ref, once for the delay-load ref.
+        // Windows DLL ref-counting: delay-load's implicit LoadLibrary + our explicit
+        // GetDllHandle = 2 refs. Both must be released for the DLL to actually unload.
+        FPlatformProcess::FreeDllHandle(CoreDllHandle_);
+        FPlatformProcess::FreeDllHandle(CoreDllHandle_);
+        CoreDllHandle_ = nullptr;
+        UE_LOG(LogR3000Emu, Log, TEXT("[R3000] Unloaded r3000_core.dll (2x free for delay-load)"));
+    }
+}
+
 void UR3000EmuComponent::BeginPlay()
 {
     Super::BeginPlay();
+
+    // Load the emulator DLL fresh each PIE session (allows rebuild between runs)
+    LoadCoreDll();
 }
 
 void UR3000EmuComponent::InitEmulator()
@@ -813,6 +855,28 @@ void UR3000EmuComponent::InitEmulator()
             GpuComp_ ? 1 : 0, Core_ ? 1 : 0);
     }
 
+    // Find 3D GPU component on same actor and connect (shares same GPU + VRAM texture).
+    Gpu3DComp_ = Owner ? Owner->FindComponentByClass<UR3000Gpu3DComponent>() : nullptr;
+    UE_LOG(LogR3000Emu, Warning, TEXT("GPU3D search: Gpu3DComp_=%p Owner=%p Core_=%p"),
+        Gpu3DComp_, Owner, Core_);
+    emu::logf(emu::LogLevel::warn, "CORE", "GPU3D search: Gpu3DComp=%p Owner=%p Core=%p",
+        (void*)Gpu3DComp_, (void*)Owner, (void*)Core_);
+    if (Gpu3DComp_ && Core_)
+    {
+        r3000::Bus* Bus3D = Core_->bus();
+        gpu::Gpu* Gpu3D = Bus3D ? Bus3D->gpu() : nullptr;
+        if (Gpu3D)
+        {
+            Gpu3DComp_->BindGpu(Gpu3D);
+            // Share VRAM texture from 2D component (avoids duplicate 1MB upload)
+            if (GpuComp_)
+                Gpu3DComp_->SetVramTexture(GpuComp_->GetVramTexture());
+            UE_LOG(LogR3000Emu, Warning, TEXT("GPU3D connected OK. VramTex=%p"),
+                GpuComp_ ? (void*)GpuComp_->GetVramTexture() : nullptr);
+            emu::logf(emu::LogLevel::warn, "CORE", "GPU3D connected OK");
+        }
+    }
+
     // Start worker thread if threaded mode is enabled.
     if (bThreadedMode)
     {
@@ -1162,6 +1226,9 @@ void UR3000EmuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
         std::fclose(TextLogFile_);
         TextLogFile_ = nullptr;
     }
+
+    // Unload DLL last — frees the lock so it can be overwritten between PIE runs
+    UnloadCoreDll();
 
     Super::EndPlay(EndPlayReason);
 }

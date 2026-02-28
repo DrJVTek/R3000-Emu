@@ -1,6 +1,0 @@
-#include "../../src/emu/core.cpp"
-#include "../../src/gte/gte.cpp"
-#include "../../src/loader/loader.cpp"
-#include "../../src/log/emu_log.cpp"
-#include "../../src/log/filelog.cpp"
-#include "../../src/log/logger.cpp"

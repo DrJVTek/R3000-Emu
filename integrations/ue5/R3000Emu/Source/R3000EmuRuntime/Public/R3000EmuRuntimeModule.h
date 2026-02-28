@@ -8,4 +8,3 @@ class FR3000EmuRuntimeModule final : public IModuleInterface
     virtual void StartupModule() override;
     virtual void ShutdownModule() override;
 };
-

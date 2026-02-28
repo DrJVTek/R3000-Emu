@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "../cdrom/cdrom.h"
+#include "../gpu/gte_correlation.h"
 #include "../log/emu_log.h"
 
 namespace r3000
@@ -4044,6 +4045,27 @@ Cpu::StepResult Cpu::step()
                     else
                     {
                         last_instr_cycles_ = (uint32_t)gte_cycles;
+
+                        // 3D reconstruction: record GTE snapshot after RTPS/RTPT
+                        const uint32_t gte_func = instr & 0x3Fu;
+                        if (gte_func == 0x01 || gte_func == 0x30)
+                        {
+                            auto* corr = bus_.gte_correlation();
+                            if (corr && gte_.last_snapshot().valid)
+                            {
+                                corr->record(gte_.last_snapshot());
+                            }
+                            else if (gte_corr_diag_count_ < 5)
+                            {
+                                ++gte_corr_diag_count_;
+                                if (!corr)
+                                    emu::logf(emu::LogLevel::warn, "CPU",
+                                        "GTE RTPS/RTPT: corr=NULL (func=0x%02X)", gte_func);
+                                else
+                                    emu::logf(emu::LogLevel::warn, "CPU",
+                                        "GTE RTPS/RTPT: snapshot.valid=0 (func=0x%02X)", gte_func);
+                            }
+                        }
                     }
                 }
                 else

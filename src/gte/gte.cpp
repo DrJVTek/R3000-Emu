@@ -611,12 +611,76 @@ void Gte::rtps_internal(const int32_t V[3], int sf, int lm, bool last)
     }
 }
 
+// 3D reconstruction: capture GTE state after RTPS/RTPT for correlation with GPU polygons.
+// verts: array of 1 or 3 vertex triplets (x,y,z). count: 1 (RTPS) or 3 (RTPT).
+void Gte::capture_snapshot(const int32_t (*verts)[3], int count)
+{
+    auto& snap = last_snapshot_;
+
+    if (count == 3)
+    {
+        // RTPT: 3 vertices projected at once. Copy directly.
+        snap.vertex_count = 3;
+        for (int i = 0; i < 3; ++i)
+            snap.vertices[i] = {verts[i][0], verts[i][1], verts[i][2]};
+    }
+    else
+    {
+        // RTPS: 1 vertex at a time. Accumulate in a 3-element FIFO.
+        // After 3 consecutive RTPS calls, the FIFO matches the SXY FIFO order.
+        rtps_vert_fifo_[0] = rtps_vert_fifo_[1];
+        rtps_vert_fifo_[1] = rtps_vert_fifo_[2];
+        rtps_vert_fifo_[2] = {verts[0][0], verts[0][1], verts[0][2]};
+
+        snap.vertex_count = 3;  // Always expose as 3-vertex for correlation
+        snap.vertices[0] = rtps_vert_fifo_[0];
+        snap.vertices[1] = rtps_vert_fifo_[1];
+        snap.vertices[2] = rtps_vert_fifo_[2];
+    }
+
+    // Always read all 3 SXY FIFO values. For RTPS, the hardware FIFO
+    // (push_sxy) shifts SXY0←SXY1←SXY2←new on each call, so after
+    // 3 RTPS calls SXY0/1/2 contain the 3 projected screen coords.
+    snap.sx[0] = (int16_t)(data_[D_SXY0] & 0xFFFFu);
+    snap.sy[0] = (int16_t)(data_[D_SXY0] >> 16);
+    snap.sx[1] = (int16_t)(data_[D_SXY1] & 0xFFFFu);
+    snap.sy[1] = (int16_t)(data_[D_SXY1] >> 16);
+    snap.sx[2] = (int16_t)(data_[D_SXY2] & 0xFFFFu);
+    snap.sy[2] = (int16_t)(data_[D_SXY2] >> 16);
+    snap.sz[0] = (uint16_t)(data_[D_SZ1] & 0xFFFFu);
+    snap.sz[1] = (uint16_t)(data_[D_SZ2] & 0xFFFFu);
+    snap.sz[2] = (uint16_t)(data_[D_SZ3] & 0xFFFFu);
+
+    // Capture RT rotation matrix from packed ctrl registers:
+    // ctrl[0]=R11|R12, ctrl[1]=R13|R21, ctrl[2]=R22|R23, ctrl[3]=R31|R32, ctrl[4]=R33
+    snap.transform.rt[0] = (int16_t)(ctrl_[C_R11R12] & 0xFFFFu);       // R11
+    snap.transform.rt[1] = (int16_t)(ctrl_[C_R11R12] >> 16);            // R12
+    snap.transform.rt[2] = (int16_t)(ctrl_[C_R13R21] & 0xFFFFu);       // R13
+    snap.transform.rt[3] = (int16_t)(ctrl_[C_R13R21] >> 16);            // R21
+    snap.transform.rt[4] = (int16_t)(ctrl_[C_R22R23] & 0xFFFFu);       // R22
+    snap.transform.rt[5] = (int16_t)(ctrl_[C_R22R23] >> 16);            // R23
+    snap.transform.rt[6] = (int16_t)(ctrl_[C_R31R32] & 0xFFFFu);       // R31
+    snap.transform.rt[7] = (int16_t)(ctrl_[C_R31R32] >> 16);            // R32
+    snap.transform.rt[8] = (int16_t)(ctrl_[C_R33] & 0xFFFFu);          // R33
+
+    // Translation vector
+    snap.transform.tr[0] = (int32_t)ctrl_[C_TRX];
+    snap.transform.tr[1] = (int32_t)ctrl_[C_TRY];
+    snap.transform.tr[2] = (int32_t)ctrl_[C_TRZ];
+
+    snap.sequence_id = ++snapshot_seq_;
+    snap.valid = 1;
+}
+
 void Gte::cmd_rtps(uint32_t cmd)
 {
     const int sf = (cmd >> 19) & 1;
     const int lm = (cmd >> 10) & 1;
     const int32_t V[3] = { vx(0), vy(0), vz(0) };
     rtps_internal(V, sf, lm, true);
+
+    // 3D reconstruction: capture snapshot after RTPS (single vertex)
+    capture_snapshot(&V, 1);
 }
 
 void Gte::cmd_rtpt(uint32_t cmd)
@@ -633,6 +697,14 @@ void Gte::cmd_rtpt(uint32_t cmd)
     rtps_internal(V0, sf, lm, false);
     rtps_internal(V1, sf, lm, false);
     rtps_internal(V2, sf, lm, true);
+
+    // 3D reconstruction: capture snapshot after RTPT (3 vertices)
+    const int32_t verts[3][3] = {
+        {V0[0], V0[1], V0[2]},
+        {V1[0], V1[1], V1[2]},
+        {V2[0], V2[1], V2[2]}
+    };
+    capture_snapshot(verts, 3);
 }
 
 void Gte::cmd_avsz3(uint32_t)

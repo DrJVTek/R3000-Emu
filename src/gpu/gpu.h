@@ -8,6 +8,7 @@
 #include <mutex>
 #include <vector>
 
+#include "../gte/gte_snapshot.h"
 #include "../log/filelog.h"
 #include "../log/logger.h"
 
@@ -71,6 +72,25 @@ struct DrawCmd
     uint8_t _pad;
 };
 
+// Origin classification for 3D reconstruction
+enum class PrimOrigin : uint8_t
+{
+    origin_3d      = 0,  // GTE-correlated, render as 3D geometry
+    origin_2d_hud  = 1,  // Polygon with no GTE match (HUD/menu)
+    origin_2d_rect = 2,  // GP0 rect/sprite (always 2D)
+    origin_2d_line = 3,  // GP0 line (usually debug/HUD)
+};
+
+// Extended draw command with optional 3D reconstruction data.
+// Parallel to DrawCmd — one per triangle when correlation is active.
+struct DrawCmd3D
+{
+    PrimOrigin origin{PrimOrigin::origin_2d_hud};
+    gte::GteVertex3D verts_3d[3]; // Original 3D vertices (from GTE input)
+    gte::GteTransform transform;  // RT + TR at projection time
+    uint16_t sz[3];               // Depth values
+};
+
 // Per-frame draw command list (double-buffered for GPU / UE5)
 struct FrameDrawList
 {
@@ -83,9 +103,13 @@ struct FrameDrawList
     DrawEnv draw_env{};
     DisplayConfig display{};
 
-    FrameDrawList() { cmds.reserve(4096); }
-    void clear() { cmds.clear(); }
+    // 3D reconstruction: parallel to cmds (same index = same triangle)
+    std::vector<DrawCmd3D> cmds_3d;
+
+    FrameDrawList() { cmds.reserve(4096); cmds_3d.reserve(4096); }
+    void clear() { cmds.clear(); cmds_3d.clear(); }
     void push(const DrawCmd& c) { cmds.push_back(c); }
+    void push_3d(const DrawCmd3D& c3d) { cmds_3d.push_back(c3d); }
 };
 
 // Per-frame GPU statistics
@@ -104,6 +128,10 @@ struct FrameStats
     // Semi-transparency diagnostics
     uint32_t semi_tris{0};         // Total semi-transparent triangles pushed
     uint32_t semi_mode_count[4]{}; // Per-mode count (0-3)
+    // 3D correlation diagnostics (per push_triangle call)
+    uint32_t corr_hit{0};          // Triangles that matched GTE entry (exact)
+    uint32_t corr_hit_swap{0};     // Triangles matched via swapped-key fallback
+    uint32_t corr_miss{0};         // Triangles with no GTE match (2D/HUD)
 
     void reset()
     {
@@ -113,6 +141,7 @@ struct FrameStats
         total_words = 0;
         semi_tris = 0;
         semi_mode_count[0] = semi_mode_count[1] = semi_mode_count[2] = semi_mode_count[3] = 0;
+        corr_hit = corr_hit_swap = corr_miss = 0;
     }
 };
 
@@ -134,6 +163,9 @@ class Gpu
     void mmio_write32(uint32_t addr, uint32_t v);
 
     void set_dump_file(const char* path);
+
+    // 3D reconstruction: set correlation table (owned by Core, shared with GPU)
+    void set_gte_correlation(class GteCorrelationTable* t) { gte_corr_ = t; }
 
     // VBlank generator (approximate; used to raise IRQ0/I_STAT.bit0).
     int tick_vblank(uint32_t cycles);
@@ -290,6 +322,9 @@ class Gpu
     FrameDrawList draw_lists_[2];
     int draw_active_{0};
     mutable std::mutex draw_list_mutex_; // Protects draw list swap/access
+
+    // 3D reconstruction: correlation table (owned by Core)
+    GteCorrelationTable* gte_corr_{nullptr};
 
     // VRAM write tracking (bumped on fill, cpu→vram, vram→vram)
     uint32_t vram_write_seq_{0};

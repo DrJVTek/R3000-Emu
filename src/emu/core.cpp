@@ -198,6 +198,10 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     // Hook system: pass hooks to Bus for VBlank/write dispatch.
     bus_->set_hooks(&hooks_);
 
+    // 3D reconstruction: share correlation table with Bus and GPU.
+    bus_->set_gte_correlation(&gte_corr_table_);
+    gpu_.set_gte_correlation(&gte_corr_table_);
+
     // Bus tracing options (diagnostic only).
     if (has_clock_)
         bus_->set_trace_vector_sink(iolog_, clock_);
@@ -364,6 +368,11 @@ r3000::Bus* Core::bus()
 r3000::Cpu* Core::cpu()
 {
     return cpu_.get();
+}
+
+gte::Gte* Core::gte()
+{
+    return cpu_ ? &cpu_->gte() : nullptr;
 }
 
 void Core::set_pad_buttons(uint16_t v)

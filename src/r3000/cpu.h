@@ -114,6 +114,9 @@ class Cpu
     // Raw cost (GTE 5-44, MUL 13, DIV 36, other 1) × cycle_multiplier_.
     uint32_t last_cycles() const { return last_multiplied_cycles_; }
 
+    // Access GTE for 3D reconstruction (snapshot readback)
+    gte::Gte& gte() { return gte_; }
+
     // Debug: fichier de sortie texte (BIOS putc / syscalls "write-like" / etc).
     // Objectif: avoir un "console.log" séparé et facile à relire pendant le live.
     void set_text_out(std::FILE* f)
@@ -335,6 +338,7 @@ class Cpu
     uint32_t cycle_multiplier_{2}; // CPI multiplier (real R3000 averages ~2 CPI)
     uint32_t last_instr_cycles_{1}; // raw cycles set during instruction execution
     uint32_t last_multiplied_cycles_{2}; // last_instr_cycles_ * cycle_multiplier_ (returned by last_cycles())
+    uint32_t gte_corr_diag_count_{0}; // diagnostic: limit GTE correlation debug logs
 
     std::FILE* compare_file_{nullptr};
 

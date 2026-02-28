@@ -8,6 +8,7 @@
 #include "../log/logger.h"
 
 namespace emu { struct Hooks; }
+namespace gpu { class GteCorrelationTable; }
 
 namespace cdrom
 {
@@ -138,6 +139,10 @@ class Bus
     // Hook system: set by Core for VBlank/write dispatch.
     void set_hooks(emu::Hooks* h) { hooks_ = h; }
 
+    // 3D reconstruction: correlation table for GTE↔GPU matching
+    void set_gte_correlation(gpu::GteCorrelationTable* t) { gte_corr_ = t; }
+    gpu::GteCorrelationTable* gte_correlation() const { return gte_corr_; }
+
     // Enable WAV output for audio debugging
     void enable_wav_output(const char* path);
 
@@ -161,6 +166,7 @@ class Bus
 
     // SPU (full implementation)
     emu::Hooks* hooks_{nullptr};
+    gpu::GteCorrelationTable* gte_corr_{nullptr};
 
     audio::Spu* spu_{nullptr};
     audio::WavWriter* wav_writer_{nullptr};

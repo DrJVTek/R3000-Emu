@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "gte_snapshot.h"
 
 // GTE (Geometry Transformation Engine) de la PS1.
 // Objectif: garder tout le code GTE séparé du CPU pour une base propre et pédagogique.
@@ -163,6 +164,9 @@ class Gte
     // Internal RTPS for single vertex (called by both RTPS and RTPT)
     void rtps_internal(const int32_t V[3], int sf, int lm, bool last);
 
+    // 3D reconstruction: capture snapshot after RTPS/RTPT
+    void capture_snapshot(const int32_t (*verts)[3], int count);
+
     // DuckStation InterpolateColor pattern: MAC+(FC-MAC)*IR0
     void interpolate_color(int64_t in1, int64_t in2, int64_t in3, int shift, int lm);
     // Internal DPCS (takes raw RGB bytes, used by DPCS and DPCT)
@@ -192,6 +196,19 @@ class Gte
     void cmd_dpct(uint32_t cmd);
     void cmd_ncct(uint32_t cmd);
 
+    // 3D reconstruction: snapshot captured after each RTPS/RTPT.
+    GteSnapshot last_snapshot_{};
+    uint32_t snapshot_seq_{0};
+
+    // RTPS accumulation: FIFO of last 3 input 3D vertices.
+    // After 3 consecutive RTPS calls, this contains the same 3 vertices
+    // that the GTE SXY FIFO holds as projected screen coords.
+    GteVertex3D rtps_vert_fifo_[3]{};
+
+  public:
+    const GteSnapshot& last_snapshot() const { return last_snapshot_; }
+
+  private:
     uint32_t flag_{0};  // Accumulated during command execution
 
     uint32_t data_[32]{};
