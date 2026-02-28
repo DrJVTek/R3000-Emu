@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Output lib + DLL to lib/<Config>/ for UE5 linking
+# Output to lib/<Config>/
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/lib/Debug)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/lib/Release)
@@ -18,14 +18,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/lib/Debug)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/lib/Release)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_SOURCE_DIR}/lib/RelWithDebInfo)
 
-add_executable(r3000_emu
-  src/main.cpp
-)
-
-# Shared library (DLL) — auto-export all symbols on Windows
-set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
-
-add_library(r3000_core SHARED
+# Emulator core sources (shared between CLI and UE5 via symlink)
+set(CORE_SOURCES
   src/audio/spu.cpp
   src/audio/spu_voice.cpp
   src/audio/xa_decoder.cpp
@@ -43,16 +37,17 @@ add_library(r3000_core SHARED
   src/r3000/cpu.cpp
 )
 
-target_compile_definitions(r3000_core PUBLIC R3000_DBG_LOOP_DETECTORS=1)
-target_include_directories(r3000_core PUBLIC src)
-target_include_directories(r3000_emu PRIVATE src)
-target_link_libraries(r3000_emu PRIVATE r3000_core)
+# CLI emulator — links core sources directly (no separate library needed)
+add_executable(r3000_emu
+  cli/main.cpp
+  ${CORE_SOURCES}
+)
 
-# Match UE5 compilation flags
+target_compile_definitions(r3000_emu PRIVATE R3000_DBG_LOOP_DETECTORS=1)
+target_include_directories(r3000_emu PRIVATE src)
+
 if(MSVC)
-    target_compile_options(r3000_core PRIVATE /EHs-c- /GR-)
-    set_property(TARGET r3000_core PROPERTY
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    target_compile_options(r3000_emu PRIVATE /EHs-c- /GR-)
     set_property(TARGET r3000_emu PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()

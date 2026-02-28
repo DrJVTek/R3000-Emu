@@ -445,49 +445,9 @@ bool UR3000EmuComponent::BootBiosInternal()
     return true;
 }
 
-void UR3000EmuComponent::LoadCoreDll()
-{
-    if (CoreDllHandle_)
-        return; // already loaded
-
-    // Plugin Binaries/Win64/ is where Build.cs copies r3000_core.dll
-    const FString PluginBinDir = FPaths::ConvertRelativePathToFull(
-        FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("R3000Emu/Binaries/Win64")));
-
-    FPlatformProcess::PushDllDirectory(*PluginBinDir);
-    CoreDllHandle_ = FPlatformProcess::GetDllHandle(TEXT("r3000_core.dll"));
-    FPlatformProcess::PopDllDirectory(*PluginBinDir);
-
-    if (CoreDllHandle_)
-    {
-        UE_LOG(LogR3000Emu, Log, TEXT("[R3000] Loaded r3000_core.dll from %s"), *PluginBinDir);
-    }
-    else
-    {
-        UE_LOG(LogR3000Emu, Error, TEXT("[R3000] FAILED to load r3000_core.dll from %s"), *PluginBinDir);
-    }
-}
-
-void UR3000EmuComponent::UnloadCoreDll()
-{
-    if (CoreDllHandle_)
-    {
-        // Free twice: once for our GetDllHandle ref, once for the delay-load ref.
-        // Windows DLL ref-counting: delay-load's implicit LoadLibrary + our explicit
-        // GetDllHandle = 2 refs. Both must be released for the DLL to actually unload.
-        FPlatformProcess::FreeDllHandle(CoreDllHandle_);
-        FPlatformProcess::FreeDllHandle(CoreDllHandle_);
-        CoreDllHandle_ = nullptr;
-        UE_LOG(LogR3000Emu, Log, TEXT("[R3000] Unloaded r3000_core.dll (2x free for delay-load)"));
-    }
-}
-
 void UR3000EmuComponent::BeginPlay()
 {
     Super::BeginPlay();
-
-    // Load the emulator DLL fresh each PIE session (allows rebuild between runs)
-    LoadCoreDll();
 }
 
 void UR3000EmuComponent::InitEmulator()
@@ -1226,9 +1186,6 @@ void UR3000EmuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
         std::fclose(TextLogFile_);
         TextLogFile_ = nullptr;
     }
-
-    // Unload DLL last — frees the lock so it can be overwritten between PIE runs
-    UnloadCoreDll();
 
     Super::EndPlay(EndPlayReason);
 }

@@ -282,11 +282,8 @@ class UR3000EmuComponent : public UActorComponent
     void StopWorkerThread();
     void SetupPadInput();
     void PollPadInput();
-    void LoadCoreDll();
-    void UnloadCoreDll();
     bool bPadMappingAdded_{false};
     bool bPawnInputDisabled_{false};
-    void* CoreDllHandle_{nullptr};
 
     emu::Core* Core_{nullptr};
     TAtomic<uint64> StepsExecuted_{0};
