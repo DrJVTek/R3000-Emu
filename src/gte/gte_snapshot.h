@@ -32,4 +32,34 @@ struct GteSnapshot
     uint32_t sequence_id;     // Monotonic counter for ordering
 };
 
+// Per-vertex cache entry (stored by RTPS/RTPT, indexed by vertex_index).
+struct GteCacheVertex
+{
+    int32_t vx, vy, vz;     // Input 3D vertex (model space)
+    int16_t nx, ny, nz;     // Normal vector (from last NCS/NCT/NCDS/NCDT)
+    GteTransform transform;  // RT + TR at projection time
+    int16_t sx, sy;          // 2D screen output (for verification)
+    uint16_t sz;             // Depth value
+};
+
+// Per-face cache entry (stored by RTPT: 3 vertices as one face).
+struct GteCacheFace
+{
+    int32_t vx[3], vy[3], vz[3];
+    int16_t nx[3], ny[3], nz[3];
+    GteTransform transform;
+    int16_t sx[3], sy[3];
+    uint16_t sz[3];
+};
+
+// Per-quad cache entry (RTPT pair or RTPT+RTPS: 4 vertices).
+struct GteCacheQuad
+{
+    int32_t vx[4], vy[4], vz[4];
+    int16_t nx[4], ny[4], nz[4];
+    GteTransform transform;
+    int16_t sx[4], sy[4];
+    uint16_t sz[4];
+};
+
 } // namespace gte

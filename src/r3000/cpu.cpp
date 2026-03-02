@@ -4000,7 +4000,10 @@ Cpu::StepResult Cpu::step()
                 if (rs_field == 0x00)
                 {
                     // MFC2: lecture data reg GTE -> CPU (avec load delay slot)
-                    const uint32_t v = gte_.read_data(d);
+                    // SXY regs 12-15: read from shadow GTE (tagged coords for 3D reconstruction)
+                    const uint32_t v = (gte_shadow_ && d >= 12 && d <= 15)
+                        ? gte_shadow_->read_data(d)
+                        : gte_.read_data(d);
                     next_pending_load.valid = 1;
                     next_pending_load.reg = t;
                     next_pending_load.value = v;
@@ -4025,11 +4028,13 @@ Cpu::StepResult Cpu::step()
                 {
                     // MTC2: écriture CPU -> data reg GTE
                     gte_.write_data(d, gpr_[t]);
+                    if (gte_shadow_) gte_shadow_->write_data(d, gpr_[t]);
                 }
                 else if (rs_field == 0x06)
                 {
                     // CTC2: écriture CPU -> ctrl reg GTE
                     gte_.write_ctrl(d, gpr_[t]);
+                    if (gte_shadow_) gte_shadow_->write_ctrl(d, gpr_[t]);
                 }
                 else if (rs_field & 0x10)
                 {
@@ -4038,6 +4043,7 @@ Cpu::StepResult Cpu::step()
                     // command.  Bits 24-21 carry sf/lm flags and are NOT always zero,
                     // so we must test the bit, not compare rs_field == 0x10.
                     const int gte_cycles = gte_.execute(instr);
+                    if (gte_shadow_) gte_shadow_->execute(instr);
                     if (gte_cycles == 0)
                     {
                         raise_exception(EXC_RI, 0, r.pc);
@@ -4113,6 +4119,7 @@ Cpu::StepResult Cpu::step()
                 // Si on veut coller plus finement au timing hardware, on pourra ajouter une
                 // latence.
                 gte_.lwc2(t, v);
+                if (gte_shadow_) gte_shadow_->lwc2(t, v);
                 break;
             }
         case 0x3A:
@@ -4123,7 +4130,10 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr); // numéro de registre GTE (0..31)
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                const uint32_t v = gte_.swc2(t);
+                // SXY regs 12-15: store from shadow GTE (tagged coords for 3D)
+                const uint32_t v = (gte_shadow_ && t >= 12 && t <= 15)
+                    ? gte_shadow_->swc2(t)
+                    : gte_.swc2(t);
                 if (!store_u32(addr, v))
                 {
                     break;

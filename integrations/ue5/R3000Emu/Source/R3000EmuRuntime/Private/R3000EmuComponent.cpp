@@ -2,6 +2,7 @@
 #include "R3000AudioComponent.h"
 #include "R3000GpuComponent.h"
 #include "R3000Gpu3DComponent.h"
+#include "R3000VramViewerComponent.h"
 
 #include "Logging/LogMacros.h"
 #include "Containers/StringConv.h"
@@ -791,50 +792,55 @@ void UR3000EmuComponent::InitEmulator()
             AudioComp_ ? 1 : 0, Core_ ? 1 : 0);
     }
 
-    // Find GPU component on same actor and connect emulated GPU.
-    GpuComp_ = Owner ? Owner->FindComponentByClass<UR3000GpuComponent>() : nullptr;
-    if (GpuComp_ && Core_)
+    // Find VramViewer component — owns the VRAM texture, shared with 2D + 3D components.
+    UR3000VramViewerComponent* VramComp = Owner ? Owner->FindComponentByClass<UR3000VramViewerComponent>() : nullptr;
+    r3000::Bus* Bus = Core_ ? Core_->bus() : nullptr;
+    gpu::Gpu* Gpu = Bus ? Bus->gpu() : nullptr;
+
+    if (VramComp && Gpu)
     {
-        r3000::Bus* Bus = Core_->bus();
-        gpu::Gpu* Gpu = Bus ? Bus->gpu() : nullptr;
-        if (Gpu)
-        {
-            GpuComp_->BindGpu(Gpu);
-            UE_LOG(LogR3000Emu, Log, TEXT("GPU connected to UR3000GpuComponent."));
-            emu::logf(emu::LogLevel::info, "CORE", "UE GPU connected: scale=%.2f zstep=%.4f",
-                (double)GpuComp_->PixelScale, (double)GpuComp_->ZStep);
-        }
-        else
-        {
-            UE_LOG(LogR3000Emu, Warning, TEXT("GPU not available — GpuComponent not connected."));
-        }
+        VramComp->BindGpu(Gpu);
+        UE_LOG(LogR3000Emu, Log, TEXT("VramViewer connected: texture=%p"), (void*)VramComp->GetVramTexture());
+        emu::logf(emu::LogLevel::info, "CORE", "VramViewer connected: texture=%p", (void*)VramComp->GetVramTexture());
+    }
+
+    // Find 2D GPU component and connect.
+    GpuComp_ = Owner ? Owner->FindComponentByClass<UR3000GpuComponent>() : nullptr;
+    if (GpuComp_ && Gpu)
+    {
+        GpuComp_->BindGpu(Gpu);
+        // Pass shared VRAM texture from VramViewer
+        if (VramComp)
+            GpuComp_->SetVramTexture(VramComp->GetVramTexture());
+        UE_LOG(LogR3000Emu, Log, TEXT("GPU 2D connected. VramTex=%p"), (void*)GpuComp_->GetVramTexture());
+        emu::logf(emu::LogLevel::info, "CORE", "UE GPU 2D connected: scale=%.2f zstep=%.4f",
+            (double)GpuComp_->PixelScale, (double)GpuComp_->ZStep);
     }
     else
     {
-        emu::logf(emu::LogLevel::warn, "CORE", "UE GPU NOT connected (GpuComp=%d Core=%d)",
-            GpuComp_ ? 1 : 0, Core_ ? 1 : 0);
+        emu::logf(emu::LogLevel::warn, "CORE", "UE GPU NOT connected (GpuComp=%d Gpu=%d)",
+            GpuComp_ ? 1 : 0, Gpu ? 1 : 0);
     }
 
-    // Find 3D GPU component on same actor and connect (shares same GPU + VRAM texture).
+    // Find 3D GPU component and connect (shadow GPU + shared VRAM texture).
     Gpu3DComp_ = Owner ? Owner->FindComponentByClass<UR3000Gpu3DComponent>() : nullptr;
-    UE_LOG(LogR3000Emu, Warning, TEXT("GPU3D search: Gpu3DComp_=%p Owner=%p Core_=%p"),
-        Gpu3DComp_, Owner, Core_);
-    emu::logf(emu::LogLevel::warn, "CORE", "GPU3D search: Gpu3DComp=%p Owner=%p Core=%p",
-        (void*)Gpu3DComp_, (void*)Owner, (void*)Core_);
     if (Gpu3DComp_ && Core_)
     {
-        r3000::Bus* Bus3D = Core_->bus();
-        gpu::Gpu* Gpu3D = Bus3D ? Bus3D->gpu() : nullptr;
-        if (Gpu3D)
-        {
-            Gpu3DComp_->BindGpu(Gpu3D);
-            // Share VRAM texture from 2D component (avoids duplicate 1MB upload)
-            if (GpuComp_)
-                Gpu3DComp_->SetVramTexture(GpuComp_->GetVramTexture());
-            UE_LOG(LogR3000Emu, Warning, TEXT("GPU3D connected OK. VramTex=%p"),
-                GpuComp_ ? (void*)GpuComp_->GetVramTexture() : nullptr);
-            emu::logf(emu::LogLevel::warn, "CORE", "GPU3D connected OK");
-        }
+        if (Gpu)
+            Gpu3DComp_->BindGpu(Gpu);
+
+        // Bind shadow GPU (3D tag-based reconstruction)
+        gpu::Gpu3D* GpuShadow = Core_->gpu_3d();
+        if (GpuShadow)
+            Gpu3DComp_->BindGpu3D(GpuShadow);
+
+        // Pass shared VRAM texture from VramViewer
+        if (VramComp)
+            Gpu3DComp_->SetVramTexture(VramComp->GetVramTexture());
+
+        UE_LOG(LogR3000Emu, Log, TEXT("GPU 3D connected. Shadow=%p VramTex=%p"),
+            (void*)GpuShadow, Gpu3DComp_->GetMeshComponent() ? (void*)VramComp : nullptr);
+        emu::logf(emu::LogLevel::info, "CORE", "GPU3D connected (shadow=%p)", (void*)GpuShadow);
     }
 
     // Start worker thread if threaded mode is enabled.

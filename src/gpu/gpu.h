@@ -83,12 +83,24 @@ enum class PrimOrigin : uint8_t
 
 // Extended draw command with optional 3D reconstruction data.
 // Parallel to DrawCmd — one per triangle when correlation is active.
+//
+// When origin == origin_3d, the inline 3D data (verts_3d, norms, transform, sz)
+// is valid — copied from the GTE face cache at push_triangle time.
+// UE5 can consume these directly without needing a separate face cache lookup.
 struct DrawCmd3D
 {
     PrimOrigin origin{PrimOrigin::origin_2d_hud};
-    gte::GteVertex3D verts_3d[3]; // Original 3D vertices (from GTE input)
+
+    // Inline 3D data (populated from face cache when origin == origin_3d)
+    gte::GteVertex3D verts_3d[3]; // Original 3D vertices (model space)
+    int16_t nx[3], ny[3], nz[3]; // Per-vertex normals (from GTE NCS/NCT)
     gte::GteTransform transform;  // RT + TR at projection time
-    uint16_t sz[3];               // Depth values
+    uint16_t sz[3];               // Depth values (screen Z)
+
+    // Face/quad correlation metadata
+    uint32_t face_idx{0xFFFFFFFFu}; // Face cache index (0xFFFFFFFF = no match)
+    bool is_quad{false};             // True if this triangle is half of a GP0 quad
+    uint8_t quad_half{0};            // 0 = first tri, 1 = second tri of quad
 };
 
 // Per-frame draw command list (double-buffered for GPU / UE5)

@@ -18,7 +18,10 @@ class Cdrom;
 namespace gpu
 {
 class Gpu;
+class Gpu3D;
 }
+
+namespace gte { class Gte3D; }
 
 namespace audio
 {
@@ -143,6 +146,12 @@ class Bus
     void set_gte_correlation(gpu::GteCorrelationTable* t) { gte_corr_ = t; }
     gpu::GteCorrelationTable* gte_correlation() const { return gte_corr_; }
 
+    // Shadow GPU/GTE for 3D reconstruction (differential tag system)
+    void set_gpu_3d(gpu::Gpu3D* g) { gpu_3d_ = g; }
+    void set_gte_3d(gte::Gte3D* g) { gte_3d_ = g; }
+    gpu::Gpu3D* gpu_3d() const { return gpu_3d_; }
+    gte::Gte3D* gte_3d() const { return gte_3d_; }
+
     // Enable WAV output for audio debugging
     void enable_wav_output(const char* path);
 
@@ -167,6 +176,8 @@ class Bus
     // SPU (full implementation)
     emu::Hooks* hooks_{nullptr};
     gpu::GteCorrelationTable* gte_corr_{nullptr};
+    gpu::Gpu3D* gpu_3d_{nullptr};
+    gte::Gte3D* gte_3d_{nullptr};
 
     audio::Spu* spu_{nullptr};
     audio::WavWriter* wav_writer_{nullptr};

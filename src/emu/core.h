@@ -7,7 +7,8 @@
 
 #include "../cdrom/cdrom.h"
 #include "../gpu/gpu.h"
-#include "../gpu/gte_correlation.h"
+#include "../gpu/gpu_3d.h"
+#include "../gte/gte_3d.h"
 #include "../loader/loader.h"
 #include "../log/filelog.h"
 #include "../log/logger.h"
@@ -99,7 +100,9 @@ class Core
     r3000::Bus* bus();
     r3000::Cpu* cpu();
     gte::Gte* gte();  // nullptr before init_from_image()
-    gpu::GteCorrelationTable& gte_correlation() { return gte_corr_table_; }
+    // Shadow systems for 3D reconstruction (differential tag encoding)
+    gpu::Gpu3D* gpu_3d() { return &gpu_3d_; }
+    gte::Gte3D* gte_3d() { return &gte_3d_; }
 
     // Hook system: register diagnostic hooks (memory watches, vblank callbacks, etc.)
     Hooks& hooks() { return hooks_; }
@@ -134,8 +137,6 @@ class Core
     rlog::Logger* logger_{nullptr};
     BootMilestones milestones_{};
     Hooks hooks_{};
-    gpu::GteCorrelationTable gte_corr_table_{};
-
     std::unique_ptr<uint8_t[]> ram_{};
     uint32_t ram_size_{0};
 
@@ -145,6 +146,8 @@ class Core
     // Devices are owned by the core instance (still "core", not UE-specific).
     cdrom::Cdrom cdrom_;
     gpu::Gpu gpu_;
+    gpu::Gpu3D gpu_3d_;    // Shadow GPU for 3D tag decoding
+    gte::Gte3D gte_3d_;    // Shadow GTE for differential tag encoding
 
     std::unique_ptr<r3000::Bus> bus_{};
     std::unique_ptr<r3000::Cpu> cpu_{};

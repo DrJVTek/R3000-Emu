@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "R3000GpuComponent.generated.h"
 
@@ -33,7 +33,7 @@ enum class EHdDefinition : uint8
  * Place on the same Actor as UR3000EmuComponent.
  */
 UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
-class UR3000GpuComponent : public UActorComponent
+class UR3000GpuComponent : public USceneComponent
 {
     GENERATED_BODY()
 
@@ -46,10 +46,12 @@ public:
     /** Connect to the emulated GPU (called by R3000EmuComponent after core init). */
     void BindGpu(gpu::Gpu* InGpu);
 
-    // ------- VRAM Texture access -------
+    // ------- VRAM Texture (received from VramViewerComponent) -------
 
-    /** VRAM texture (1024x512 BGRA8) — the raw PS1 VRAM as an UE5 texture.
-     *  Use this for material sampling or for a debug display widget. */
+    /** Receive the shared VRAM texture from the VramViewerComponent (avoids duplicate upload). */
+    void SetVramTexture(UTexture2D* InTexture);
+
+    /** VRAM texture (1024x512 BGRA8) — the raw PS1 VRAM as an UE5 texture. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
     UTexture2D* GetVramTexture() const { return VramTexture_; }
 
@@ -100,9 +102,6 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
     int32 GetSectionTriCount(int32 Section) const { return (Section >= 0 && Section < kNumSections) ? SectionTriCount_[Section] : 0; }
 
-    /** Number of VRAM texture uploads since start. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
-    int32 GetVramUploadCount() const { return VramUploadCount_; }
 
     // ------- Rendering settings -------
 
@@ -249,85 +248,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
     UMaterialInterface* MatSemi3{nullptr};
 
-    // ------- VRAM Debug Viewer -------
-
-    /** Show a debug plane displaying the full 1024x512 VRAM content. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|VramViewer")
-    bool bShowVramViewer{false};
-
-    /** Material for the VRAM viewer plane.
-     *  Should be Unlit/Opaque with a "VramTexture" Texture2D parameter.
-     *  If not set, a default unlit material is used. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|VramViewer")
-    UMaterialInterface* VramViewerMaterial{nullptr};
-
-    /** Scale of the VRAM viewer plane in UE units. Default 1.0 = 1024x512 UE units. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|VramViewer", meta = (ClampMin = "0.01", ClampMax = "10.0"))
-    float VramViewerScale{0.5f};
-
-    /** Offset of the VRAM viewer plane from the actor origin (local space). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|VramViewer")
-    FVector VramViewerOffset{FVector(600.0f, -256.0f, 0.0f)};
-
-    /** Rotation of the VRAM viewer plane (local space). Default faces -X (toward a player looking +X). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|VramViewer")
-    FRotator VramViewerRotation{FRotator(0.0f, 0.0f, 0.0f)};
-
-    /** Toggle the VRAM viewer at runtime. */
-    UFUNCTION(BlueprintCallable, Category = "R3000Emu|GPU|VramViewer")
-    void SetVramViewerVisible(bool bVisible);
-
-    // ------- PS1 VRAM Constants (for Material/Blueprint use) -------
-
-    /** PS1 VRAM width in pixels (1024). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static int32 GetVramWidth() { return 1024; }
-
-    /** PS1 VRAM height in pixels (512). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static int32 GetVramHeight() { return 512; }
-
-    /** Texture page width in texels (256 for all depths, but VRAM footprint varies). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static int32 GetTexturePageWidth() { return 256; }
-
-    /** Texture page height in texels (256). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static int32 GetTexturePageHeight() { return 256; }
-
-    /** Get VRAM X scale factor for a texture depth mode.
-     *  4-bit=0.25 (64 VRAM pixels for 256 texels), 8-bit=0.5, 15-bit=1.0 */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static float GetVramScaleForDepth(int32 TexDepthMode)
-    {
-        switch (TexDepthMode)
-        {
-            case 1: return 0.25f;  // 4-bit: 4 texels per 16-bit word
-            case 2: return 0.5f;   // 8-bit: 2 texels per 16-bit word
-            case 3: return 1.0f;   // 15-bit: 1 texel per 16-bit word
-            default: return 1.0f;
-        }
-    }
-
-    /** Decode semi-transparency mode from UV3.y flags. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static int32 DecodeSemiMode(float UV3Y) { return static_cast<int32>(UV3Y) & 0x3; }
-
-    /** Check if semi-transparent from UV3.y flags. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static bool IsSemiTransparent(float UV3Y) { return (static_cast<int32>(UV3Y) & 0x4) != 0; }
-
-    /** Check if raw texture (no color modulation) from UV3.y flags. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Constants")
-    static bool IsRawTexture(float UV3Y) { return (static_cast<int32>(UV3Y) & 0x8) != 0; }
 
 private:
-    void CreateVramTexture();
-    void UpdateVramTexture();
     void RebuildMesh();
-    void EnsureMaterialInstances();  // Lazy-create/refresh MatInst_ from current material slots
-    void CreateOrUpdateVramViewer();
-    void DestroyVramViewer();
+    void EnsureMaterialInstances();
 
     gpu::Gpu* Gpu_{nullptr};
 
@@ -341,12 +265,10 @@ private:
     UPROPERTY()
     TArray<UMaterialInterface*> MatInstSource_;
 
-    // VRAM texture (shared between geometry material + VRAM viewer)
+    // VRAM texture (received from VramViewerComponent)
     UPROPERTY()
     UTexture2D* VramTexture_{nullptr};
-    uint8* PixelBuffer_{nullptr};
-    uint16* VramCopyBuffer_{nullptr};  // Thread-safe copy of GPU VRAM
-    uint32 LastVramWriteSeq_{0xFFFFFFFFu};
+
     uint32 LastVramFrame_{0xFFFFFFFFu};
     int32 LastTriCount_{0};
     int32 SectionTriCount_[kNumSections]{0};
@@ -354,15 +276,4 @@ private:
     float GpuFps_{0.0f};
     double LastGpuFpsTime_{0.0};
     uint32 LastGpuFpsFrame_{0};
-    int32 VramUploadCount_{0};
-
-    // VRAM debug viewer
-    UPROPERTY()
-    UProceduralMeshComponent* VramViewerMesh_{nullptr};
-    UPROPERTY()
-    UMaterialInstanceDynamic* VramViewerMatInst_{nullptr};
-    bool bVramViewerCreated_{false};
-
-    static constexpr int32 kVramW = 1024;
-    static constexpr int32 kVramH = 512;
 };

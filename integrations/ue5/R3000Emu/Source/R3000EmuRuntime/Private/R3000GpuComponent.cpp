@@ -16,6 +16,7 @@ UR3000GpuComponent::UR3000GpuComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
+    SetMobility(EComponentMobility::Movable);
 
     UE_LOG(LogR3000Gpu, Warning, TEXT("GpuComponent CONSTRUCTOR - tick enabled"));
 }
@@ -36,10 +37,6 @@ void UR3000GpuComponent::BeginPlay()
 void UR3000GpuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
-    delete[] PixelBuffer_;
-    PixelBuffer_ = nullptr;
-    delete[] VramCopyBuffer_;
-    VramCopyBuffer_ = nullptr;
     Super::EndPlay(EndPlayReason);
 }
 
@@ -110,49 +107,35 @@ void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
 
     Gpu_ = InGpu;
 
-    // ---- Geometry ProceduralMeshComponent ----
+    // ---- Geometry ProceduralMeshComponent (attached to this SceneComponent) ----
     if (!MeshComp_)
     {
-        AActor* Owner = GetOwner();
-        if (Owner)
-        {
-            MeshComp_ = NewObject<UProceduralMeshComponent>(Owner, TEXT("PSXMesh"));
-            MeshComp_->bUseAsyncCooking = true;
-            MeshComp_->SetCastShadow(false);
-            MeshComp_->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-            if (Owner->GetRootComponent())
-                MeshComp_->AttachToComponent(Owner->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-            MeshComp_->RegisterComponent();
-            MeshComp_->SetVisibility(true);
-            MeshComp_->SetHiddenInGame(false);
-        }
+        MeshComp_ = NewObject<UProceduralMeshComponent>(GetOwner(), TEXT("PSXMesh"));
+        MeshComp_->bUseAsyncCooking = true;
+        MeshComp_->SetCastShadow(false);
+        MeshComp_->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        MeshComp_->AttachToComponent(this, FAttachmentTransformRules::KeepRelativeTransform);
+        MeshComp_->RegisterComponent();
+        MeshComp_->SetVisibility(true);
+        MeshComp_->SetHiddenInGame(false);
     }
-
-    // ---- VRAM texture ----
-    if (!VramTexture_)
-        CreateVramTexture();
 
     // ---- Geometry material instances (5 sections) ----
     EnsureMaterialInstances();
 
-    // Warn if no material assigned at all
     if (!BaseMaterial)
     {
         UE_LOG(LogR3000Gpu, Error, TEXT("WARNING: BaseMaterial is NULL! Assign a material in the Blueprint or mesh will be invisible."));
         emu::logf(emu::LogLevel::error, "GPU", "BaseMaterial is NULL - mesh will be invisible! Assign a material in Blueprint.");
     }
 
-    // ---- VRAM debug viewer ----
-    if (bShowVramViewer)
-        CreateOrUpdateVramViewer();
-
-    UE_LOG(LogR3000Gpu, Log, TEXT("GPU bound. MeshComp=%d VramTex=%d Mat[0..4]=%d%d%d%d%d VramViewer=%d"),
+    UE_LOG(LogR3000Gpu, Log, TEXT("GPU bound. MeshComp=%d VramTex=%d Mat[0..4]=%d%d%d%d%d"),
         MeshComp_ != nullptr, VramTexture_ != nullptr,
         MatInst_.IsValidIndex(0) && MatInst_[0] != nullptr,
         MatInst_.IsValidIndex(1) && MatInst_[1] != nullptr,
         MatInst_.IsValidIndex(2) && MatInst_[2] != nullptr,
         MatInst_.IsValidIndex(3) && MatInst_[3] != nullptr,
-        MatInst_.IsValidIndex(4) && MatInst_[4] != nullptr, bShowVramViewer);
+        MatInst_.IsValidIndex(4) && MatInst_[4] != nullptr);
 }
 
 // ===================================================================
@@ -217,118 +200,18 @@ void UR3000GpuComponent::RefreshMaterials()
 }
 
 // ===================================================================
-// VRAM Texture creation
+// SetVramTexture — receive shared texture from VramViewerComponent
 // ===================================================================
-void UR3000GpuComponent::CreateVramTexture()
+void UR3000GpuComponent::SetVramTexture(UTexture2D* InTexture)
 {
-    VramTexture_ = UTexture2D::CreateTransient(kVramW, kVramH, PF_B8G8R8A8);
-    if (!VramTexture_)
+    VramTexture_ = InTexture;
+    UE_LOG(LogR3000Gpu, Log, TEXT("SetVramTexture: %p"), InTexture);
+
+    // Update material instances with new texture
+    for (int32 s = 0; s < MatInst_.Num(); ++s)
     {
-        UE_LOG(LogR3000Gpu, Error, TEXT("Failed to create VRAM texture"));
-        return;
-    }
-
-    VramTexture_->Filter = TF_Nearest;  // PS1-style nearest-neighbor
-    VramTexture_->SRGB = false;
-    VramTexture_->NeverStream = true;
-#if WITH_EDITORONLY_DATA
-    VramTexture_->MipGenSettings = TMGS_NoMipmaps;
-#endif
-    VramTexture_->UpdateResource();
-
-    PixelBuffer_ = new uint8[kVramW * kVramH * 4];
-    FMemory::Memzero(PixelBuffer_, kVramW * kVramH * 4);
-
-    // Thread-safe VRAM copy buffer (avoids race with emulator worker thread)
-    VramCopyBuffer_ = new uint16[kVramW * kVramH];
-    FMemory::Memzero(VramCopyBuffer_, kVramW * kVramH * sizeof(uint16));
-}
-
-// ===================================================================
-// VRAM Texture upload (15-bit → BGRA8) - only when dirty
-// ===================================================================
-void UR3000GpuComponent::UpdateVramTexture()
-{
-    if (!Gpu_ || !VramTexture_ || !PixelBuffer_ || !VramCopyBuffer_)
-    {
-        static bool bWarnedOnce = false;
-        if (!bWarnedOnce)
-        {
-            UE_LOG(LogR3000Gpu, Error, TEXT("UpdateVramTexture: NULL pointer! Gpu=%d Tex=%d Pix=%d Copy=%d"),
-                Gpu_ != nullptr, VramTexture_ != nullptr, PixelBuffer_ != nullptr, VramCopyBuffer_ != nullptr);
-            bWarnedOnce = true;
-        }
-        return;
-    }
-
-    // Check for stale pointer - disabled for debug
-    // if (!Gpu_->is_valid())
-    //     return;
-
-    // Thread-safe: check if VRAM changed before doing the full copy
-    const uint32 CurrentSeq = Gpu_->vram_write_seq_locked();
-    if (CurrentSeq == LastVramWriteSeq_)
-        return;
-
-    // Log first few updates to confirm texture is being updated
-    if (VramUploadCount_ < 5)
-    {
-        UE_LOG(LogR3000Gpu, Warning, TEXT("UpdateVramTexture: seq %u -> %u (upload #%d)"),
-            LastVramWriteSeq_, CurrentSeq, VramUploadCount_ + 1);
-    }
-
-    // VRAM changed - do a thread-safe copy to avoid race with emulator worker
-    uint32 CopySeq = 0;
-    Gpu_->copy_vram(VramCopyBuffer_, CopySeq);
-    LastVramWriteSeq_ = CopySeq;
-
-    // Use our thread-safe copy instead of direct GPU VRAM access
-    const uint16_t* Vram = VramCopyBuffer_;
-
-    // Store raw 16-bit values in BGRA8 texture for shader reconstruction
-    // This preserves ALL 16 bits (including bit 15) for proper 4-bit/8-bit texture indexing
-    // Layout: B = low byte, G = high byte, R = unused, A = 0xFF
-    uint8* Dst = PixelBuffer_;
-    const int32 NumPixels = kVramW * kVramH;
-    for (int32 i = 0; i < NumPixels; ++i)
-    {
-        const uint16_t Px = Vram[i];
-        Dst[0] = Px & 0xFF;          // B = low byte (bits 0-7)
-        Dst[1] = (Px >> 8) & 0xFF;   // G = high byte (bits 8-15)
-        Dst[2] = 0;                   // R = unused
-        Dst[3] = 0xFF;                // A = opaque
-        Dst += 4;
-    }
-
-    // Upload to GPU texture via BulkData
-    FTexturePlatformData* PlatformData = VramTexture_->GetPlatformData();
-    if (PlatformData && PlatformData->Mips.Num() > 0)
-    {
-        FTexture2DMipMap& Mip = PlatformData->Mips[0];
-        void* RawData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-        if (RawData)
-        {
-            FMemory::Memcpy(RawData, PixelBuffer_, NumPixels * 4);
-            Mip.BulkData.Unlock();
-            VramTexture_->UpdateResource();
-        }
-        else
-        {
-            Mip.BulkData.Unlock();
-        }
-    }
-
-    VramUploadCount_++;
-
-    // Debug: log first pixel values to verify data
-    if (VramUploadCount_ <= 3)
-    {
-        const uint16_t* Vram16 = VramCopyBuffer_;
-        UE_LOG(LogR3000Gpu, Warning, TEXT("UpdateVramTexture #%d: First pixels raw: %04X %04X %04X %04X"),
-            VramUploadCount_, Vram16[0], Vram16[1], Vram16[2], Vram16[3]);
-        UE_LOG(LogR3000Gpu, Warning, TEXT("  Converted BGRA: %02X%02X%02X%02X %02X%02X%02X%02X"),
-            PixelBuffer_[0], PixelBuffer_[1], PixelBuffer_[2], PixelBuffer_[3],
-            PixelBuffer_[4], PixelBuffer_[5], PixelBuffer_[6], PixelBuffer_[7]);
+        if (MatInst_[s] && VramTexture_)
+            MatInst_[s]->SetTextureParameterValue(TEXT("VramTexture"), VramTexture_);
     }
 }
 
@@ -552,12 +435,12 @@ void UR3000GpuComponent::RebuildMesh()
 
     if (bDebugMeshLog)
     {
-        FBoxSphereBounds Bounds = MeshComp_->Bounds;
+        FBoxSphereBounds MeshBounds = MeshComp_->Bounds;
         emu::logf(emu::LogLevel::info, "GPU", "MeshCreated: %d tris, %d sections (runs) [opq=%d s0=%d s1=%d s2=%d s3=%d] Bounds=(%.1f,%.1f,%.1f)±(%.1f,%.1f,%.1f)",
             TotalTris, Runs.Num(),
             SemiTriCounts[0], SemiTriCounts[1], SemiTriCounts[2], SemiTriCounts[3], SemiTriCounts[4],
-            Bounds.Origin.X, Bounds.Origin.Y, Bounds.Origin.Z,
-            Bounds.BoxExtent.X, Bounds.BoxExtent.Y, Bounds.BoxExtent.Z);
+            MeshBounds.Origin.X, MeshBounds.Origin.Y, MeshBounds.Origin.Z,
+            MeshBounds.BoxExtent.X, MeshBounds.BoxExtent.Y, MeshBounds.BoxExtent.Z);
     }
 
     // Warn if no materials assigned
@@ -591,119 +474,7 @@ void UR3000GpuComponent::RebuildMesh()
 }
 
 // ===================================================================
-// VRAM Debug Viewer - flat plane showing the 1024x512 VRAM
-// ===================================================================
-void UR3000GpuComponent::CreateOrUpdateVramViewer()
-{
-    AActor* Owner = GetOwner();
-    if (!Owner || !VramTexture_)
-        return;
-
-    // Create the viewer mesh if needed
-    if (!VramViewerMesh_)
-    {
-        VramViewerMesh_ = NewObject<UProceduralMeshComponent>(Owner, TEXT("VramViewerMesh"));
-        VramViewerMesh_->bUseAsyncCooking = true;
-        VramViewerMesh_->SetCastShadow(false);
-        VramViewerMesh_->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-        if (Owner->GetRootComponent())
-            VramViewerMesh_->AttachToComponent(Owner->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-        VramViewerMesh_->RegisterComponent();
-
-        // Build a simple quad (2 triangles) showing the full VRAM.
-        // The quad is built in the YZ plane, centered on Y, with normals facing -X
-        // (so a player looking down +X sees it). Rotation property can adjust.
-        const float W = kVramW * VramViewerScale;
-        const float H = kVramH * VramViewerScale;
-        const float HalfW = W * 0.5f;
-
-        TArray<FVector> Verts;
-        Verts.Add(FVector(0.0f, -HalfW, 0.0f));      // bottom-left
-        Verts.Add(FVector(0.0f,  HalfW, 0.0f));       // bottom-right
-        Verts.Add(FVector(0.0f,  HalfW, H));           // top-right
-        Verts.Add(FVector(0.0f, -HalfW, H));           // top-left
-
-        // Winding order: CCW when viewed from -X direction (facing the player)
-        TArray<int32> Tris;
-        Tris.Add(0); Tris.Add(2); Tris.Add(1);
-        Tris.Add(0); Tris.Add(3); Tris.Add(2);
-
-        TArray<FVector> Norms;
-        Norms.Add(FVector(-1, 0, 0));
-        Norms.Add(FVector(-1, 0, 0));
-        Norms.Add(FVector(-1, 0, 0));
-        Norms.Add(FVector(-1, 0, 0));
-
-        // UV: map full texture. PS1 VRAM Y=0 is top, UE5 texture V=0 is top.
-        TArray<FVector2D> UVs;
-        UVs.Add(FVector2D(0.0f, 1.0f)); // bottom-left
-        UVs.Add(FVector2D(1.0f, 1.0f)); // bottom-right
-        UVs.Add(FVector2D(1.0f, 0.0f)); // top-right
-        UVs.Add(FVector2D(0.0f, 0.0f)); // top-left
-
-        TArray<FLinearColor> Colors;
-        Colors.Add(FLinearColor::White);
-        Colors.Add(FLinearColor::White);
-        Colors.Add(FLinearColor::White);
-        Colors.Add(FLinearColor::White);
-
-        TArray<FProcMeshTangent> Tangents;
-        Tangents.Add(FProcMeshTangent(0, 1, 0));
-        Tangents.Add(FProcMeshTangent(0, 1, 0));
-        Tangents.Add(FProcMeshTangent(0, 1, 0));
-        Tangents.Add(FProcMeshTangent(0, 1, 0));
-
-        VramViewerMesh_->CreateMeshSection_LinearColor(
-            0, Verts, Tris, Norms, UVs, Colors, Tangents, false);
-
-        bVramViewerCreated_ = true;
-    }
-
-    // Position and orient the viewer
-    VramViewerMesh_->SetRelativeLocation(VramViewerOffset);
-    VramViewerMesh_->SetRelativeRotation(VramViewerRotation);
-
-    // Create/update material instance
-    if (!VramViewerMatInst_)
-    {
-        UMaterialInterface* ViewerBase = VramViewerMaterial ? VramViewerMaterial : BaseMaterial;
-        if (ViewerBase)
-        {
-            VramViewerMatInst_ = UMaterialInstanceDynamic::Create(ViewerBase, this);
-            if (VramViewerMatInst_)
-                VramViewerMatInst_->SetTextureParameterValue(TEXT("VramTexture"), VramTexture_);
-        }
-    }
-
-    if (VramViewerMatInst_)
-        VramViewerMesh_->SetMaterial(0, VramViewerMatInst_);
-
-    VramViewerMesh_->SetVisibility(true);
-    UE_LOG(LogR3000Gpu, Log, TEXT("VRAM Viewer created/updated. Scale=%.2f Offset=(%.0f,%.0f,%.0f)"),
-        VramViewerScale, VramViewerOffset.X, VramViewerOffset.Y, VramViewerOffset.Z);
-}
-
-void UR3000GpuComponent::DestroyVramViewer()
-{
-    if (VramViewerMesh_)
-    {
-        VramViewerMesh_->SetVisibility(false);
-        VramViewerMesh_->ClearAllMeshSections();
-    }
-    bVramViewerCreated_ = false;
-}
-
-void UR3000GpuComponent::SetVramViewerVisible(bool bVisible)
-{
-    bShowVramViewer = bVisible;
-    if (bVisible && Gpu_)
-        CreateOrUpdateVramViewer();
-    else
-        DestroyVramViewer();
-}
-
-// ===================================================================
-// Tick - update VRAM texture + rebuild geometry + manage viewer
+// Tick - rebuild geometry when new frame available
 // ===================================================================
 void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
@@ -742,15 +513,11 @@ void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         // DON'T return - continue for debugging
     }
 
-    // Always upload VRAM texture (shared with 3D component even when 2D is disabled)
-    UpdateVramTexture();
-
-    // If disabled, hide mesh but keep VRAM updates running
+    // If disabled, hide mesh
     if (!bEnabled)
     {
         if (MeshComp_ && MeshComp_->IsVisible())
             MeshComp_->SetVisibility(false);
-        // Still track frame count so we don't rebuild a stale backlog on re-enable
         LastVramFrame_ = Gpu_->vram_frame_count();
         return;
     }
@@ -773,18 +540,6 @@ void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         }
         RebuildMesh();
         LastVramFrame_ = CurrentFrame;
-    }
-
-    // VRAM viewer: create/destroy + live-update transform
-    if (bShowVramViewer && !bVramViewerCreated_)
-        CreateOrUpdateVramViewer();
-    else if (!bShowVramViewer && bVramViewerCreated_)
-        DestroyVramViewer();
-
-    if (bVramViewerCreated_ && VramViewerMesh_)
-    {
-        VramViewerMesh_->SetRelativeLocation(VramViewerOffset);
-        VramViewerMesh_->SetRelativeRotation(VramViewerRotation);
     }
 }
 

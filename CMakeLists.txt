@@ -27,11 +27,13 @@ set(CORE_SOURCES
   src/cdrom/cdrom.cpp
   src/emu/core.cpp
   src/gpu/gpu.cpp
+  src/gpu/gpu_3d.cpp
   src/gpu/gte_correlation.cpp
   src/log/emu_log.cpp
   src/log/filelog.cpp
   src/log/logger.cpp
   src/gte/gte.cpp
+  src/gte/gte_3d.cpp
   src/loader/loader.cpp
   src/r3000/bus.cpp
   src/r3000/cpu.cpp

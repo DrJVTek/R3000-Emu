@@ -5,6 +5,7 @@
 #include "Logging/LogMacros.h"
 
 #include "gpu/gpu.h"
+#include "gpu/gpu_3d.h"
 #include "log/emu_log.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogR3000Gpu3D, Log, All);
@@ -16,6 +17,7 @@ UR3000Gpu3DComponent::UR3000Gpu3DComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
+    SetMobility(EComponentMobility::Movable);
 }
 
 // ===================================================================
@@ -48,30 +50,34 @@ void UR3000Gpu3DComponent::BindGpu(gpu::Gpu* InGpu)
 
     Gpu_ = InGpu;
 
-    // Create ProceduralMeshComponent
+    // Create ProceduralMeshComponent (attached to this SceneComponent)
     if (!MeshComp_)
     {
-        AActor* Owner = GetOwner();
-        if (Owner)
-        {
-            MeshComp_ = NewObject<UProceduralMeshComponent>(Owner, TEXT("PSX3DMesh"));
-            MeshComp_->bUseAsyncCooking = true;
-            MeshComp_->SetCastShadow(false);
-            MeshComp_->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-            if (Owner->GetRootComponent())
-                MeshComp_->AttachToComponent(Owner->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-            MeshComp_->RegisterComponent();
-            MeshComp_->SetVisibility(bEnabled);
-            MeshComp_->SetHiddenInGame(!bEnabled);
-        }
+        MeshComp_ = NewObject<UProceduralMeshComponent>(GetOwner(), TEXT("PSX3DMesh"));
+        MeshComp_->bUseAsyncCooking = true;
+        MeshComp_->SetCastShadow(false);
+        MeshComp_->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        MeshComp_->AttachToComponent(this, FAttachmentTransformRules::KeepRelativeTransform);
+        MeshComp_->RegisterComponent();
+        MeshComp_->SetVisibility(bEnabled);
+        MeshComp_->SetHiddenInGame(!bEnabled);
     }
 
     EnsureMaterialInstances();
 
-    if (!BaseMaterial)
+    if (!Mat3D_Opaque && !Mat2D_Opaque)
     {
-        UE_LOG(LogR3000Gpu3D, Warning, TEXT("BaseMaterial is NULL — 3D mesh will be invisible until a material is assigned."));
+        UE_LOG(LogR3000Gpu3D, Warning, TEXT("No materials assigned — 3D mesh will be invisible until Mat2D/Mat3D materials are set."));
     }
+}
+
+// ===================================================================
+// BindGpu3D — shadow GPU for 3D reconstruction
+// ===================================================================
+void UR3000Gpu3DComponent::BindGpu3D(gpu::Gpu3D* InGpu3D)
+{
+    Gpu3D_ = InGpu3D;
+    UE_LOG(LogR3000Gpu3D, Warning, TEXT("GPU3D BindGpu3D: shadow=%p"), InGpu3D);
 }
 
 // ===================================================================
@@ -97,11 +103,18 @@ void UR3000Gpu3DComponent::SetVramTexture(UTexture2D* InTexture)
 void UR3000Gpu3DComponent::EnsureMaterialInstances()
 {
     UMaterialInterface* Wanted[kNumSections] = {
-        BaseMaterial,
-        MatSemi0 ? MatSemi0 : BaseMaterial,
-        MatSemi1 ? MatSemi1 : BaseMaterial,
-        MatSemi2 ? MatSemi2 : BaseMaterial,
-        MatSemi3 ? MatSemi3 : BaseMaterial,
+        // 2D sections 0-4
+        Mat2D_Opaque,
+        Mat2D_Semi0 ? Mat2D_Semi0 : Mat2D_Opaque,
+        Mat2D_Semi1 ? Mat2D_Semi1 : Mat2D_Opaque,
+        Mat2D_Semi2 ? Mat2D_Semi2 : Mat2D_Opaque,
+        Mat2D_Semi3 ? Mat2D_Semi3 : Mat2D_Opaque,
+        // 3D sections 5-9
+        Mat3D_Opaque,
+        Mat3D_Semi0 ? Mat3D_Semi0 : Mat3D_Opaque,
+        Mat3D_Semi1 ? Mat3D_Semi1 : Mat3D_Opaque,
+        Mat3D_Semi2 ? Mat3D_Semi2 : Mat3D_Opaque,
+        Mat3D_Semi3 ? Mat3D_Semi3 : Mat3D_Opaque,
     };
 
     if (MatInst_.Num() != kNumSections)
@@ -145,7 +158,7 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
             s3DTickCount, Gpu_, MeshComp_, bEnabled ? 1 : 0);
     }
 
-    if (!Gpu_ || !MeshComp_)
+    if ((!Gpu_ && !Gpu3D_) || !MeshComp_)
         return;
 
     // Toggle visibility based on bEnabled
@@ -153,7 +166,8 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
     {
         if (MeshComp_->IsVisible())
             MeshComp_->SetVisibility(false);
-        LastVramFrame_ = Gpu_->vram_frame_count();
+        // Use shadow GPU frame count if available, else primary
+        LastVramFrame_ = Gpu3D_ ? Gpu3D_->frame_count() : Gpu_->vram_frame_count();
         return;
     }
 
@@ -161,7 +175,7 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
         MeshComp_->SetVisibility(true);
 
     // Rebuild when a new frame is ready
-    const uint32 CurrentFrame = Gpu_->vram_frame_count();
+    const uint32 CurrentFrame = Gpu3D_ ? Gpu3D_->frame_count() : Gpu_->vram_frame_count();
     if (CurrentFrame != LastVramFrame_)
     {
         RebuildMesh3D();
@@ -174,15 +188,18 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 // ===================================================================
 void UR3000Gpu3DComponent::RebuildMesh3D()
 {
-    if (!Gpu_ || !MeshComp_)
+    if ((!Gpu_ && !Gpu3D_) || !MeshComp_)
         return;
 
     // Lazy material refresh
     EnsureMaterialInstances();
 
-    // Thread-safe copy of draw list
+    // Thread-safe copy of draw list — prefer shadow GPU (has decoded 3D tags)
     gpu::FrameDrawList DrawListCopy;
-    Gpu_->copy_ready_draw_list(DrawListCopy);
+    if (Gpu3D_)
+        Gpu3D_->copy_ready_draw_list(DrawListCopy);
+    else
+        Gpu_->copy_ready_draw_list(DrawListCopy);
     const gpu::FrameDrawList& DL = DrawListCopy;
 
     const int32 NumCmds = static_cast<int32>(DL.cmds.size());
@@ -238,7 +255,8 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
         }
 
         const bool bSemiTrans = (Cmd.flags & 2) != 0;
-        const int32 MatIdx = bSemiTrans ? 1 + (Cmd.semi_mode & 3) : 0;
+        const int32 BaseOfs = bHas3D ? 5 : 0;  // 3D → sections 5-9, 2D → sections 0-4
+        const int32 MatIdx = BaseOfs + (bSemiTrans ? 1 + (Cmd.semi_mode & 3) : 0);
 
         // New section needed?
         if (MatIdx != CurMatIdx)

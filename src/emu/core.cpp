@@ -198,9 +198,11 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     // Hook system: pass hooks to Bus for VBlank/write dispatch.
     bus_->set_hooks(&hooks_);
 
-    // 3D reconstruction: share correlation table with Bus and GPU.
-    bus_->set_gte_correlation(&gte_corr_table_);
-    gpu_.set_gte_correlation(&gte_corr_table_);
+    // Shadow GTE/GPU for 3D tag-based reconstruction.
+    gpu_3d_.bind_gte_3d(&gte_3d_);
+    bus_->set_gpu_3d(&gpu_3d_);
+    bus_->set_gte_3d(&gte_3d_);
+    cpu_->set_gte_shadow(&gte_3d_);
 
     // Bus tracing options (diagnostic only).
     if (has_clock_)

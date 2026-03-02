@@ -8,6 +8,8 @@
 #include "../cdrom/cdrom.h"
 #include "../emu/hooks.h"
 #include "../gpu/gpu.h"
+#include "../gpu/gpu_3d.h"
+#include "../gte/gte_3d.h"
 #include "../log/emu_log.h"
 
 // ---- Global pad button state (avoids Hot Reload class-layout issues) ----
@@ -1293,6 +1295,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                                  ((uint32_t)ram_[ma + 2] << 16) |
                                                  ((uint32_t)ram_[ma + 3] << 24);
                                     gpu_->mmio_write32(kGpuBase, w);
+                                    if (gpu_3d_) gpu_3d_->gp0(w);
                                     ma = (ma + 4) & 0x1FFFFF;
                                 }
                             }
@@ -1324,6 +1327,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                                      ((uint32_t)ram_[off2 + 2] << 16) |
                                                      ((uint32_t)ram_[off2 + 3] << 24);
                                         gpu_->mmio_write32(kGpuBase, w);
+                                        if (gpu_3d_) gpu_3d_->gp0(w);
                                     }
                                     if ((header & 0x00FFFFFF) == 0x00FFFFFF)
                                         break;
@@ -1509,6 +1513,14 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     {
         if (gpu_)
             gpu_->mmio_write32(phys, v);
+        // Forward to shadow GPU for 3D reconstruction (tag decoding)
+        if (gpu_3d_)
+        {
+            if (phys == kGpuBase)
+                gpu_3d_->gp0(v);
+            else
+                gpu_3d_->gp1(v);
+        }
         return true;
     }
 
@@ -1839,6 +1851,10 @@ void Bus::tick(uint32_t cycles)
         {
             i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
             ++vblank_total_count_;
+
+            // Shadow 3D systems: swap buffers at VBlank
+            if (gte_3d_) gte_3d_->swap_frame();
+            if (gpu_3d_) gpu_3d_->on_vblank();
 
             // Fire VBlank hooks (zero-cost when no hooks registered)
             if (hooks_ && hooks_->has_vblank())

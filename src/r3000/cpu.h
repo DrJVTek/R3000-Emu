@@ -6,6 +6,7 @@
 
 #include "../log/filelog.h"
 #include "../gte/gte.h"
+#include "../gte/gte_3d.h"
 #include "../log/logger.h"
 #include "bus.h"
 
@@ -116,6 +117,9 @@ class Cpu
 
     // Access GTE for 3D reconstruction (snapshot readback)
     gte::Gte& gte() { return gte_; }
+
+    // Shadow GTE for differential tag encoding (3D reconstruction)
+    void set_gte_shadow(gte::Gte3D* g) { gte_shadow_ = g; }
 
     // Debug: fichier de sortie texte (BIOS putc / syscalls "write-like" / etc).
     // Objectif: avoir un "console.log" séparé et facile à relire pendant le live.
@@ -427,6 +431,7 @@ class Cpu
 
     // COP2 = GTE (PS1). Séparé du CPU pour garder le code propre.
     gte::Gte gte_;
+    gte::Gte3D* gte_shadow_{nullptr}; // Shadow GTE for 3D tag encoding
 
     // MIPS: branchements/jumps ont un delay slot.
     // On stocke le PC à appliquer *après* l'instruction suivante.

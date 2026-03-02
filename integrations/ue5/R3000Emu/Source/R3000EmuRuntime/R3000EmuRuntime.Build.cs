@@ -25,8 +25,10 @@ public class R3000EmuRuntime : ModuleRules
         }
         System.Console.WriteLine("[R3000] Repo root: {0}", RepoRoot);
 
-        // Include paths: repo src/ for cross-directory includes like "log/emu_log.h"
-        PublicIncludePaths.Add(Path.Combine(RepoRoot, "src"));
+        // Include paths: use the junction-relative path so that #pragma once
+        // sees the same file identity as UBT's compilation path (avoids redefinition
+        // when the repo root resolves to a different absolute path than the junction).
+        PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "Private", "src"));
 
         // Same defines as CMake
         PublicDefinitions.Add("R3000_DBG_LOOP_DETECTORS=1");
