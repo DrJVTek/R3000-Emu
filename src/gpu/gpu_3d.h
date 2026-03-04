@@ -32,6 +32,7 @@ class Gpu3D : public IGpu
     void gp0(uint32_t word) override;
     void gp1(uint32_t word) override;
     void on_vblank() override;
+    void set_ot_z(uint32_t z) override { current_ot_z_ = z; }
     void copy_ready_draw_list(FrameDrawList& out) const override;
     uint32_t frame_count() const override { return frame_count_; }
 
@@ -46,14 +47,22 @@ class Gpu3D : public IGpu
     void gp0_env_command();
     static int gp0_param_count(uint8_t cmd);
 
-    // Push triangle to active draw list (no rejection, no clipping)
+    // Push a single triangle to the active draw list
     void push_triangle(
-        uint16_t raw_x0, uint16_t raw_y0, uint8_t r0, uint8_t g0, uint8_t b0, uint8_t u0, uint8_t v0,
-        uint16_t raw_x1, uint16_t raw_y1, uint8_t r1, uint8_t g1, uint8_t b1, uint8_t u1, uint8_t v1,
-        uint16_t raw_x2, uint16_t raw_y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
+        uint16_t x0, uint16_t y0, uint8_t r0, uint8_t g0, uint8_t b0, uint8_t u0, uint8_t v0,
+        uint16_t x1, uint16_t y1, uint8_t r1, uint8_t g1, uint8_t b1, uint8_t u1, uint8_t v1,
+        uint16_t x2, uint16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
         uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
-        PrimOrigin origin,
-        uint32_t face_idx, bool is_quad, uint8_t quad_half = 0);
+        PrimOrigin origin, uint32_t face_idx);
+
+    // Push a quad (4 vertices) → splits into 2 triangles internally
+    void push_quad(
+        uint16_t x0, uint16_t y0, uint8_t r0, uint8_t g0, uint8_t b0, uint8_t u0, uint8_t v0,
+        uint16_t x1, uint16_t y1, uint8_t r1, uint8_t g1, uint8_t b1, uint8_t u1, uint8_t v1,
+        uint16_t x2, uint16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
+        uint16_t x3, uint16_t y3, uint8_t r3, uint8_t g3, uint8_t b3, uint8_t u3, uint8_t v3,
+        uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
+        PrimOrigin origin, uint32_t face_idx);
 
     // GP0 state machine
     enum class Gp0State : uint8_t
@@ -83,9 +92,10 @@ class Gpu3D : public IGpu
     int draw_active_{0};
     mutable std::mutex draw_list_mutex_;
     uint32_t frame_count_{0};
+    uint32_t current_ot_z_{0}; // Current OT depth from DMA2 linked-list
 
-    // Display mode (GP1(08h) h_res): 0=256,1=320,2=512,3=640,4=368
-    uint8_t h_res_{1}; // default 320
+    // Display configuration (from GP1 commands 03h, 05h-08h)
+    DisplayConfig display_{};
 
     // Shadow GTE reference for SXY lookup
     gte::Gte3D* gte_3d_{nullptr};

@@ -1500,7 +1500,13 @@ void Gte3D::after_rtpt()
     // Face cache: store all 3 vertices as one face
     const uint32_t fi = store_face(last_snapshot_);
 
+    // Save previous face_idx BEFORE tag_face_differential overwrites it
+    // (tag_face_differential sets last_face_idx_ = fi for RTPS quad path)
+    const uint32_t prev_face_idx = last_face_idx_;
+    const bool prev_was_rtpt = last_was_rtpt_;
+
     // Differential tagging: V0=carrier, V1=reference, V2=carrier
+    // NOTE: this sets last_face_idx_ = fi and last_was_rtpt_ = true
     tag_face_differential(fi);
 
     // ── Quad detection from consecutive RTPTs sharing 2 vertices ──
@@ -1508,8 +1514,9 @@ void Gte3D::after_rtpt()
     // Pattern: RTPT #1 → (A, B, C), RTPT #2 → (B, C, D) with 2 shared verts.
     // We create a quad_cache entry for the PREVIOUS face_idx containing all 4
     // unique vertices so the GPU decoder can split the quad correctly.
-    if (last_was_rtpt_ && last_face_idx_ != 0xFFFFFFFFu &&
-        last_face_idx_ < write_face_cache_.size())
+
+    if (prev_was_rtpt && prev_face_idx != 0xFFFFFFFFu &&
+        prev_face_idx < write_face_cache_.size())
     {
         // Find the unique vertex in current RTPT (not present in previous RTPT).
         // Compare 3D positions (vx, vy, vz) since screen coords are tagged.
@@ -1537,10 +1544,10 @@ void Gte3D::after_rtpt()
         if (shared_count == 2 && unique_curr >= 0)
         {
             // Build quad: V0-V2 from previous RTPT, V3 = unique vertex from current RTPT
-            if (last_face_idx_ >= write_quad_cache_.size())
-                write_quad_cache_.resize(last_face_idx_ + 1);
+            if (prev_face_idx >= write_quad_cache_.size())
+                write_quad_cache_.resize(prev_face_idx + 1);
 
-            GteCacheQuad& quad = write_quad_cache_[last_face_idx_];
+            GteCacheQuad& quad = write_quad_cache_[prev_face_idx];
             for (int i = 0; i < 3; ++i)
             {
                 quad.vx[i] = last_rtpt_snapshot_.vertices[i].vx;
@@ -1632,23 +1639,13 @@ void Gte3D::copy_ready_quad_cache(std::vector<GteCacheQuad>& out) const
 
 void Gte3D::swap_frame()
 {
-    // Diagnostic: log cache sizes at swap (first 10 non-empty frames)
-    static int swap_log_count = 0;
-    if (swap_log_count < 10 && (write_face_cache_.size() > 0 || write_quad_cache_.size() > 0))
-    {
-        emu::logf(emu::LogLevel::warn, "GTE3D",
-            "swap_frame[%d]: faces=%zu quads=%zu quad_count=%u verts=%zu",
-            swap_log_count, write_face_cache_.size(), write_quad_cache_.size(),
-            quad_count_, write_cache_.size());
-        ++swap_log_count;
-    }
-
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         read_cache_ = std::move(write_cache_);
         read_face_cache_ = std::move(write_face_cache_);
         read_quad_cache_ = std::move(write_quad_cache_);
     }
+
     write_cache_.clear();
     write_cache_.reserve(4096);
     write_face_cache_.clear();

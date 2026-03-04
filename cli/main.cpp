@@ -11,11 +11,14 @@
 #include <direct.h>
 #include <codecvt>
 #include <locale>
+#include <map>
 #include <string>
 #endif
 
 #include "emu/core.h"
 #include "emu/hooks.h"
+#include "gpu/gpu.h"
+#include "gpu/gpu_3d.h"
 #include "loader/loader.h"
 #include "log/emu_log.h"
 #include "log/filelog.h"
@@ -82,6 +85,298 @@ static void addr_watch_on_write(uint32_t phys_addr, uint32_t value, uint32_t siz
     std::fflush(ctx->log_file);
 }
 
+// --- Hook: 3D diagnostic (counts origin_3d vs 2D each VBlank) ---
+struct Diag3DCtx
+{
+    gpu::Gpu3D* gpu3d;
+    gte::Gte3D* gte3d;
+    std::FILE*  log_file;
+    uint32_t    total_3d;
+    uint32_t    total_2d;
+    uint32_t    total_frames;
+    uint32_t    fail_frames; // frames with 0 3D tris
+    uint32_t    detail_logged; // number of frames with full detail logged
+    uint32_t    last_n3d;     // previous frame's 3D tri count (detect scene changes)
+};
+
+// Simulate UE5 R3000Gpu3DComponent::RebuildMesh3D — same face lookup,
+// same RT*v+TR transform, same BBox computation.  Outputs to log file.
+static void diag_3d_on_vblank(uint32_t vblank_count, void* user)
+{
+    auto* ctx = static_cast<Diag3DCtx*>(user);
+    gpu::FrameDrawList dl;
+    ctx->gpu3d->copy_ready_draw_list(dl);
+
+    uint32_t n3d = 0, n2d = 0;
+    const size_t count = std::min(dl.cmds.size(), dl.cmds_3d.size());
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (dl.cmds_3d[i].origin == gpu::PrimOrigin::origin_3d)
+            ++n3d;
+        else
+            ++n2d;
+    }
+
+    ctx->total_3d += n3d;
+    ctx->total_2d += n2d;
+    ++ctx->total_frames;
+    if (n3d == 0 && count > 0)
+        ++ctx->fail_frames;
+
+    // Always log summary for frames with 3D content
+    if (n3d > 0)
+    {
+        std::fprintf(ctx->log_file, "VBlank #%u: %u origin_3d, %u origin_2d (%zu total cmds)\n",
+            vblank_count, n3d, n2d, count);
+    }
+
+    // Full UE5-equivalent detail: log first 3 frames with 3D content,
+    // PLUS first frame after a scene change AND 5 frames later (steady-state).
+    const uint32_t prev_n3d = ctx->last_n3d;
+    ctx->last_n3d = n3d;
+    const bool scene_change = (n3d > 0 && n3d != prev_n3d);
+    // Also capture detail 5 frames after scene change (steady-state with populated caches)
+    static uint32_t scene_change_vblank = 0;
+    if (scene_change) scene_change_vblank = vblank_count;
+    const bool steady_state = (scene_change_vblank > 0 && vblank_count == scene_change_vblank + 5);
+    const bool do_detail = (n3d > 0 && (ctx->detail_logged < 3 || scene_change || steady_state));
+    if (!do_detail) { if (n3d > 0) std::fflush(ctx->log_file); return; }
+    ++ctx->detail_logged;
+
+    const float WorldScale = 0.1f;
+    const float OriginX = 0.5f * static_cast<float>(dl.display.width());
+    const float OriginY = 0.5f * static_cast<float>(dl.display.height());
+
+    // BBox accumulators for 3D camera-space verts
+    float bbox_min[3] = { 1e9f, 1e9f, 1e9f };
+    float bbox_max[3] = { -1e9f, -1e9f, -1e9f };
+    int bbox_3d_verts = 0;
+
+    // Degenerate triangle counter
+    int degenerate_count = 0;
+    int tri3d_idx = 0;
+
+    // Per-face_idx histogram (first 20 unique values)
+    uint32_t face_idx_hist[20] = {};
+    int face_idx_hist_count = 0;
+
+    // Quad cache hit/miss tracking
+    int quad_half0_count = 0, quad_half0_degen = 0;
+    int quad_half1_count = 0, quad_half1_degen = 0;
+    int quad_cache_hit = 0, quad_cache_miss = 0;
+
+    std::fprintf(ctx->log_file, "=== DETAIL FRAME %u (VBlank #%u) ===\n", dl.frame_id, vblank_count);
+    std::fprintf(ctx->log_file, "  Display: %ux%u  DrawEnv: offset=(%d,%d)\n",
+        dl.display.width(), dl.display.height(),
+        dl.draw_env.offset_x, dl.draw_env.offset_y);
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const gpu::DrawCmd& cmd = dl.cmds[i];
+        const gpu::DrawCmd3D& cmd3d = dl.cmds_3d[i];
+        const bool is_3d = (cmd3d.origin == gpu::PrimOrigin::origin_3d);
+
+        if (!is_3d) continue;
+
+        // Replicate UE5 transform: RT * vertex + TR
+        float ue_pos[3][3]; // [vert][xyz]
+        bool all_same = true;
+        for (int j = 0; j < 3; ++j)
+        {
+            const auto& v3 = cmd3d.verts_3d[j];
+            const auto& T = cmd3d.transform;
+            const int64_t vx = v3.vx, vy = v3.vy, vz = v3.vz;
+            const float cx = static_cast<float>(((T.rt[0]*vx + T.rt[1]*vy + T.rt[2]*vz) >> 12) + T.tr[0]);
+            const float cy = static_cast<float>(((T.rt[3]*vx + T.rt[4]*vy + T.rt[5]*vz) >> 12) + T.tr[1]);
+            const float cz = static_cast<float>(((T.rt[6]*vx + T.rt[7]*vy + T.rt[8]*vz) >> 12) + T.tr[2]);
+
+            // GTE → UE5 remap: UE_X=cz*scale, UE_Y=cx*scale, UE_Z=-cy*scale
+            ue_pos[j][0] = cz * WorldScale;
+            ue_pos[j][1] = cx * WorldScale;
+            ue_pos[j][2] = -cy * WorldScale;
+
+            for (int k = 0; k < 3; ++k)
+            {
+                if (ue_pos[j][k] < bbox_min[k]) bbox_min[k] = ue_pos[j][k];
+                if (ue_pos[j][k] > bbox_max[k]) bbox_max[k] = ue_pos[j][k];
+            }
+            ++bbox_3d_verts;
+
+            if (j > 0 && (v3.vx != cmd3d.verts_3d[0].vx ||
+                          v3.vy != cmd3d.verts_3d[0].vy ||
+                          v3.vz != cmd3d.verts_3d[0].vz))
+                all_same = false;
+        }
+
+        // Check degenerate: all 3 vertices at same position
+        if (all_same) ++degenerate_count;
+
+        // Quad half tracking
+        if (cmd3d.is_quad)
+        {
+            if (cmd3d.quad_half == 0) { ++quad_half0_count; if (all_same) ++quad_half0_degen; }
+            else                      { ++quad_half1_count; if (all_same) ++quad_half1_degen;
+                // Check if quad cache has this face_idx
+                if (ctx->gte3d && cmd3d.face_idx != 0xFFFFFFFFu)
+                {
+                    const auto* qc = ctx->gte3d->quad_by_index(cmd3d.face_idx);
+                    if (qc) ++quad_cache_hit; else ++quad_cache_miss;
+                }
+            }
+        }
+
+        // Log first 20 3D tris in detail
+        if (tri3d_idx < 20)
+        {
+            std::fprintf(ctx->log_file, "  3D TRI[%d] face_idx=%u quad=%d half=%d",
+                tri3d_idx, cmd3d.face_idx, cmd3d.is_quad ? 1 : 0, cmd3d.quad_half);
+            if (all_same) std::fprintf(ctx->log_file, " *** DEGENERATE ***");
+            std::fprintf(ctx->log_file, "\n");
+
+            for (int j = 0; j < 3; ++j)
+            {
+                const auto& v3 = cmd3d.verts_3d[j];
+                std::fprintf(ctx->log_file,
+                    "    v[%d] model=(%d,%d,%d) -> UE(%.1f, %.1f, %.1f)"
+                    " screen=(%d,%d)\n",
+                    j, v3.vx, v3.vy, v3.vz,
+                    ue_pos[j][0], ue_pos[j][1], ue_pos[j][2],
+                    cmd.v[j].x, cmd.v[j].y);
+            }
+            const auto& T = cmd3d.transform;
+            std::fprintf(ctx->log_file,
+                "    RT=[%d,%d,%d / %d,%d,%d / %d,%d,%d] TR=(%d,%d,%d)\n",
+                T.rt[0], T.rt[1], T.rt[2],
+                T.rt[3], T.rt[4], T.rt[5],
+                T.rt[6], T.rt[7], T.rt[8],
+                T.tr[0], T.tr[1], T.tr[2]);
+        }
+
+        // Track face_idx histogram
+        if (face_idx_hist_count < 20)
+        {
+            bool found = false;
+            for (int f = 0; f < face_idx_hist_count; ++f)
+                if (face_idx_hist[f] == cmd3d.face_idx) { found = true; break; }
+            if (!found)
+                face_idx_hist[face_idx_hist_count++] = cmd3d.face_idx;
+        }
+
+        ++tri3d_idx;
+    }
+
+    // Summary
+    std::fprintf(ctx->log_file, "  --- SUMMARY ---\n");
+    std::fprintf(ctx->log_file, "  3D tris: %d  degenerate: %d (%.1f%%)\n",
+        tri3d_idx, degenerate_count,
+        tri3d_idx > 0 ? 100.0f * degenerate_count / tri3d_idx : 0.0f);
+    std::fprintf(ctx->log_file, "  BBox: X=[%.1f..%.1f] Y=[%.1f..%.1f] Z=[%.1f..%.1f] (%d verts)\n",
+        bbox_min[0], bbox_max[0], bbox_min[1], bbox_max[1], bbox_min[2], bbox_max[2], bbox_3d_verts);
+
+    // BBox size
+    const float bx = bbox_max[0] - bbox_min[0];
+    const float by = bbox_max[1] - bbox_min[1];
+    const float bz = bbox_max[2] - bbox_min[2];
+    std::fprintf(ctx->log_file, "  BBox size: %.1f x %.1f x %.1f",  bx, by, bz);
+    if (bx < 0.01f && by < 0.01f && bz < 0.01f)
+        std::fprintf(ctx->log_file, " *** ALL VERTICES AT SAME POINT ***");
+    else if (bx < 1.0f || by < 1.0f || bz < 1.0f)
+        std::fprintf(ctx->log_file, " *** VERY FLAT ***");
+    std::fprintf(ctx->log_file, "\n");
+
+    // OT Z distribution (from DMA2 linked-list tracking)
+    {
+        uint32_t ot_z_min = UINT32_MAX, ot_z_max = 0;
+        uint32_t ot_z_unique = 0;
+        std::map<uint32_t, uint32_t> ot_z_hist;
+        for (size_t i = 0; i < count; ++i)
+        {
+            const uint32_t z = dl.cmds_3d[i].ot_z;
+            ot_z_hist[z]++;
+            if (z < ot_z_min) ot_z_min = z;
+            if (z > ot_z_max) ot_z_max = z;
+        }
+        ot_z_unique = static_cast<uint32_t>(ot_z_hist.size());
+        std::fprintf(ctx->log_file, "  OT Z: range=[%u..%u] unique=%u levels (total %zu cmds)\n",
+            ot_z_min, ot_z_max, ot_z_unique, count);
+        // Show first 10 OT Z levels with counts
+        int shown = 0;
+        std::fprintf(ctx->log_file, "  OT Z levels: ");
+        for (auto& [z, cnt] : ot_z_hist)
+        {
+            if (shown >= 10) { std::fprintf(ctx->log_file, "..."); break; }
+            std::fprintf(ctx->log_file, "%sz=%u(%u)", shown > 0 ? " " : "", z, cnt);
+            ++shown;
+        }
+        std::fprintf(ctx->log_file, "\n");
+    }
+
+    // Quad cache stats
+    std::fprintf(ctx->log_file, "  Quad stats: half0=%d (degen=%d) half1=%d (degen=%d)\n",
+        quad_half0_count, quad_half0_degen, quad_half1_count, quad_half1_degen);
+    std::fprintf(ctx->log_file, "  Quad cache: hit=%d miss=%d\n",
+        quad_cache_hit, quad_cache_miss);
+
+    // Face idx diversity
+    std::fprintf(ctx->log_file, "  Unique face_idx (first 20): [");
+    for (int f = 0; f < face_idx_hist_count; ++f)
+        std::fprintf(ctx->log_file, "%s%u", f > 0 ? ", " : "", face_idx_hist[f]);
+    std::fprintf(ctx->log_file, "] (%d unique)\n", face_idx_hist_count);
+
+    // Probe face_cache vs quad_cache for first 5 face_idx values
+    if (ctx->gte3d)
+    {
+        // Copy caches thread-safely for analysis
+        std::vector<gte::GteCacheFace> face_snap;
+        std::vector<gte::GteCacheQuad> quad_snap;
+        ctx->gte3d->copy_ready_face_cache(face_snap);
+        ctx->gte3d->copy_ready_quad_cache(quad_snap);
+
+        std::fprintf(ctx->log_file, "  GTE3D face_cache_sz=%zu quad_cache_sz=%zu\n",
+            face_snap.size(), quad_snap.size());
+
+        for (int f = 0; f < std::min(face_idx_hist_count, 5); ++f)
+        {
+            const uint32_t fi = face_idx_hist[f];
+            const bool has_face = (fi < face_snap.size());
+            const bool has_quad = (fi < quad_snap.size());
+            std::fprintf(ctx->log_file, "    face_idx=%u: face=%s quad=%s",
+                fi, has_face ? "YES" : "no", has_quad ? "inrange" : "outofrange");
+            if (has_face)
+                std::fprintf(ctx->log_file, " v0=(%d,%d,%d)", face_snap[fi].vx[0], face_snap[fi].vy[0], face_snap[fi].vz[0]);
+            if (has_quad)
+            {
+                const auto& q = quad_snap[fi];
+                // Check if quad is zeroed (never written)
+                const bool is_zero = (q.vx[0] == 0 && q.vy[0] == 0 && q.vz[0] == 0 &&
+                                      q.vx[3] == 0 && q.vy[3] == 0 && q.vz[3] == 0);
+                std::fprintf(ctx->log_file, " qv0=(%d,%d,%d) qv3=(%d,%d,%d)%s",
+                    q.vx[0], q.vy[0], q.vz[0], q.vx[3], q.vy[3], q.vz[3],
+                    is_zero ? " ZEROED" : " POPULATED");
+            }
+            std::fprintf(ctx->log_file, "\n");
+        }
+
+        // Find first 5 non-zero quad cache entries
+        std::fprintf(ctx->log_file, "  First 5 populated quad entries: ");
+        int qfound = 0;
+        for (size_t qi = 0; qi < quad_snap.size() && qfound < 5; ++qi)
+        {
+            const auto& q = quad_snap[qi];
+            if (q.vx[0] != 0 || q.vy[0] != 0 || q.vz[0] != 0)
+            {
+                std::fprintf(ctx->log_file, "[%zu]", qi);
+                if (qfound < 4) std::fprintf(ctx->log_file, " ");
+                ++qfound;
+            }
+        }
+        std::fprintf(ctx->log_file, " (%d found)\n", qfound);
+    }
+
+    std::fprintf(ctx->log_file, "=== END DETAIL ===\n\n");
+    std::fflush(ctx->log_file);
+}
+
 static void print_usage(void)
 {
     std::fprintf(
@@ -107,6 +402,7 @@ static void print_usage(void)
         "  --emu-log-level=LVL   Set emu log level (error|warn|info|debug|trace)\n"
         "  --watch-addr=ADDR     Watch RAM address (physical, hex ok) — log changes each VBlank\n"
         "  --watch-writes        Also log every write to watched address (verbose!)\n"
+        "  --3d-diag             Log 3D reconstruction stats each VBlank to logs/3d_diag.log\n"
         "  --reg-trace=START:END[:WATCH]  Trace registers in PC range, optionally watch for value\n"
         "                        Example: --reg-trace=0x8004AB00:0x8004AC00:0x35096\n"
     );
@@ -511,6 +807,30 @@ int main(int argc, char** argv)
         }
     }
 
+    // --- Hook: 3D diagnostic ---
+    Diag3DCtx diag3d_ctx{};
+    std::FILE* diag3d_log_f = nullptr;
+    const int use_3d_diag = has_flag(argc, argv, "--3d-diag");
+    if (use_3d_diag && core.gpu_3d())
+    {
+        diag3d_log_f = std::fopen("logs/3d_diag.log", "wb");
+        if (diag3d_log_f)
+        {
+            diag3d_ctx.gpu3d = core.gpu_3d();
+            diag3d_ctx.gte3d = core.gte_3d();
+            diag3d_ctx.log_file = diag3d_log_f;
+            diag3d_ctx.total_3d = 0;
+            diag3d_ctx.total_2d = 0;
+            diag3d_ctx.total_frames = 0;
+            diag3d_ctx.fail_frames = 0;
+            diag3d_ctx.detail_logged = 0;
+            diag3d_ctx.last_n3d = 0;
+
+            core.hooks().add_vblank(diag_3d_on_vblank, &diag3d_ctx);
+            emu::logf(emu::LogLevel::info, "HOOK", "3D diagnostic enabled -> logs/3d_diag.log");
+        }
+    }
+
     // --- Auto-input: timed button presses to navigate menus ---
     // PS1 pad active-low: 0xFFFF = all released, bit clear = pressed
     // Bit layout: [Select L3 R3 Start Up Right Down Left | L2 R2 L1 R1 Tri Cir X Sqr]
@@ -622,6 +942,22 @@ int main(int argc, char** argv)
                 res.pc, res.mem_fault.addr, (int)res.mem_fault.kind, steps);
             break;
         }
+    }
+
+    // --- 3D diagnostic summary ---
+    if (diag3d_log_f)
+    {
+        std::fprintf(diag3d_log_f, "\n=== SUMMARY ===\n");
+        std::fprintf(diag3d_log_f, "Frames: %u (fail: %u)\n", diag3d_ctx.total_frames, diag3d_ctx.fail_frames);
+        std::fprintf(diag3d_log_f, "Total origin_3d: %u\n", diag3d_ctx.total_3d);
+        std::fprintf(diag3d_log_f, "Total origin_2d: %u\n", diag3d_ctx.total_2d);
+        std::fflush(diag3d_log_f);
+
+        emu::logf(emu::LogLevel::warn, "3D_DIAG",
+            "SUMMARY: %u frames, %u origin_3d, %u origin_2d, %u fail_frames",
+            diag3d_ctx.total_frames, diag3d_ctx.total_3d, diag3d_ctx.total_2d, diag3d_ctx.fail_frames);
+
+        std::fclose(diag3d_log_f);
     }
 
     if (watch_log_f)

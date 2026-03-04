@@ -1308,6 +1308,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 uint32_t first_header = 0;
                                 uint32_t second_header = 0;
                                 bool hit_safety = false;
+                                // OT Z tracking: empty nodes (0 data words) are OT
+                                // entry boundaries. Count them to determine depth level.
+                                uint32_t ot_z = 0;
                                 for (int safety = 0; safety < 0x100000; ++safety)
                                 {
                                     uint32_t header = (uint32_t)ram_[node] |
@@ -1319,6 +1322,16 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                     uint32_t words = header >> 24;
                                     total_ll_words += words;
                                     ll_nodes++;
+                                    if (words == 0)
+                                    {
+                                        // Empty OT entry = Z boundary
+                                        ++ot_z;
+                                    }
+                                    else
+                                    {
+                                        // Data node: tell shadow GPU the current OT depth
+                                        if (gpu_3d_) gpu_3d_->set_ot_z(ot_z);
+                                    }
                                     for (uint32_t i = 0; i < words; ++i)
                                     {
                                         uint32_t off2 = (node + 4 + i * 4) & 0x1FFFFF;

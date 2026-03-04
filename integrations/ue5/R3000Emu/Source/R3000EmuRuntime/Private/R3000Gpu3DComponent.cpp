@@ -35,6 +35,7 @@ void UR3000Gpu3DComponent::BeginPlay()
 void UR3000Gpu3DComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
+    Gpu3D_ = nullptr;
     Super::EndPlay(EndPlayReason);
 }
 
@@ -98,7 +99,7 @@ void UR3000Gpu3DComponent::SetVramTexture(UTexture2D* InTexture)
 }
 
 // ===================================================================
-// Material instance management (same pattern as 2D component)
+// Material instance management
 // ===================================================================
 void UR3000Gpu3DComponent::EnsureMaterialInstances()
 {
@@ -149,16 +150,15 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    // Diagnostic: confirm tick is running
-    static int32 s3DTickCount = 0;
-    s3DTickCount++;
-    if (s3DTickCount <= 5 || (s3DTickCount % 300) == 0)
+    // Diagnostic: confirm tick is running (uses frame_count to avoid static-local stale across PIE sessions)
+    const uint32 TickFrame = Gpu3D_ ? Gpu3D_->frame_count() : 0;
+    if (TickFrame <= 5 || (TickFrame % 300) == 0)
     {
-        UE_LOG(LogR3000Gpu3D, Warning, TEXT("GPU3D Tick #%d: Gpu_=%p MeshComp_=%p bEnabled=%d"),
-            s3DTickCount, Gpu_, MeshComp_, bEnabled ? 1 : 0);
+        UE_LOG(LogR3000Gpu3D, Warning, TEXT("GPU3D Tick frame=%u: Gpu3D_=%p MeshComp_=%p bEnabled=%d"),
+            TickFrame, Gpu3D_, MeshComp_, bEnabled ? 1 : 0);
     }
 
-    if ((!Gpu_ && !Gpu3D_) || !MeshComp_)
+    if (!Gpu3D_ || !MeshComp_)
         return;
 
     // Toggle visibility based on bEnabled
@@ -166,50 +166,80 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
     {
         if (MeshComp_->IsVisible())
             MeshComp_->SetVisibility(false);
-        // Use shadow GPU frame count if available, else primary
-        LastVramFrame_ = Gpu3D_ ? Gpu3D_->frame_count() : Gpu_->vram_frame_count();
         return;
     }
 
     if (!MeshComp_->IsVisible())
         MeshComp_->SetVisibility(true);
 
-    // Rebuild when a new frame is ready
-    const uint32 CurrentFrame = Gpu3D_ ? Gpu3D_->frame_count() : Gpu_->vram_frame_count();
-    if (CurrentFrame != LastVramFrame_)
-    {
-        RebuildMesh3D();
-        LastVramFrame_ = CurrentFrame;
-    }
+    // Rebuild every tick — no frame gate, no VRAM sync needed.
+    // Positions are double-buffered in Gpu3D (copy_ready_draw_list).
+    RebuildMesh3D();
 }
 
 // ===================================================================
 // RebuildMesh3D — build 3D geometry from GTE-correlated draw commands
+//
+// ALL data comes from the shadow GPU (Gpu3D_):
+//   - cmds[]    : same GP0 stream as primary, has colors/UVs/texpage/clut
+//   - cmds_3d[] : differential tag decoding → face cache → inline 3D data
+//
+// For 3D triangles (origin_3d): vertex positions come from RT*v+TR transform
+//   → screen coords in cmds[].v are irrelevant (tagged dead-zone values)
+// For 2D triangles: screen coords in cmds[].v are valid
+//   (shadow GPU applies sign_extend_11 + draw offset for non-3D)
 // ===================================================================
 void UR3000Gpu3DComponent::RebuildMesh3D()
 {
-    if ((!Gpu_ && !Gpu3D_) || !MeshComp_)
+    if (!Gpu3D_ || !MeshComp_)
         return;
 
     // Lazy material refresh
     EnsureMaterialInstances();
 
-    // Thread-safe copy of draw list — prefer shadow GPU (has decoded 3D tags)
+    // Thread-safe copy of draw list from shadow GPU
     gpu::FrameDrawList DrawListCopy;
-    if (Gpu3D_)
-        Gpu3D_->copy_ready_draw_list(DrawListCopy);
-    else
-        Gpu_->copy_ready_draw_list(DrawListCopy);
+    Gpu3D_->copy_ready_draw_list(DrawListCopy);
     const gpu::FrameDrawList& DL = DrawListCopy;
 
     const int32 NumCmds = static_cast<int32>(DL.cmds.size());
     const int32 Num3D = static_cast<int32>(DL.cmds_3d.size());
 
-    // cmds_3d must be parallel to cmds
+    // Diagnostic: log draw list size periodically + scene transitions
+    static uint32 RebuildCount = 0;
+    static int32 PrevNumCmds = 0;
+    const bool bSceneChange = (NumCmds != PrevNumCmds && NumCmds > 0);
+    if (RebuildCount < 10 || (RebuildCount % 300) == 0 || bSceneChange)
+    {
+        // Count 3D vs 2D in draw list
+        int32 N3D = 0, N2D = 0;
+        uint32 MaxOtZLocal = 0;
+        for (int32 k = 0; k < FMath::Min(NumCmds, Num3D); ++k)
+        {
+            if (DL.cmds_3d[k].origin == gpu::PrimOrigin::origin_3d) ++N3D; else ++N2D;
+            MaxOtZLocal = FMath::Max(MaxOtZLocal, DL.cmds_3d[k].ot_z);
+        }
+        UE_LOG(LogR3000Gpu3D, Warning,
+            TEXT("GPU3D RebuildMesh3D #%u: cmds=%d cmds_3d=%d frame_id=%u | 3D=%d 2D=%d maxOtZ=%u %s"),
+            RebuildCount, NumCmds, Num3D, DL.frame_id, N3D, N2D, MaxOtZLocal,
+            bSceneChange ? TEXT("*** SCENE CHANGE ***") : TEXT(""));
+    }
+    PrevNumCmds = NumCmds;
+    ++RebuildCount;
+
+    // If the frame is empty, keep the previous frame's mesh (no clear).
     if (NumCmds == 0 || Num3D == 0)
+    {
+        Last3DTriCount_ = 0;
+        Last2DSkipCount_ = 0;
         return;
+    }
 
     const int32 Count = FMath::Min(NumCmds, Num3D);
+
+    // Display resolution for 2D centering (from shadow GPU's frame snapshot)
+    const float OriginX = 0.5f * static_cast<float>(DL.display.width());
+    const float OriginY = 0.5f * static_cast<float>(DL.display.height());
 
     // ── Run-based sectioning (same approach as 2D) ──────────────────
     struct RunSection
@@ -238,6 +268,29 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
     RunSection* Cur = nullptr;
     int32 Tri3DCount = 0;
     int32 Skip2DCount = 0;
+
+    // ── Effective 2D parameters (auto-scale from previous frame's 3D bbox) ──
+    float EffScale2D = WorldScale2D;
+    float EffDepthBack = Depth2DBack;
+    float EffDepthFront = Depth2DFront;
+    if (bAutoScale2D && Last3DExtentY_ > 0.0f)
+    {
+        const float DisplayW = FMath::Max(1.0f, static_cast<float>(DL.display.width()));
+        EffScale2D = Last3DExtentY_ / DisplayW;
+
+        // Depth range matches 3D scene with 10% margin so 2D can extend beyond
+        const float DepthRange = Last3DMaxX_ - Last3DMinX_;
+        const float Margin = DepthRange * 0.1f;
+        EffDepthBack = Last3DMinX_ - Margin;
+        EffDepthFront = Last3DMaxX_ + Margin;
+    }
+
+    // Find max OT Z in this frame for depth normalization
+    uint32_t MaxOtZ = 1;
+    for (int32 i = 0; i < Count; ++i)
+    {
+        MaxOtZ = FMath::Max(MaxOtZ, DL.cmds_3d[i].ot_z);
+    }
 
     for (int32 i = 0; i < Count; ++i)
     {
@@ -270,28 +323,31 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
 
         const int32 BaseVert = Cur->Vertices.Num();
 
+        // ── Build 3 vertex positions ──────────────────────────────────
+        FVector TriPos[3];
         for (int32 j = 0; j < 3; ++j)
         {
             const gpu::DrawVertex& V = Cmd.v[j];
 
-            FVector Pos;
             if (bHas3D)
             {
                 const gte::GteVertex3D& V3 = Cmd3D.verts_3d[j];
                 const gte::GteTransform& T = Cmd3D.transform;
 
-                // Apply RT * vertex + TR to get camera-space coordinates.
-                // RT is 3x3 fixed-point 4.12 (int16_t), so divide by 4096.
-                // TR is int32 camera-space translation.
-                const int32_t vx = V3.vx, vy = V3.vy, vz = V3.vz;
-                const float cx = static_cast<float>((T.rt[0]*vx + T.rt[1]*vy + T.rt[2]*vz) / 4096 + T.tr[0]);
-                const float cy = static_cast<float>((T.rt[3]*vx + T.rt[4]*vy + T.rt[5]*vz) / 4096 + T.tr[1]);
-                const float cz = static_cast<float>((T.rt[6]*vx + T.rt[7]*vy + T.rt[8]*vz) / 4096 + T.tr[2]);
+                // RT * vertex + TR → camera space.
+                // RT is 3×3 fixed-point 4.12 (int16_t). Use int64 to avoid
+                // overflow (int16 × int32 can exceed int32 range).
+                // Arithmetic right-shift (>> 12) matches GTE hardware behavior
+                // (truncates toward -∞, not toward zero like /4096).
+                const int64_t vx = V3.vx, vy = V3.vy, vz = V3.vz;
+                const float cx = static_cast<float>(((T.rt[0]*vx + T.rt[1]*vy + T.rt[2]*vz) >> 12) + T.tr[0]);
+                const float cy = static_cast<float>(((T.rt[3]*vx + T.rt[4]*vy + T.rt[5]*vz) >> 12) + T.tr[1]);
+                const float cz = static_cast<float>(((T.rt[6]*vx + T.rt[7]*vy + T.rt[8]*vz) >> 12) + T.tr[2]);
 
                 // GTE camera-space → UE5 coordinate mapping:
                 //   GTE: X=right, Y=down, Z=into screen
                 //   UE5: X=forward, Y=right, Z=up
-                Pos = FVector(
+                TriPos[j] = FVector(
                     cz * WorldScale,    // GTE Z (depth) → UE X (forward)
                     cx * WorldScale,    // GTE X (right) → UE Y (right)
                    -cy * WorldScale     // GTE Y (down)  → UE -Z (up)
@@ -299,23 +355,65 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             }
             else
             {
-                // 2D fallback: use screen coords on a flat plane
-                // PS1 screen: 0..320 X, 0..240 Y → center at (160, 120)
-                Pos = FVector(
-                    200.0f * WorldScale,                                           // Fixed depth (in front)
-                    static_cast<float>(V.x - 160) * WorldScale,                   // Screen X → UE Y
-                   -static_cast<float>(V.y - 120) * WorldScale                    // Screen Y → UE -Z
+                // 2D: use screen coords centered on actual display resolution.
+                // Subtract draw offset to get logical screen coords — the shadow GPU
+                // bakes offset into V.x/V.y, but the offset is just VRAM targeting
+                // (Y=0 vs Y=240 for double-buffered rendering). Without this,
+                // positions jitter 240 units vertically every other frame.
+                //
+                // Depth from OT Z: each primitive carries its actual OT depth level
+                // from the DMA2 linked-list traversal. ot_z=0 = farthest (back of OT),
+                // ot_z=max = nearest (front/HUD). Primitives at the same OT level
+                // share the same depth — this is the real PS1 Z-ordering.
+                const float DepthT = static_cast<float>(Cmd3D.ot_z) / static_cast<float>(MaxOtZ);
+                const float Depth2D = FMath::Lerp(EffDepthBack, EffDepthFront, DepthT);
+
+                const float sx = static_cast<float>(V.x) - static_cast<float>(DL.draw_env.offset_x);
+                const float sy = static_cast<float>(V.y) - static_cast<float>(DL.draw_env.offset_y);
+                TriPos[j] = FVector(
+                    Depth2D,                                 // Depth from draw order
+                    (sx - OriginX) * EffScale2D,             // Screen X centered
+                   -(sy - OriginY) * EffScale2D              // Screen Y centered, flipped
                 );
             }
-            Pos += WorldOffset;
-            Cur->Vertices.Add(Pos);
+            TriPos[j] += WorldOffset;
+        }
 
-            // Normal: compute per-triangle after loop (use placeholder for now)
-            Cur->Normals.Add(FVector(0.0f, 0.0f, 1.0f));
+        // ── Compute face normal ──────────────────────────────────────
+        FVector VertNormals[3];
+        if (bHas3D && (Cmd3D.nx[0] != 0 || Cmd3D.ny[0] != 0 || Cmd3D.nz[0] != 0))
+        {
+            // Use per-vertex normals from GTE (NCS/NCT/NCDS/NCDT).
+            // Same coordinate remap as positions: GTE(X,Y,Z) → UE(Z,X,-Y).
+            for (int32 j = 0; j < 3; ++j)
+            {
+                VertNormals[j] = FVector(
+                    static_cast<float>(Cmd3D.nz[j]),   // GTE Z → UE X
+                    static_cast<float>(Cmd3D.nx[j]),    // GTE X → UE Y
+                   -static_cast<float>(Cmd3D.ny[j])     // GTE Y → UE -Z
+                ).GetSafeNormal();
+            }
+        }
+        else
+        {
+            // Fallback: compute face normal from cross product.
+            // Negate because winding remap {0,2,1} flips CW→CCW.
+            const FVector FaceNorm = -FVector::CrossProduct(
+                TriPos[1] - TriPos[0], TriPos[2] - TriPos[0]).GetSafeNormal();
+            VertNormals[0] = VertNormals[1] = VertNormals[2] = FaceNorm;
+        }
+
+        // ── Add vertices + attributes ────────────────────────────────
+        for (int32 j = 0; j < 3; ++j)
+        {
+            const gpu::DrawVertex& V = Cmd.v[j];
+
+            Cur->Vertices.Add(TriPos[j]);
+            Cur->Normals.Add(VertNormals[j]);
             Cur->Tangents.Add(FProcMeshTangent(1.0f, 0.0f, 0.0f));
             Cur->Colors.Add(FLinearColor(V.r / 255.0f, V.g / 255.0f, V.b / 255.0f, 1.0f));
 
-            // UV data: same encoding as 2D (material shader uses these)
+            // UV data: same encoding as 2D component (material shader uses these)
             Cur->UV0.Add(FVector2D(static_cast<float>(V.u), static_cast<float>(V.v)));
 
             const float TpBaseX = static_cast<float>((Cmd.texpage & 0xF) * 64);
@@ -336,46 +434,116 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             );
             Cur->UV3.Add(FVector2D(TexMode, FlagsPacked));
 
-            // Winding: same CW→CCW flip as 2D component
+            // Winding: CW → CCW flip (PS1 is CW, UE5 is CCW)
             static const int32 WindingRemap[3] = {0, 2, 1};
             Cur->Triangles.Add(BaseVert + WindingRemap[j]);
         }
 
-        // Compute proper face normal for this triangle
-        if (Cur->Vertices.Num() >= BaseVert + 3)
+        // ── Detailed diagnostic logging (gated by bDebug3DLog) ────────
+        if (bDebug3DLog && Tri3DCount < 20)
         {
-            const FVector& A = Cur->Vertices[BaseVert];
-            const FVector& B = Cur->Vertices[BaseVert + 1];
-            const FVector& C = Cur->Vertices[BaseVert + 2];
-            FVector FaceNorm = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
-            Cur->Normals[BaseVert] = FaceNorm;
-            Cur->Normals[BaseVert + 1] = FaceNorm;
-            Cur->Normals[BaseVert + 2] = FaceNorm;
-        }
+            if (bHas3D)
+            {
+                const gte::GteTransform& T = Cmd3D.transform;
+                emu::logf(emu::LogLevel::warn, "GPU3D",
+                    "=== 3D TRI[%d] frame=%u face_idx=%u quad=%d half=%d ===",
+                    Tri3DCount, DL.frame_id, Cmd3D.face_idx, Cmd3D.is_quad ? 1 : 0, Cmd3D.quad_half);
 
-        // Diagnostic: log first triangles regardless of 3D status
-        static int32 s3DLog = 0;
-        if (s3DLog < 10 && DL.frame_id > 200)
-        {
-            const gte::GteVertex3D& DV0 = Cmd3D.verts_3d[0];
-            const gte::GteTransform& DT = Cmd3D.transform;
-            emu::logf(emu::LogLevel::warn, "GPU3D",
-                "TRI[%d] f=%u is3D=%d origin=%d model=(%d,%d,%d) TR=(%d,%d,%d) RT0=(%d,%d,%d) sxy=(%d,%d)",
-                s3DLog, DL.frame_id, bHas3D ? 1 : 0, (int)Cmd3D.origin,
-                DV0.vx, DV0.vy, DV0.vz,
-                DT.tr[0], DT.tr[1], DT.tr[2],
-                DT.rt[0], DT.rt[1], DT.rt[2],
-                Cmd.v[0].x, Cmd.v[0].y);
-            ++s3DLog;
+                // Model-space vertices (raw from GTE face cache)
+                for (int32 j = 0; j < 3; ++j)
+                {
+                    const gte::GteVertex3D& V3 = Cmd3D.verts_3d[j];
+                    emu::logf(emu::LogLevel::warn, "GPU3D",
+                        "  v[%d] model=(%d,%d,%d) normal=(%d,%d,%d) sz=%u",
+                        j, V3.vx, V3.vy, V3.vz,
+                        Cmd3D.nx[j], Cmd3D.ny[j], Cmd3D.nz[j], Cmd3D.sz[j]);
+                }
+
+                // Transform (RT 3x3 + TR)
+                emu::logf(emu::LogLevel::warn, "GPU3D",
+                    "  RT=[%d,%d,%d / %d,%d,%d / %d,%d,%d] TR=(%d,%d,%d)",
+                    T.rt[0], T.rt[1], T.rt[2],
+                    T.rt[3], T.rt[4], T.rt[5],
+                    T.rt[6], T.rt[7], T.rt[8],
+                    T.tr[0], T.tr[1], T.tr[2]);
+
+                // Camera-space positions (RT*v+TR result, before UE5 remap)
+                for (int32 j = 0; j < 3; ++j)
+                {
+                    const gte::GteVertex3D& V3 = Cmd3D.verts_3d[j];
+                    const int64_t vx64 = V3.vx, vy64 = V3.vy, vz64 = V3.vz;
+                    const int64_t cx = ((T.rt[0]*vx64 + T.rt[1]*vy64 + T.rt[2]*vz64) >> 12) + T.tr[0];
+                    const int64_t cy = ((T.rt[3]*vx64 + T.rt[4]*vy64 + T.rt[5]*vz64) >> 12) + T.tr[1];
+                    const int64_t cz = ((T.rt[6]*vx64 + T.rt[7]*vy64 + T.rt[8]*vz64) >> 12) + T.tr[2];
+                    emu::logf(emu::LogLevel::warn, "GPU3D",
+                        "  v[%d] cam=(%lld,%lld,%lld) -> UE(%.1f, %.1f, %.1f)",
+                        j, (long long)cx, (long long)cy, (long long)cz,
+                        TriPos[j].X, TriPos[j].Y, TriPos[j].Z);
+                }
+
+                // Screen coords from DrawCmd (should be dead-zone values for 3D)
+                emu::logf(emu::LogLevel::warn, "GPU3D",
+                    "  screen=(%d,%d)(%d,%d)(%d,%d) color=(%d,%d,%d)",
+                    Cmd.v[0].x, Cmd.v[0].y, Cmd.v[1].x, Cmd.v[1].y, Cmd.v[2].x, Cmd.v[2].y,
+                    Cmd.v[0].r, Cmd.v[0].g, Cmd.v[0].b);
+
+                // Texture info
+                emu::logf(emu::LogLevel::warn, "GPU3D",
+                    "  uv=(%d,%d)(%d,%d)(%d,%d) tp=0x%04X clut=0x%04X flags=0x%02X semi=%d tex=%d",
+                    Cmd.v[0].u, Cmd.v[0].v, Cmd.v[1].u, Cmd.v[1].v, Cmd.v[2].u, Cmd.v[2].v,
+                    Cmd.texpage, Cmd.clut, Cmd.flags, Cmd.semi_mode, Cmd.tex_depth);
+            }
+            else
+            {
+                // 2D triangle log
+                emu::logf(emu::LogLevel::warn, "GPU3D",
+                    "=== 2D TRI[%d] frame=%u origin=%d ===",
+                    Tri3DCount, DL.frame_id, (int)Cmd3D.origin);
+
+                for (int32 j = 0; j < 3; ++j)
+                {
+                    const gpu::DrawVertex& V = Cmd.v[j];
+                    emu::logf(emu::LogLevel::warn, "GPU3D",
+                        "  v[%d] screen=(%d,%d) -> UE(%.1f, %.1f, %.1f) color=(%d,%d,%d) uv=(%d,%d)",
+                        j, V.x, V.y, TriPos[j].X, TriPos[j].Y, TriPos[j].Z,
+                        V.r, V.g, V.b, V.u, V.v);
+                }
+
+                emu::logf(emu::LogLevel::warn, "GPU3D",
+                    "  origin2D=(%.1f,%.1f) tp=0x%04X clut=0x%04X flags=0x%02X semi=%d tex=%d",
+                    OriginX, OriginY, Cmd.texpage, Cmd.clut, Cmd.flags, Cmd.semi_mode, Cmd.tex_depth);
+            }
         }
 
         ++Tri3DCount;
     }
 
-    // ── Create mesh sections ──────────────────────────────────────────
-    MeshComp_->ClearAllMeshSections();
+    // ── Update 3D bounding box for next frame's auto-scale ─────────────
+    {
+        float MinX = 1e9f, MaxX = -1e9f, MinY = 1e9f, MaxY = -1e9f;
+        for (const RunSection& R : Runs)
+        {
+            if (R.MatIdx < 5) continue; // 3D sections only (5-9)
+            for (const FVector& V : R.Vertices)
+            {
+                MinX = FMath::Min(MinX, static_cast<float>(V.X));
+                MaxX = FMath::Max(MaxX, static_cast<float>(V.X));
+                MinY = FMath::Min(MinY, static_cast<float>(V.Y));
+                MaxY = FMath::Max(MaxY, static_cast<float>(V.Y));
+            }
+        }
+        if (MaxX > MinX)
+        {
+            Last3DMinX_ = MinX;
+            Last3DMaxX_ = MaxX;
+            Last3DExtentY_ = MaxY - MinY;
+        }
+    }
 
-    for (int32 r = 0; r < Runs.Num(); ++r)
+    // ── Create mesh sections (overwrite in-place, no ClearAll) ─────────
+    const int32 NewNumSections = Runs.Num();
+
+    for (int32 r = 0; r < NewNumSections; ++r)
     {
         const RunSection& Run = Runs[r];
         if (Run.Vertices.Num() == 0)
@@ -389,53 +557,94 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
         if (MatInst_.IsValidIndex(Run.MatIdx) && MatInst_[Run.MatIdx])
             MeshComp_->SetMaterial(r, MatInst_[Run.MatIdx]);
     }
+
+    // Clear leftover sections from previous frame (new frame has fewer runs).
+    // This ensures stale geometry (e.g., PS logo) disappears when scene changes.
+    for (int32 r = NewNumSections; r < LastNumSections_; ++r)
+        MeshComp_->ClearMeshSection(r);
+    LastNumSections_ = NewNumSections;
+
     MeshComp_->MarkRenderStateDirty();
 
     Last3DTriCount_ = Tri3DCount;
     Last2DSkipCount_ = Skip2DCount;
 
-    // Debug logging: compute 3D bounding box to verify depth variation
-    if (bDebug3DLog || Tri3DCount > 0)
+    // Diagnostic: log mesh creation stats periodically
+    if (RebuildCount < 15 || (RebuildCount % 300) == 0)
     {
-        // Scan all runs for position extents (UE coords)
-        float MinX = 1e9f, MaxX = -1e9f;
-        float MinY = 1e9f, MaxY = -1e9f;
-        float MinZ = 1e9f, MaxZ = -1e9f;
-        int32 TotalVerts3D = 0;
+        int32 TotalVerts = 0;
         for (const RunSection& R : Runs)
+            TotalVerts += R.Vertices.Num();
+        UE_LOG(LogR3000Gpu3D, Warning,
+            TEXT("GPU3D mesh: %d sections, %d verts, %d 3D tris, %d 2D skip, bSkip2D=%d"),
+            NewNumSections, TotalVerts, Tri3DCount, Skip2DCount, bSkip2DElements ? 1 : 0);
+    }
+
+    // Debug logging: frame summary with bounding box, display config, draw env
+    if (bDebug3DLog)
+    {
+        emu::logf(emu::LogLevel::warn, "GPU3D",
+            "======== FRAME %u SUMMARY ========", DL.frame_id);
+        emu::logf(emu::LogLevel::warn, "GPU3D",
+            "  Display: %dx%d (h_res=%d v_res=%d) enabled=%d pal=%d",
+            DL.display.width(), DL.display.height(),
+            DL.display.h_res, DL.display.v_res,
+            DL.display.display_enabled ? 1 : 0, DL.display.is_pal ? 1 : 0);
+        emu::logf(emu::LogLevel::warn, "GPU3D",
+            "  DrawEnv: offset=(%d,%d) clip=(%d,%d)-(%d,%d) texpage=0x%08X",
+            DL.draw_env.offset_x, DL.draw_env.offset_y,
+            DL.draw_env.clip_x1, DL.draw_env.clip_y1,
+            DL.draw_env.clip_x2, DL.draw_env.clip_y2,
+            DL.draw_env.texpage_raw);
+        emu::logf(emu::LogLevel::warn, "GPU3D",
+            "  Origin2D=(%.1f,%.1f) WorldScale=%.3f WorldScale2D=%.3f EffScale2D=%.4f",
+            OriginX, OriginY, WorldScale, WorldScale2D, EffScale2D);
+        emu::logf(emu::LogLevel::warn, "GPU3D",
+            "  Auto2D=%d DepthRange=[%.1f..%.1f] Last3D: X=[%.1f..%.1f] ExtY=%.1f",
+            bAutoScale2D ? 1 : 0, EffDepthBack, EffDepthFront,
+            Last3DMinX_, Last3DMaxX_, Last3DExtentY_);
+        emu::logf(emu::LogLevel::warn, "GPU3D",
+            "  Total: %d cmds, %d 3D tris, %d 2D skip, %d sections",
+            Count, Tri3DCount, Skip2DCount, Runs.Num());
+
+        // Per-section breakdown
+        for (int32 r = 0; r < Runs.Num(); ++r)
         {
-            for (const FVector& V : R.Vertices)
-            {
-                MinX = FMath::Min(MinX, (float)V.X);
-                MaxX = FMath::Max(MaxX, (float)V.X);
-                MinY = FMath::Min(MinY, (float)V.Y);
-                MaxY = FMath::Max(MaxY, (float)V.Y);
-                MinZ = FMath::Min(MinZ, (float)V.Z);
-                MaxZ = FMath::Max(MaxZ, (float)V.Z);
-                ++TotalVerts3D;
-            }
+            const RunSection& Run = Runs[r];
+            const bool bIs3DSec = (Run.MatIdx >= 5);
+            emu::logf(emu::LogLevel::warn, "GPU3D",
+                "  Section[%d]: mat=%d (%s) %d verts %d tris",
+                r, Run.MatIdx, bIs3DSec ? "3D" : "2D",
+                Run.Vertices.Num(), Run.Triangles.Num() / 3);
         }
 
-        static int32 sLogCount3D = 0;
-        const bool bDoLog = bDebug3DLog || (sLogCount3D < 20);
-        if (bDoLog && TotalVerts3D > 0)
+        // Bounding box per category (2D sections vs 3D sections)
+        float Min3D[3] = {1e9f, 1e9f, 1e9f}, Max3D[3] = {-1e9f, -1e9f, -1e9f};
+        float Min2D[3] = {1e9f, 1e9f, 1e9f}, Max2D[3] = {-1e9f, -1e9f, -1e9f};
+        int32 Cnt3D = 0, Cnt2D = 0;
+        for (const RunSection& R : Runs)
         {
+            const bool b3D = (R.MatIdx >= 5);
+            float* MinB = b3D ? Min3D : Min2D;
+            float* MaxB = b3D ? Max3D : Max2D;
+            int32& Cnt = b3D ? Cnt3D : Cnt2D;
+            for (const FVector& V : R.Vertices)
+            {
+                MinB[0] = FMath::Min(MinB[0], (float)V.X); MaxB[0] = FMath::Max(MaxB[0], (float)V.X);
+                MinB[1] = FMath::Min(MinB[1], (float)V.Y); MaxB[1] = FMath::Max(MaxB[1], (float)V.Y);
+                MinB[2] = FMath::Min(MinB[2], (float)V.Z); MaxB[2] = FMath::Max(MaxB[2], (float)V.Z);
+                ++Cnt;
+            }
+        }
+        if (Cnt3D > 0)
             emu::logf(emu::LogLevel::warn, "GPU3D",
-                "Frame %u: %d 3D tris, %d 2D skip, %d sections | "
-                "BBox X=[%.1f..%.1f] Y=[%.1f..%.1f] Z=[%.1f..%.1f] (%d verts)",
-                DL.frame_id, Tri3DCount, Skip2DCount, Runs.Num(),
-                MinX, MaxX, MinY, MaxY, MinZ, MaxZ, TotalVerts3D);
-            ++sLogCount3D;
-        }
-    }
-    else
-    {
-        // Log first few frames to confirm pipeline working
-        static int32 sLogCount = 0;
-        if (sLogCount < 5 && (Tri3DCount > 0 || Skip2DCount > 0))
-        {
-            UE_LOG(LogR3000Gpu3D, Warning, TEXT("3D Rebuild #%d: %d 3D tris, %d 2D skipped"), sLogCount, Tri3DCount, Skip2DCount);
-            ++sLogCount;
-        }
+                "  BBox 3D: X=[%.1f..%.1f] Y=[%.1f..%.1f] Z=[%.1f..%.1f] (%d verts)",
+                Min3D[0], Max3D[0], Min3D[1], Max3D[1], Min3D[2], Max3D[2], Cnt3D);
+        if (Cnt2D > 0)
+            emu::logf(emu::LogLevel::warn, "GPU3D",
+                "  BBox 2D: X=[%.1f..%.1f] Y=[%.1f..%.1f] Z=[%.1f..%.1f] (%d verts)",
+                Min2D[0], Max2D[0], Min2D[1], Max2D[1], Min2D[2], Max2D[2], Cnt2D);
+        emu::logf(emu::LogLevel::warn, "GPU3D",
+            "======== END FRAME %u ========", DL.frame_id);
     }
 }

@@ -54,10 +54,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
     bool bEnabled{false};
 
-    /** Scale factor: PS1 GTE units to UE5 units.
+    /** Scale factor for 3D geometry: PS1 GTE camera-space units to UE5 units.
      *  GTE vertices are typically in the +-2000 range. 0.1 maps that to +-200 UE units. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D", meta = (ClampMin = "0.001", ClampMax = "10.0"))
     float WorldScale{0.1f};
+
+    /** Scale factor for 2D elements (HUD/UI) rendered in 3D space.
+     *  PS1 screen coords are typically 0..320 × 0..240. 1.0 maps 1 PS1 pixel = 1 UE unit. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D", meta = (ClampMin = "0.001", ClampMax = "10.0"))
+    float WorldScale2D{1.0f};
 
     /** Offset for 3D geometry in UE world space (local to actor). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
@@ -66,6 +71,20 @@ public:
     /** Skip 2D elements (HUD/UI) — only render GTE-correlated 3D geometry. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
     bool bSkip2DElements{true};
+
+    /** Automatically scale and position 2D elements to match the 3D scene extent.
+     *  When enabled, 2D scale and depth range are derived from the 3D bounding box.
+     *  When disabled, uses WorldScale2D / Depth2DBack / Depth2DFront manually. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
+    bool bAutoScale2D{true};
+
+    /** Depth for the farthest 2D element (first in OT = background). Only used when bAutoScale2D is off. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D", meta = (EditCondition = "!bAutoScale2D"))
+    float Depth2DBack{-50.0f};
+
+    /** Depth for the nearest 2D element (last in OT = HUD/foreground). Only used when bAutoScale2D is off. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D", meta = (EditCondition = "!bAutoScale2D"))
+    float Depth2DFront{50.0f};
 
     /** Debug: log 3D correlation stats per frame. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D|Debug")
@@ -139,4 +158,10 @@ private:
     uint32 LastVramFrame_{0xFFFFFFFFu};
     int32 Last3DTriCount_{0};
     int32 Last2DSkipCount_{0};
+    int32 LastNumSections_{0};
+
+    // Previous frame's 3D bounding box (for auto-scaling 2D)
+    float Last3DMinX_{0.0f};  // Min depth (UE X)
+    float Last3DMaxX_{0.0f};  // Max depth (UE X)
+    float Last3DExtentY_{0.0f}; // Horizontal extent (UE Y)
 };

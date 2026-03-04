@@ -19,6 +19,10 @@ class IGpu
     virtual void gp1(uint32_t word) = 0;
     virtual void on_vblank() = 0;
 
+    // OT depth from DMA2 linked-list traversal (empty nodes = Z boundaries).
+    // Called by bus before forwarding GP0 data at each OT level.
+    virtual void set_ot_z(uint32_t z) { (void)z; }
+
     // Thread-safe data access for UE5
     virtual void copy_ready_draw_list(FrameDrawList& out) const = 0;
     virtual uint32_t frame_count() const = 0;

@@ -101,6 +101,11 @@ struct DrawCmd3D
     uint32_t face_idx{0xFFFFFFFFu}; // Face cache index (0xFFFFFFFF = no match)
     bool is_quad{false};             // True if this triangle is half of a GP0 quad
     uint8_t quad_half{0};            // 0 = first tri, 1 = second tri of quad
+
+    // OT depth (from DMA2 linked-list traversal).
+    // Counts empty nodes (Z boundaries) from back to front.
+    // Primitives sharing the same ot_z are at the same OT depth level.
+    uint32_t ot_z{0};
 };
 
 // Per-frame draw command list (double-buffered for GPU / UE5)
