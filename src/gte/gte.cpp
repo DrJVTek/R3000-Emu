@@ -705,6 +705,16 @@ void Gte::cmd_rtpt(uint32_t cmd)
         {V2[0], V2[1], V2[2]}
     };
     capture_snapshot(verts, 3);
+
+    // RTPT vertex pattern diagnostic
+    ++rtpt_diag_.rtpt_count;
+    const bool eq01 = (V0[0]==V1[0] && V0[1]==V1[1] && V0[2]==V1[2]);
+    const bool eq12 = (V1[0]==V2[0] && V1[1]==V2[1] && V1[2]==V2[2]);
+    const bool eq02 = (V0[0]==V2[0] && V0[1]==V2[1] && V0[2]==V2[2]);
+    if (eq01 && eq12) ++rtpt_diag_.all_same;
+    else if (eq12) ++rtpt_diag_.v1_eq_v2;
+    else if (eq02) ++rtpt_diag_.v0_eq_v2;
+    else if (!eq01) ++rtpt_diag_.all_unique;
 }
 
 void Gte::cmd_avsz3(uint32_t)

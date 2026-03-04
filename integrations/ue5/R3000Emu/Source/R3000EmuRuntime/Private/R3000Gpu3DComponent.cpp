@@ -237,9 +237,94 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
 
     const int32 Count = FMath::Min(NumCmds, Num3D);
 
-    // Display resolution for 2D centering (from shadow GPU's frame snapshot)
-    const float OriginX = 0.5f * static_cast<float>(DL.display.width());
-    const float OriginY = 0.5f * static_cast<float>(DL.display.height());
+    // ── Edge-strip quad reconstruction ────────────────────────────────
+    // Ridge Racer (and other PS1 games) use RTPT with V1==V2 (edge processing).
+    // Each RTPT provides only 2 unique vertices. GP0 quads split into 2 triangles
+    // (quad_half=0 and quad_half=1), each inheriting the same degenerate face.
+    // Fix: scan consecutive quad pairs, detect V1==V2 pattern, and reconstruct
+    // real quads by combining unique vertices from both faces (A and B).
+    // This runs on the copied draw list — zero impact on emulator core.
+    int32 EdgeStripFixed = 0;
+    for (int32 i = 0; i + 1 < Count; i += 2)
+    {
+        auto& C3A = DrawListCopy.cmds_3d[i];
+        auto& C3B = DrawListCopy.cmds_3d[i + 1];
+
+        // Must be a 3D quad pair (half 0 + half 1)
+        if (C3A.origin != gpu::PrimOrigin::origin_3d) continue;
+        if (!C3A.is_quad || C3A.quad_half != 0) continue;
+        if (!C3B.is_quad || C3B.quad_half != 1) continue;
+
+        // Detect edge-strip: face A has V1==V2
+        const auto& A0 = C3A.verts_3d[0];
+        const auto& A1 = C3A.verts_3d[1];
+        const auto& A2 = C3A.verts_3d[2];
+        const bool bEdgeA = (A1.vx == A2.vx && A1.vy == A2.vy && A1.vz == A2.vz);
+        if (!bEdgeA) continue;
+
+        // face B also has V1==V2 (same edge-strip pattern)
+        const auto& B0 = C3B.verts_3d[0];
+        const auto& B1 = C3B.verts_3d[1];
+        const auto& B2 = C3B.verts_3d[2];
+        const bool bEdgeB = (B1.vx == B2.vx && B1.vy == B2.vy && B1.vz == B2.vz);
+
+        // face_A unique verts: A.V0 and A.V1 (A.V2 == A.V1)
+        // face_B unique verts: B.V0 and B.V1 (or just B.V0 if not edge)
+        // Reconstruct quad: tri1 = (A.V0, A.V1, B.V0), tri2 = (A.V1, B.V1_or_V0, B.V0)
+
+        // Tri 1 (quad_half=0): A.V0, A.V1, B.V0
+        C3A.verts_3d[2] = B0;
+        C3A.nx[2] = C3B.nx[0]; C3A.ny[2] = C3B.ny[0]; C3A.nz[2] = C3B.nz[0];
+        C3A.sz[2] = C3B.sz[0];
+
+        // Tri 2 (quad_half=1): A.V1, B_second_vert, B.V0
+        C3B.verts_3d[0] = A1;
+        C3B.nx[0] = C3A.nx[1]; C3B.ny[0] = C3A.ny[1]; C3B.nz[0] = C3A.nz[1];
+        C3B.sz[0] = C3A.sz[1];
+
+        if (bEdgeB)
+        {
+            // B is also edge-strip: B.V1 is the 2nd unique vertex
+            // C3B.verts_3d[1] already = B.V1 (correct)
+        }
+        else
+        {
+            // B is a normal face: use B.V0 as V1 (already there from original)
+            C3B.verts_3d[1] = B0;
+            C3B.nx[1] = C3B.nx[0]; C3B.ny[1] = C3B.ny[0]; C3B.nz[1] = C3B.nz[0];
+        }
+        // C3B.verts_3d[2] = B.V0 (already set from original B0)
+        C3B.verts_3d[2] = B0;
+        C3B.nx[2] = C3B.nx[0]; C3B.ny[2] = C3B.ny[0]; C3B.nz[2] = C3B.nz[0];
+        C3B.sz[2] = C3B.sz[0];
+
+        ++EdgeStripFixed;
+    }
+
+    if (EdgeStripFixed > 0)
+    {
+        static uint32 ESLogCount = 0;
+        if (ESLogCount < 10 || (ESLogCount % 300) == 0)
+        {
+            UE_LOG(LogR3000Gpu3D, Log,
+                TEXT("Edge-strip fix: %d quad pairs reconstructed (%d tris)"),
+                EdgeStripFixed, EdgeStripFixed * 2);
+        }
+        ++ESLogCount;
+    }
+
+    // Display resolution for 2D centering.
+    // Normalize to a fixed reference (320×240) so that HD (640×480) and SD (320×240)
+    // content renders at the same physical size in UE5. Screen coords are scaled
+    // proportionally: a 640×480 coord is divided by 2 to match 320×240 space.
+    const float RawW = static_cast<float>(DL.display.width());
+    const float RawH = static_cast<float>(DL.display.height());
+    constexpr float RefW = 320.0f;
+    constexpr float RefH = 240.0f;
+    const float ResScale = FMath::Min(RefW / FMath::Max(1.0f, RawW),
+                                       RefH / FMath::Max(1.0f, RawH));
+    const float OriginX = 0.5f * RawW;
+    const float OriginY = 0.5f * RawH;
 
     // ── Run-based sectioning (same approach as 2D) ──────────────────
     struct RunSection
@@ -275,8 +360,9 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
     float EffDepthFront = Depth2DFront;
     if (bAutoScale2D && Last3DExtentY_ > 0.0f)
     {
-        const float DisplayW = FMath::Max(1.0f, static_cast<float>(DL.display.width()));
-        EffScale2D = Last3DExtentY_ / DisplayW;
+        // Use reference width (320) for consistent auto-scale regardless of display mode.
+        // ResScale already normalizes coords from any resolution to 320×240 space.
+        EffScale2D = Last3DExtentY_ / RefW;
 
         // Depth range matches 3D scene with 10% margin so 2D can extend beyond
         const float DepthRange = Last3DMaxX_ - Last3DMinX_;
@@ -305,6 +391,26 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             ++Skip2DCount;
             if (bSkip2DElements)
                 continue;
+
+            // Filter full-screen clear rectangles: untextured primitives that span
+            // the full display width. PS1 games draw these to clear the framebuffer.
+            // V.x/V.y have draw offset baked in by shadow GPU, so subtract it to get
+            // logical screen-relative positions for the width check.
+            if (!(Cmd.flags & 1)) // untextured only
+            {
+                const int16_t dw = static_cast<int16_t>(DL.display.width());
+                const int16_t ox = static_cast<int16_t>(DL.draw_env.offset_x);
+                int16_t MinVx = 32767, MaxVx = -32768;
+                for (int32 j = 0; j < 3; ++j)
+                {
+                    const int16_t vx = static_cast<int16_t>(Cmd.v[j].x - ox);
+                    MinVx = FMath::Min(MinVx, vx);
+                    MaxVx = FMath::Max(MaxVx, vx);
+                }
+                // If the triangle spans at least the full display width, it's a clear rect
+                if (MinVx <= 0 && MaxVx >= dw)
+                    continue;
+            }
         }
 
         const bool bSemiTrans = (Cmd.flags & 2) != 0;
@@ -355,11 +461,11 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             }
             else
             {
-                // 2D: use screen coords centered on actual display resolution.
-                // Subtract draw offset to get logical screen coords — the shadow GPU
-                // bakes offset into V.x/V.y, but the offset is just VRAM targeting
-                // (Y=0 vs Y=240 for double-buffered rendering). Without this,
-                // positions jitter 240 units vertically every other frame.
+                // 2D: use raw se11 screen coords centered on display resolution.
+                // The shadow GPU stores se11(raw) WITHOUT draw offset — the offset
+                // is for VRAM bank targeting (double-buffering) and varies per-primitive.
+                // This avoids the offset mismatch problem where the frame-level draw_env
+                // doesn't match the per-primitive draw state.
                 //
                 // Depth from OT Z: each primitive carries its actual OT depth level
                 // from the DMA2 linked-list traversal. ot_z=0 = farthest (back of OT),
@@ -368,12 +474,14 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
                 const float DepthT = static_cast<float>(Cmd3D.ot_z) / static_cast<float>(MaxOtZ);
                 const float Depth2D = FMath::Lerp(EffDepthBack, EffDepthFront, DepthT);
 
-                const float sx = static_cast<float>(V.x) - static_cast<float>(DL.draw_env.offset_x);
-                const float sy = static_cast<float>(V.y) - static_cast<float>(DL.draw_env.offset_y);
+                const float sx = static_cast<float>(V.x);
+                const float sy = static_cast<float>(V.y);
+                // ResScale normalizes HD (640×480) to SD (320×240) so both produce
+                // the same physical size in UE5 — (sx-Origin)*ResScale maps to [-160,160].
                 TriPos[j] = FVector(
-                    Depth2D,                                 // Depth from draw order
-                    (sx - OriginX) * EffScale2D,             // Screen X centered
-                   -(sy - OriginY) * EffScale2D              // Screen Y centered, flipped
+                    Depth2D,                                         // Depth from draw order
+                    (sx - OriginX) * ResScale * EffScale2D,          // Screen X centered + normalized
+                   -(sy - OriginY) * ResScale * EffScale2D           // Screen Y centered, flipped
                 );
             }
             TriPos[j] += WorldOffset;

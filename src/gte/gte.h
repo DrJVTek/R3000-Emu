@@ -208,7 +208,21 @@ class Gte
   public:
     const GteSnapshot& last_snapshot() const { return last_snapshot_; }
 
+    // ── RTPT diagnostic counters (per-frame, reset at VBlank) ──
+    struct RtptDiag {
+        uint32_t rtpt_count{0};     // total RTPT calls
+        uint32_t v1_eq_v2{0};       // V1==V2 pattern
+        uint32_t v0_eq_v2{0};       // V0==V2 pattern
+        uint32_t all_same{0};       // V0==V1==V2
+        uint32_t all_unique{0};     // all different
+        void reset() { rtpt_count = v1_eq_v2 = v0_eq_v2 = all_same = all_unique = 0; }
+    };
+    const RtptDiag& rtpt_diag() const { return rtpt_diag_; }
+    void rtpt_diag_reset() { rtpt_diag_.reset(); }
+
   private:
+    RtptDiag rtpt_diag_{};
+
     uint32_t flag_{0};  // Accumulated during command execution
 
     uint32_t data_[32]{};

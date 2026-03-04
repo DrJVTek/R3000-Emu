@@ -89,7 +89,9 @@ static void addr_watch_on_write(uint32_t phys_addr, uint32_t value, uint32_t siz
 struct Diag3DCtx
 {
     gpu::Gpu3D* gpu3d;
+    gpu::Gpu*   gpu_primary; // primary GPU for comparison logging
     gte::Gte3D* gte3d;
+    gte::Gte*   gte_primary; // primary GTE for RTPT vertex pattern logging
     std::FILE*  log_file;
     uint32_t    total_3d;
     uint32_t    total_2d;
@@ -139,6 +141,19 @@ static void diag_3d_on_vblank(uint32_t vblank_count, void* user)
     static uint32_t scene_change_vblank = 0;
     if (scene_change) scene_change_vblank = vblank_count;
     const bool steady_state = (scene_change_vblank > 0 && vblank_count == scene_change_vblank + 5);
+    // Log primary GTE RTPT patterns every 300 VBlanks (even without 3D hits)
+    if (ctx->gte_primary && (vblank_count % 300 == 0) && count > 0)
+    {
+        const auto& d = ctx->gte_primary->rtpt_diag();
+        if (d.rtpt_count > 0)
+        {
+            const float pct_dup = 100.0f * (d.v1_eq_v2 + d.v0_eq_v2 + d.all_same) / d.rtpt_count;
+            std::fprintf(ctx->log_file, "VBlank #%u: PRIMARY GTE RTPT: %u calls  unique=%u  V1==V2=%u  V0==V2=%u  all_same=%u  dup_rate=%.1f%%  cmds=%zu\n",
+                vblank_count, d.rtpt_count, d.all_unique, d.v1_eq_v2, d.v0_eq_v2, d.all_same, pct_dup, count);
+        }
+        ctx->gte_primary->rtpt_diag_reset();
+    }
+
     const bool do_detail = (n3d > 0 && (ctx->detail_logged < 3 || scene_change || steady_state));
     if (!do_detail) { if (n3d > 0) std::fflush(ctx->log_file); return; }
     ++ctx->detail_logged;
@@ -371,6 +386,77 @@ static void diag_3d_on_vblank(uint32_t vblank_count, void* user)
             }
         }
         std::fprintf(ctx->log_file, " (%d found)\n", qfound);
+    }
+
+    // ── Primary GPU comparison: log draw list from the REAL GPU ──
+    if (ctx->gpu_primary)
+    {
+        gpu::FrameDrawList pdl;
+        ctx->gpu_primary->copy_ready_draw_list(pdl);
+        const size_t pcount = pdl.cmds.size();
+
+        // Count tris that have valid 3D snapshots (vertex_count == 3, valid == 1)
+        uint32_t p3d = 0;
+        int p_v1_eq_v2 = 0;      // V1==V2 pattern
+        int p_v0_eq_v2 = 0;      // V0==V2 pattern
+        int p_all_same = 0;      // all 3 same
+        int p_all_unique = 0;    // all 3 different
+        for (size_t i = 0; i < std::min(pcount, pdl.cmds_3d.size()); ++i)
+        {
+            const auto& c3 = pdl.cmds_3d[i];
+            if (c3.origin != gpu::PrimOrigin::origin_3d) continue;
+            ++p3d;
+            const auto& v0 = c3.verts_3d[0];
+            const auto& v1 = c3.verts_3d[1];
+            const auto& v2 = c3.verts_3d[2];
+            const bool eq01 = (v0.vx==v1.vx && v0.vy==v1.vy && v0.vz==v1.vz);
+            const bool eq12 = (v1.vx==v2.vx && v1.vy==v2.vy && v1.vz==v2.vz);
+            const bool eq02 = (v0.vx==v2.vx && v0.vy==v2.vy && v0.vz==v2.vz);
+            if (eq01 && eq12) ++p_all_same;
+            else if (eq12) ++p_v1_eq_v2;
+            else if (eq02) ++p_v0_eq_v2;
+            else if (eq01) {} // V0==V1 (rare)
+            else ++p_all_unique;
+        }
+
+        std::fprintf(ctx->log_file, "\n  ── PRIMARY GPU comparison ──\n");
+        std::fprintf(ctx->log_file, "  Primary cmds: %zu  origin_3d: %u\n", pcount, p3d);
+        std::fprintf(ctx->log_file, "  Vertex patterns: all_unique=%d  V1==V2=%d  V0==V2=%d  all_same=%d\n",
+            p_all_unique, p_v1_eq_v2, p_v0_eq_v2, p_all_same);
+
+        // Log first 10 primary 3D tris with coords for comparison
+        int logged = 0;
+        for (size_t i = 0; i < std::min(pcount, pdl.cmds_3d.size()) && logged < 10; ++i)
+        {
+            const auto& c3 = pdl.cmds_3d[i];
+            if (c3.origin != gpu::PrimOrigin::origin_3d) continue;
+            std::fprintf(ctx->log_file, "  P-TRI[%d] v0=(%d,%d,%d) v1=(%d,%d,%d) v2=(%d,%d,%d)"
+                " screen=(%d,%d)(%d,%d)(%d,%d)\n",
+                logged,
+                c3.verts_3d[0].vx, c3.verts_3d[0].vy, c3.verts_3d[0].vz,
+                c3.verts_3d[1].vx, c3.verts_3d[1].vy, c3.verts_3d[1].vz,
+                c3.verts_3d[2].vx, c3.verts_3d[2].vy, c3.verts_3d[2].vz,
+                pdl.cmds[i].v[0].x, pdl.cmds[i].v[0].y,
+                pdl.cmds[i].v[1].x, pdl.cmds[i].v[1].y,
+                pdl.cmds[i].v[2].x, pdl.cmds[i].v[2].y);
+            ++logged;
+        }
+    }
+
+    // ── Primary GTE RTPT vertex pattern diagnostic ──
+    if (ctx->gte_primary)
+    {
+        const auto& d = ctx->gte_primary->rtpt_diag();
+        std::fprintf(ctx->log_file, "\n  ── PRIMARY GTE RTPT patterns (this frame) ──\n");
+        std::fprintf(ctx->log_file, "  RTPT calls: %u  all_unique=%u  V1==V2=%u  V0==V2=%u  all_same=%u\n",
+            d.rtpt_count, d.all_unique, d.v1_eq_v2, d.v0_eq_v2, d.all_same);
+        if (d.rtpt_count > 0)
+        {
+            const float pct_dup = 100.0f * (d.v1_eq_v2 + d.v0_eq_v2 + d.all_same) / d.rtpt_count;
+            std::fprintf(ctx->log_file, "  Duplicate rate: %.1f%% (%u/%u have at least 2 identical verts)\n",
+                pct_dup, d.v1_eq_v2 + d.v0_eq_v2 + d.all_same, d.rtpt_count);
+        }
+        ctx->gte_primary->rtpt_diag_reset();
     }
 
     std::fprintf(ctx->log_file, "=== END DETAIL ===\n\n");
@@ -817,7 +903,9 @@ int main(int argc, char** argv)
         if (diag3d_log_f)
         {
             diag3d_ctx.gpu3d = core.gpu_3d();
+            diag3d_ctx.gpu_primary = core.bus() ? core.bus()->gpu() : nullptr;
             diag3d_ctx.gte3d = core.gte_3d();
+            diag3d_ctx.gte_primary = core.cpu() ? &core.cpu()->gte() : nullptr;
             diag3d_ctx.log_file = diag3d_log_f;
             diag3d_ctx.total_3d = 0;
             diag3d_ctx.total_2d = 0;

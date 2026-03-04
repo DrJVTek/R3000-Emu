@@ -111,6 +111,8 @@ class Gpu3D : public IGpu
     uint32_t gp0_words_accum_{0};
     uint32_t gp0_cmds_accum_{0};
     uint32_t gp0_vram_skips_accum_{0};
+    uint32_t quad_cache_hits_{0};
+    uint32_t quad_cache_misses_{0};
 };
 
 } // namespace gpu

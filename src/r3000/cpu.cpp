@@ -4000,9 +4000,14 @@ Cpu::StepResult Cpu::step()
                 if (rs_field == 0x00)
                 {
                     // MFC2: lecture data reg GTE -> CPU (avec load delay slot)
-                    // Always read from primary GTE — the shadow GTE is a passive
-                    // observer and must NEVER inject data into the game's pipeline.
-                    const uint32_t v = gte_.read_data(d);
+                    // SXY regs 12-15: read from shadow GTE (tagged coords for 3D reconstruction).
+                    // This injects differential-encoded face indices into the game's SXY pipeline.
+                    // The primary GPU receives tagged coords (breaks 2D draw list positions),
+                    // but the shadow GPU decodes them to recover 3D face data.
+                    // TODO: replace with SXY correlation table to avoid corrupting primary GPU.
+                    const uint32_t v = (gte_shadow_ && d >= 12 && d <= 15)
+                        ? gte_shadow_->read_data(d)
+                        : gte_.read_data(d);
                     next_pending_load.valid = 1;
                     next_pending_load.reg = t;
                     next_pending_load.value = v;
@@ -4129,8 +4134,11 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr); // numéro de registre GTE (0..31)
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                // Always store from primary GTE — shadow GTE is passive observer.
-                const uint32_t v = gte_.swc2(t);
+                // SXY regs 12-15: store from shadow GTE (tagged coords for 3D reconstruction).
+                // TODO: replace with SXY correlation table to avoid corrupting primary GPU.
+                const uint32_t v = (gte_shadow_ && t >= 12 && t <= 15)
+                    ? gte_shadow_->swc2(t)
+                    : gte_.swc2(t);
                 if (!store_u32(addr, v))
                 {
                     break;

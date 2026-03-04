@@ -3,10 +3,14 @@
 #include "../log/emu_log.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace gpu
 {
+
+// Forward declaration (defined later with decode functions)
+static bool in_dead_zone(uint16_t v);
 
 // ---------------------------------------------------------------------------
 // GP0 parameter count (handles ALL commands to prevent desync)
@@ -343,10 +347,48 @@ void Gpu3D::gp0_polygon()
     // For quads: use all 4 vertices (3 carriers + 1 reference) with majority vote.
     // For tris: use 3 vertices (2 carriers + 1 reference) with consistency check.
     uint32_t face_idx = 0xFFFFFFFFu;
+
+    // --- 3D decode diagnostic (log first 5 polygons per frame + transitions) ---
+    static uint32_t diag_frame = 0xFFFFFFFFu;
+    static uint32_t diag_poly_in_frame = 0;
+    static uint32_t diag_3d_hits = 0;
+    static uint32_t diag_2d_misses = 0;
+    if (frame_count_ != diag_frame)
+    {
+        if (diag_frame != 0xFFFFFFFFu && (diag_frame < 5 || (diag_frame % 300) == 0))
+        {
+            emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+                "frame=%u polygons=%u 3d_hits=%u 2d_misses=%u gte_3d=%p face_cache=%u",
+                diag_frame, diag_poly_in_frame, diag_3d_hits, diag_2d_misses,
+                (void*)gte_3d_,
+                gte_3d_ ? gte_3d_->face_count() : 0);
+        }
+        diag_frame = frame_count_;
+        diag_poly_in_frame = 0;
+        diag_3d_hits = 0;
+        diag_2d_misses = 0;
+    }
+
     if (quad)
     {
         face_idx = decode_face_quad(raw_x[0], raw_y[0], raw_x[1], raw_y[1],
             raw_x[2], raw_y[2], raw_x[3], raw_y[3]);
+
+        // Diagnostic: log raw coords + decode result for first few polys
+        if (diag_poly_in_frame < 5 && (frame_count_ < 5 || (frame_count_ % 300) == 0))
+        {
+            emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+                "  QUAD[%u] raw=(%u,%u)(%u,%u)(%u,%u)(%u,%u) dz=(%d%d%d%d/%d%d%d%d) fi=0x%X",
+                diag_poly_in_frame,
+                raw_x[0], raw_y[0], raw_x[1], raw_y[1],
+                raw_x[2], raw_y[2], raw_x[3], raw_y[3],
+                in_dead_zone(raw_x[0]), in_dead_zone(raw_x[1]),
+                in_dead_zone(raw_x[2]), in_dead_zone(raw_x[3]),
+                in_dead_zone(raw_y[0]), in_dead_zone(raw_y[1]),
+                in_dead_zone(raw_y[2]), in_dead_zone(raw_y[3]),
+                face_idx);
+        }
+
         push_quad(
             raw_x[0], raw_y[0], cr[0], cg[0], cb[0], tu[0], tv[0],
             raw_x[1], raw_y[1], cr[1], cg[1], cb[1], tu[1], tv[1],
@@ -358,12 +400,30 @@ void Gpu3D::gp0_polygon()
     {
         face_idx = decode_face_tri(raw_x[0], raw_y[0], raw_x[1], raw_y[1],
             raw_x[2], raw_y[2]);
+
+        if (diag_poly_in_frame < 5 && (frame_count_ < 5 || (frame_count_ % 300) == 0))
+        {
+            emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+                "  TRI[%u] raw=(%u,%u)(%u,%u)(%u,%u) dz=(%d%d%d/%d%d%d) fi=0x%X",
+                diag_poly_in_frame,
+                raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2],
+                in_dead_zone(raw_x[0]), in_dead_zone(raw_x[1]), in_dead_zone(raw_x[2]),
+                in_dead_zone(raw_y[0]), in_dead_zone(raw_y[1]), in_dead_zone(raw_y[2]),
+                face_idx);
+        }
+
         push_triangle(
             raw_x[0], raw_y[0], cr[0], cg[0], cb[0], tu[0], tv[0],
             raw_x[1], raw_y[1], cr[1], cg[1], cb[1], tu[1], tv[1],
             raw_x[2], raw_y[2], cr[2], cg[2], cb[2], tu[2], tv[2],
             clut, tp, flags, semi_mode, tex_depth, PrimOrigin::origin_2d_hud, face_idx);
     }
+
+    if (face_idx != 0xFFFFFFFFu && face_idx != 0)
+        ++diag_3d_hits;
+    else
+        ++diag_2d_misses;
+    ++diag_poly_in_frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,7 +1078,16 @@ void Gpu3D::push_triangle(
             fill_cmd3d_from_face(cmd3d, face, 0, 1, 2);
         }
         else
+        {
+            // Diagnostic: face decoded but not in cache
+            static uint32_t tri_miss_count = 0;
+            if (tri_miss_count < 20)
+                emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+                    "TRI face_idx=%u NOT IN CACHE (face_count=%u) frame=%u",
+                    face_idx, gte_3d_->face_count(), frame_count_);
+            ++tri_miss_count;
             face_idx = 0xFFFFFFFFu; // decoded but not in cache
+        }
     }
     else
         face_idx = 0xFFFFFFFFu; // no gte_3d_ or no tag decoded
@@ -1088,6 +1157,52 @@ void Gpu3D::push_quad(
     const DrawVertex dv2 = make_vertex(x2, y2, r2, g2, b2, u2, v2, is_2d, ox, oy);
     const DrawVertex dv3 = make_vertex(x3, y3, r3, g3, b3, u3, v3, is_2d, ox, oy);
 
+    // Detect edge-strip pattern: if face has V1==V2, only 2 unique vertices
+    // (V0 and V1). Ridge Racer terrain uses RTPT with duplicate V1=V2 to
+    // process edges. The quad is assembled from 2 faces (face_A + face_B),
+    // each contributing 2 unique vertices → 4 total for the real quad.
+    const bool edge_strip = face && (face->vx[1] == face->vx[2] &&
+                                     face->vy[1] == face->vy[2] &&
+                                     face->vz[1] == face->vz[2]);
+
+    // For edge strips, try to find face_B from V3's tagged coords
+    const gte::GteCacheFace* face_b = nullptr;
+    if (is_3d && edge_strip)
+    {
+        const uint16_t v3x = x3;
+        const uint16_t v3y = y3;
+
+        if (in_dead_zone(v3x) && in_dead_zone(v3y) &&
+            v3x != gte::Gte3D::REF_BASE && v3y != gte::Gte3D::REF_BASE)
+        {
+            // V3 is a carrier: decode face_idx_B
+            const int lo = (int)std::round((double)(v3x - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
+            const int hi = (int)std::round((double)(v3y - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
+            if (lo >= 0 && lo <= 255 && hi >= 0 && hi <= 255)
+            {
+                const uint32_t fi_b = (uint32_t)((hi << 8) | lo);
+                face_b = gte_3d_->face_by_index(fi_b);
+            }
+        }
+        else if (in_dead_zone(v3x) && in_dead_zone(v3y))
+        {
+            // V3 is a reference: try face_idx ± 1
+            if (face_idx + 1 < 0xFFFFu)
+                face_b = gte_3d_->face_by_index(face_idx + 1);
+            if (!face_b && face_idx > 1)
+                face_b = gte_3d_->face_by_index(face_idx - 1);
+        }
+    }
+
+    // Edge strip with face_B found: reconstruct real quad from 4 unique vertices.
+    // face_A gives edge (V0_A, V1_A), face_B gives edge (V0_B, V1_B).
+    // Quad layout: face_A.V0, face_A.V1, face_B.V0, face_B.V1
+    const bool edge_strip_ok = edge_strip && face_b;
+    // Also detect if face_B is edge-strip too (V1==V2)
+    const bool face_b_edge = face_b && (face_b->vx[1] == face_b->vx[2] &&
+                                         face_b->vy[1] == face_b->vy[2] &&
+                                         face_b->vz[1] == face_b->vz[2]);
+
     // --- Triangle 1: V0, V1, V2 (quad_half=0) ---
     {
         DrawCmd3D cmd3d{};
@@ -1098,7 +1213,27 @@ void Gpu3D::push_quad(
         cmd3d.ot_z = current_ot_z_;
 
         if (is_3d)
-            fill_cmd3d_from_face(cmd3d, face, 0, 1, 2);
+        {
+            if (edge_strip_ok)
+            {
+                // Tri 1 of quad: face_A.V0, face_A.V1, face_B.V0
+                cmd3d.verts_3d[0] = {face->vx[0], face->vy[0], face->vz[0]};
+                cmd3d.nx[0] = face->nx[0]; cmd3d.ny[0] = face->ny[0]; cmd3d.nz[0] = face->nz[0];
+                cmd3d.sz[0] = face->sz[0];
+
+                cmd3d.verts_3d[1] = {face->vx[1], face->vy[1], face->vz[1]};
+                cmd3d.nx[1] = face->nx[1]; cmd3d.ny[1] = face->ny[1]; cmd3d.nz[1] = face->nz[1];
+                cmd3d.sz[1] = face->sz[1];
+
+                cmd3d.verts_3d[2] = {face_b->vx[0], face_b->vy[0], face_b->vz[0]};
+                cmd3d.nx[2] = face_b->nx[0]; cmd3d.ny[2] = face_b->ny[0]; cmd3d.nz[2] = face_b->nz[0];
+                cmd3d.sz[2] = face_b->sz[0];
+
+                cmd3d.transform = face->transform;
+            }
+            else
+                fill_cmd3d_from_face(cmd3d, face, 0, 1, 2);
+        }
 
         DrawCmd cmd{};
         cmd.v[0] = dv0; cmd.v[1] = dv1; cmd.v[2] = dv2;
@@ -1120,10 +1255,76 @@ void Gpu3D::push_quad(
 
         if (is_3d)
         {
-            if (qc)
+            if (edge_strip_ok)
+            {
+                // Tri 2 of quad: face_A.V1, face_B.V1 (or V0 if not edge), face_B.V0
+                cmd3d.verts_3d[0] = {face->vx[1], face->vy[1], face->vz[1]};
+                cmd3d.nx[0] = face->nx[1]; cmd3d.ny[0] = face->ny[1]; cmd3d.nz[0] = face->nz[1];
+                cmd3d.sz[0] = face->sz[1];
+
+                const int bi = face_b_edge ? 1 : 0; // V1 if edge-strip, V0 if normal
+                cmd3d.verts_3d[1] = {face_b->vx[bi], face_b->vy[bi], face_b->vz[bi]};
+                cmd3d.nx[1] = face_b->nx[bi]; cmd3d.ny[1] = face_b->ny[bi]; cmd3d.nz[1] = face_b->nz[bi];
+                cmd3d.sz[1] = face_b->sz[bi];
+
+                cmd3d.verts_3d[2] = {face_b->vx[0], face_b->vy[0], face_b->vz[0]};
+                cmd3d.nx[2] = face_b->nx[0]; cmd3d.ny[2] = face_b->ny[0]; cmd3d.nz[2] = face_b->nz[0];
+                cmd3d.sz[2] = face_b->sz[0];
+
+                cmd3d.transform = face->transform;
+                ++quad_cache_hits_;
+            }
+            else if (qc)
+            {
                 fill_cmd3d_from_quad(cmd3d, qc, 1, 3, 2);
+                ++quad_cache_hits_;
+            }
             else
-                fill_cmd3d_from_face(cmd3d, face, 1, 1, 2); // V3 ≈ V1 fallback
+            {
+                // Non-edge-strip fallback: try V3 carrier/reference decode
+                const uint16_t v3x = x3;
+                const uint16_t v3y = y3;
+                const gte::GteCacheFace* fb = nullptr;
+                int v3_vert_idx = 0;
+
+                if (in_dead_zone(v3x) && in_dead_zone(v3y) &&
+                    v3x != gte::Gte3D::REF_BASE && v3y != gte::Gte3D::REF_BASE)
+                {
+                    const int lo = (int)std::round((double)(v3x - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
+                    const int hi = (int)std::round((double)(v3y - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
+                    if (lo >= 0 && lo <= 255 && hi >= 0 && hi <= 255)
+                    {
+                        const uint32_t fi_b = (uint32_t)((hi << 8) | lo);
+                        fb = gte_3d_->face_by_index(fi_b);
+                        v3_vert_idx = 0;
+                    }
+                }
+                else if (in_dead_zone(v3x) && in_dead_zone(v3y))
+                {
+                    v3_vert_idx = 1;
+                    if (face_idx + 1 < 0xFFFFu)
+                        fb = gte_3d_->face_by_index(face_idx + 1);
+                    if (!fb && face_idx > 1)
+                        fb = gte_3d_->face_by_index(face_idx - 1);
+                }
+
+                if (fb)
+                {
+                    cmd3d.verts_3d[0] = {face->vx[1], face->vy[1], face->vz[1]};
+                    cmd3d.nx[0] = face->nx[1]; cmd3d.ny[0] = face->ny[1]; cmd3d.nz[0] = face->nz[1];
+                    cmd3d.verts_3d[1] = {fb->vx[v3_vert_idx], fb->vy[v3_vert_idx], fb->vz[v3_vert_idx]};
+                    cmd3d.nx[1] = fb->nx[v3_vert_idx]; cmd3d.ny[1] = fb->ny[v3_vert_idx]; cmd3d.nz[1] = fb->nz[v3_vert_idx];
+                    cmd3d.verts_3d[2] = {face->vx[2], face->vy[2], face->vz[2]};
+                    cmd3d.nx[2] = face->nx[2]; cmd3d.ny[2] = face->ny[2]; cmd3d.nz[2] = face->nz[2];
+                    cmd3d.transform = face->transform;
+                    ++quad_cache_hits_;
+                }
+                else
+                {
+                    fill_cmd3d_from_face(cmd3d, face, 1, 1, 2);
+                    ++quad_cache_misses_;
+                }
+            }
         }
 
         DrawCmd cmd{};
@@ -1153,6 +1354,27 @@ void Gpu3D::on_vblank()
     dbg_vram_skips_ = gp0_vram_skips_accum_;
     dbg_state_ = gp0_state_;
     dbg_vram_remaining_ = vram_words_remaining_;
+
+    // Diagnostic: log GP0 activity per frame (first 10 + every 300)
+    if (frame_count_ < 10 || (frame_count_ % 300) == 0)
+    {
+        const auto& dl = draw_lists_[draw_active_];
+        uint32_t n3d = 0, n2d = 0;
+        for (size_t i = 0; i < dl.cmds_3d.size(); ++i)
+        {
+            if (dl.cmds_3d[i].origin == PrimOrigin::origin_3d) ++n3d;
+            else ++n2d;
+        }
+        emu::logf(emu::LogLevel::warn, "GPU3D_VBLANK",
+            "frame=%u words=%u cmds=%u vram_skips=%u tris=%zu 3d=%u 2d=%u state=%d quad_hit=%u quad_miss=%u",
+            frame_count_, gp0_words_accum_, gp0_cmds_accum_, gp0_vram_skips_accum_,
+            dl.cmds_3d.size(), n3d, n2d, (int)gp0_state_,
+            quad_cache_hits_, quad_cache_misses_);
+    }
+
+    // Reset quad stats
+    quad_cache_hits_ = 0;
+    quad_cache_misses_ = 0;
 
     draw_active_ = 1 - draw_active_;
     draw_lists_[draw_active_].clear();
