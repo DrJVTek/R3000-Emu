@@ -893,6 +893,7 @@ void Gpu::gp0_polygon()
     const bool quad     = (cmd & 0x08) != 0;
     const bool textured = (cmd & 0x04) != 0;
     const bool semi     = (cmd & 0x02) != 0;
+    const bool raw      = (cmd & 0x01) != 0; // raw texture (no color modulation)
     const int nverts = quad ? 4 : 3;
 
     if (quad) frame_stats_.quads++;
@@ -974,6 +975,7 @@ void Gpu::gp0_polygon()
     uint8_t flags = 0;
     if (textured) flags |= 1;
     if (semi)     flags |= 2;
+    if (raw)      flags |= 4;
 
     // Debug: log first semi-transparent primitives with full texpage info
     if (semi)

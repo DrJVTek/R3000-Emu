@@ -80,7 +80,7 @@ int Gpu3D::gp0_param_count(uint8_t cmd)
 // ---------------------------------------------------------------------------
 Gpu3D::Gpu3D()
 {
-    emu::logf(emu::LogLevel::warn, "GPU3D", "Gpu3D shadow GPU v1 (full parser)");
+    emu::logf(emu::LogLevel::info, "GPU3D", "Gpu3D shadow GPU v1 (full parser)");
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +304,7 @@ void Gpu3D::gp0_polygon()
     const bool quad     = (cmd & 0x08) != 0;
     const bool textured = (cmd & 0x04) != 0;
     const bool semi     = (cmd & 0x02) != 0;
+    const bool raw      = (cmd & 0x01) != 0; // raw texture (no color modulation)
     const int nverts = quad ? 4 : 3;
 
     uint16_t raw_x[4], raw_y[4];
@@ -352,32 +353,47 @@ void Gpu3D::gp0_polygon()
     uint8_t flags = 0;
     if (textured) flags |= 1;
     if (semi)     flags |= 2;
+    if (raw)      flags |= 4;
 
     if (textured)
         draw_env_.texpage_raw = (draw_env_.texpage_raw & ~0x7FFu) | (texpage_attr & 0x7FFu);
 
     // Cortex test: strict token path (no differential decode fallback).
+    // Select a hint that is both frequent and present in face cache.
     uint32_t face_idx = 0xFFFFFFFFu;
     {
-        // Majority vote on per-vertex hints.
-        uint32_t best = kNoFaceHint;
-        int best_count = 0;
+        uint32_t best_cached = kNoFaceHint;
+        int best_cached_count = 0;
+        uint32_t best_any = kNoFaceHint;
+        int best_any_count = 0;
+
         for (int i = 0; i < nverts; ++i)
         {
             const uint32_t h = face_hints[i];
-            if (h == kNoFaceHint)
+            if (h == kNoFaceHint || h == 0)
                 continue;
+
             int c = 0;
             for (int j = 0; j < nverts; ++j)
                 if (face_hints[j] == h)
                     ++c;
-            if (c > best_count)
+
+            if (c > best_any_count)
             {
-                best_count = c;
-                best = h;
+                best_any_count = c;
+                best_any = h;
+            }
+
+            const bool in_cache = (gte_3d_ && gte_3d_->face_by_index(h) != nullptr);
+            if (in_cache && c > best_cached_count)
+            {
+                best_cached_count = c;
+                best_cached = h;
             }
         }
-        face_idx = best;
+
+        // Prefer cache-valid token to avoid dropping to 2D when majority token is stale.
+        face_idx = (best_cached != kNoFaceHint) ? best_cached : best_any;
     }
 
     // --- 3D decode diagnostic (log first 5 polygons per frame + transitions) ---
@@ -389,7 +405,7 @@ void Gpu3D::gp0_polygon()
     {
         if (diag_frame != 0xFFFFFFFFu && (diag_frame < 5 || (diag_frame % 300) == 0))
         {
-            emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+            emu::logf(emu::LogLevel::info, "GPU3D_DIAG",
                 "frame=%u polygons=%u 3d_hits=%u 2d_misses=%u gte_3d=%p face_cache=%u",
                 diag_frame, diag_poly_in_frame, diag_3d_hits, diag_2d_misses,
                 (void*)gte_3d_,
@@ -406,7 +422,7 @@ void Gpu3D::gp0_polygon()
         // Diagnostic: log raw coords + selected face token for first few polys
         if (diag_poly_in_frame < 5 && (frame_count_ < 5 || (frame_count_ % 300) == 0))
         {
-            emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+            emu::logf(emu::LogLevel::info, "GPU3D_DIAG",
                 "  QUAD[%u] raw=(%u,%u)(%u,%u)(%u,%u)(%u,%u) hints=(0x%X,0x%X,0x%X,0x%X) fi=0x%X",
                 diag_poly_in_frame,
                 raw_x[0], raw_y[0], raw_x[1], raw_y[1],
@@ -420,13 +436,13 @@ void Gpu3D::gp0_polygon()
             raw_x[1], raw_y[1], cr[1], cg[1], cb[1], tu[1], tv[1],
             raw_x[2], raw_y[2], cr[2], cg[2], cb[2], tu[2], tv[2],
             raw_x[3], raw_y[3], cr[3], cg[3], cb[3], tu[3], tv[3],
-            clut, tp, flags, semi_mode, tex_depth, PrimOrigin::origin_2d_hud, face_idx);
+            clut, tp, flags, semi_mode, tex_depth, PrimOrigin::origin_2d_hud, face_idx, face_hints[3]);
     }
     else
     {
         if (diag_poly_in_frame < 5 && (frame_count_ < 5 || (frame_count_ % 300) == 0))
         {
-            emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+            emu::logf(emu::LogLevel::info, "GPU3D_DIAG",
                 "  TRI[%u] raw=(%u,%u)(%u,%u)(%u,%u) hints=(0x%X,0x%X,0x%X) fi=0x%X",
                 diag_poly_in_frame,
                 raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2],
@@ -510,7 +526,7 @@ void Gpu3D::gp0_line()
         (uint16_t)(x0 + px), (uint16_t)(y0 + py), r0, g0, b0, 0, 0,
         (uint16_t)(x1 + px), (uint16_t)(y1 + py), r1, g1, b1, 0, 0,
         0, tp, flags, semi_mode, 0,
-        PrimOrigin::origin_2d_line, 0xFFFFFFFFu);
+        PrimOrigin::origin_2d_line, 0xFFFFFFFFu, kNoFaceHint);
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +537,7 @@ void Gpu3D::gp0_rect()
     const uint8_t cmd = (uint8_t)(cmd_buf_[0] >> 24);
     const bool textured = (cmd & 0x04) != 0;
     const bool semi     = (cmd & 0x02) != 0;
+    const bool raw      = (cmd & 0x01) != 0; // raw texture (no color modulation)
     const int size_code = (cmd >> 3) & 3;
 
     uint8_t r = (uint8_t)(cmd_buf_[0] & 0xFF);
@@ -541,20 +558,23 @@ void Gpu3D::gp0_rect()
         wi++;
     }
 
-    uint16_t w = 0, h = 0;
+    int32_t w = 0, h = 0;
     switch (size_code)
     {
         case 0: // variable
-            w = (uint16_t)(cmd_buf_[wi] & 0xFFFFu);
-            h = (uint16_t)(cmd_buf_[wi] >> 16);
+            w = (int32_t)(cmd_buf_[wi] & 0xFFFFu);
+            h = (int32_t)(cmd_buf_[wi] >> 16);
             break;
         case 1: w = 1;  h = 1;  break; // 1x1
         case 2: w = 8;  h = 8;  break; // 8x8
         case 3: w = 16; h = 16; break; // 16x16
     }
 
-    uint16_t x1 = (uint16_t)(x0 + w);
-    uint16_t y1 = (uint16_t)(y0 + h);
+    if (w <= 0 || h <= 0)
+        return;
+
+    uint16_t x1 = (uint16_t)(x0 + (uint16_t)w);
+    uint16_t y1 = (uint16_t)(y0 + (uint16_t)h);
 
     uint16_t tp = (uint16_t)(draw_env_.texpage_raw & 0xFFFF);
     uint8_t semi_mode = (uint8_t)((tp >> 5) & 3);
@@ -562,17 +582,22 @@ void Gpu3D::gp0_rect()
     uint8_t flags = 0;
     if (textured) flags |= 1;
     if (semi)     flags |= 2;
+    if (raw)      flags |= 4;
+
+    // Sprite UV are 8-bit and wrap naturally on PS1.
+    const uint8_t u1 = static_cast<uint8_t>(u0 + (uint8_t)w);
+    const uint8_t v1 = static_cast<uint8_t>(v0 + (uint8_t)h);
 
     push_triangle(
         x0, y0, r, g, b, u0, v0,
-        x1, y0, r, g, b, (uint8_t)(u0 + w), v0,
-        x0, y1, r, g, b, u0, (uint8_t)(v0 + h),
+        x1, y0, r, g, b, u1, v0,
+        x0, y1, r, g, b, u0, v1,
         clut, tp, flags, semi_mode, tex_depth,
         PrimOrigin::origin_2d_rect, 0xFFFFFFFFu);
     push_triangle(
-        x1, y0, r, g, b, (uint8_t)(u0 + w), v0,
-        x1, y1, r, g, b, (uint8_t)(u0 + w), (uint8_t)(v0 + h),
-        x0, y1, r, g, b, u0, (uint8_t)(v0 + h),
+        x1, y0, r, g, b, u1, v0,
+        x1, y1, r, g, b, u1, v1,
+        x0, y1, r, g, b, u0, v1,
         clut, tp, flags, semi_mode, tex_depth,
         PrimOrigin::origin_2d_rect, 0xFFFFFFFFu);
 }
@@ -1019,9 +1044,10 @@ static int16_t se11(uint16_t v)
 }
 
 // ---------------------------------------------------------------------------
-// Helper: prepare DrawCmd vertex for 2D (sign_extend_11 + offset ADDITION)
-// Matches the primary GPU pipeline: se11(raw) + draw_offset = VRAM position.
-// UE5 centers the result using display.width()/height() (same as 2D component).
+// Helper: prepare DrawCmd vertex for 2D.
+// Keep raw screen-space coordinates (se11 only), without draw offset.
+// Draw offset is a VRAM page targeting detail (double-buffering), not a stable
+// world-space transform, and applying it here causes visible Y flicker.
 //
 // For 3D tagged coords, returns raw values (UE5 uses verts_3d from DrawCmd3D).
 // ---------------------------------------------------------------------------
@@ -1031,8 +1057,10 @@ static DrawVertex make_vertex(uint16_t raw_x, uint16_t raw_y,
 {
     if (is_2d)
     {
-        const int16_t sx = (int16_t)(se11(raw_x) + ox);
-        const int16_t sy = (int16_t)(se11(raw_y) + oy);
+        (void)ox;
+        (void)oy;
+        const int16_t sx = se11(raw_x);
+        const int16_t sy = se11(raw_y);
         return {sx, sy, r, g, b, u, v};
     }
     return {(int16_t)raw_x, (int16_t)raw_y, r, g, b, u, v};
@@ -1104,7 +1132,7 @@ void Gpu3D::push_triangle(
             // Diagnostic: face decoded but not in cache
             static uint32_t tri_miss_count = 0;
             if (tri_miss_count < 20)
-                emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
+                emu::logf(emu::LogLevel::info, "GPU3D_DIAG",
                     "TRI face_idx=%u NOT IN CACHE (face_count=%u) frame=%u",
                     face_idx, gte_3d_->face_count(), frame_count_);
             ++tri_miss_count;
@@ -1146,7 +1174,7 @@ void Gpu3D::push_quad(
     uint16_t x2, uint16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
     uint16_t x3, uint16_t y3, uint8_t r3, uint8_t g3, uint8_t b3, uint8_t u3, uint8_t v3,
     uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
-    PrimOrigin origin, uint32_t face_idx)
+    PrimOrigin origin, uint32_t face_idx, uint32_t face_idx_v3_hint)
 {
     // Face/quad cache lookup — done once for both triangles
     bool is_3d = false;
@@ -1191,6 +1219,16 @@ void Gpu3D::push_quad(
     const gte::GteCacheFace* face_b = nullptr;
     if (is_3d && edge_strip)
     {
+        // Preferred in token-flow mode: explicit hint from V3 coord word.
+        if (face_idx_v3_hint != kNoFaceHint && face_idx_v3_hint != 0 && face_idx_v3_hint != face_idx)
+            face_b = gte_3d_->face_by_index(face_idx_v3_hint);
+
+        if (face_b)
+        {
+            // Already resolved via token hint; skip legacy tagged-coordinate decode.
+        }
+        else
+        {
         const uint16_t v3x = x3;
         const uint16_t v3y = y3;
 
@@ -1213,6 +1251,7 @@ void Gpu3D::push_quad(
                 face_b = gte_3d_->face_by_index(face_idx + 1);
             if (!face_b && face_idx > 1)
                 face_b = gte_3d_->face_by_index(face_idx - 1);
+        }
         }
     }
 
@@ -1309,7 +1348,14 @@ void Gpu3D::push_quad(
                 const gte::GteCacheFace* fb = nullptr;
                 int v3_vert_idx = 0;
 
-                if (in_dead_zone(v3x) && in_dead_zone(v3y) &&
+                // Preferred in token-flow mode: explicit hint from V3 coord word.
+                if (face_idx_v3_hint != kNoFaceHint && face_idx_v3_hint != 0 && face_idx_v3_hint != face_idx)
+                {
+                    fb = gte_3d_->face_by_index(face_idx_v3_hint);
+                    v3_vert_idx = 0;
+                }
+
+                if (!fb && in_dead_zone(v3x) && in_dead_zone(v3y) &&
                     v3x != gte::Gte3D::REF_BASE && v3y != gte::Gte3D::REF_BASE)
                 {
                     const int lo = (int)std::round((double)(v3x - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
@@ -1321,7 +1367,7 @@ void Gpu3D::push_quad(
                         v3_vert_idx = 0;
                     }
                 }
-                else if (in_dead_zone(v3x) && in_dead_zone(v3y))
+                else if (!fb && in_dead_zone(v3x) && in_dead_zone(v3y))
                 {
                     v3_vert_idx = 1;
                     if (face_idx + 1 < 0xFFFFu)
@@ -1387,7 +1433,7 @@ void Gpu3D::on_vblank()
             if (dl.cmds_3d[i].origin == PrimOrigin::origin_3d) ++n3d;
             else ++n2d;
         }
-        emu::logf(emu::LogLevel::warn, "GPU3D_VBLANK",
+        emu::logf(emu::LogLevel::info, "GPU3D_VBLANK",
             "frame=%u words=%u cmds=%u vram_skips=%u tris=%zu 3d=%u 2d=%u state=%d quad_hit=%u quad_miss=%u",
             frame_count_, gp0_words_accum_, gp0_cmds_accum_, gp0_vram_skips_accum_,
             dl.cmds_3d.size(), n3d, n2d, (int)gp0_state_,
@@ -1419,3 +1465,4 @@ void Gpu3D::copy_ready_draw_list(FrameDrawList& out) const
 }
 
 } // namespace gpu
+

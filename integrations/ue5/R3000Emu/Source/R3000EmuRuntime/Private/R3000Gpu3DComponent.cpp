@@ -10,6 +10,19 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogR3000Gpu3D, Log, All);
 
+// Set to 1 to keep only Warning/Error logs from this component.
+#ifndef R3000_GPU3D_WARNINGS_ONLY
+#define R3000_GPU3D_WARNINGS_ONLY 1
+#endif
+
+#if R3000_GPU3D_WARNINGS_ONLY
+#define GPU3D_NOISE_UELOG(Verbosity, Format, ...) do {} while (0)
+#define GPU3D_NOISE_LOGF(...) do {} while (0)
+#else
+#define GPU3D_NOISE_UELOG(Verbosity, Format, ...) UE_LOG(LogR3000Gpu3D, Verbosity, Format, ##__VA_ARGS__)
+#define GPU3D_NOISE_LOGF(...) emu::logf(__VA_ARGS__)
+#endif
+
 // ===================================================================
 // Constructor
 // ===================================================================
@@ -44,9 +57,9 @@ void UR3000Gpu3DComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 // ===================================================================
 void UR3000Gpu3DComponent::BindGpu(gpu::Gpu* InGpu)
 {
-    UE_LOG(LogR3000Gpu3D, Warning, TEXT("GPU3D v2 BindGpu called. InGpu=%p WorldScale=%.3f bSkip2D=%d"),
+    GPU3D_NOISE_UELOG(Log, TEXT("GPU3D v2 BindGpu called. InGpu=%p WorldScale=%.3f bSkip2D=%d"),
         InGpu, WorldScale, bSkip2DElements ? 1 : 0);
-    emu::logf(emu::LogLevel::warn, "GPU3D", "Gpu3DComponent bound (WorldScale=%.3f, bSkip2D=%d)",
+    GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D", "Gpu3DComponent bound (WorldScale=%.3f, bSkip2D=%d)",
         (double)WorldScale, bSkip2DElements ? 1 : 0);
 
     Gpu_ = InGpu;
@@ -78,7 +91,7 @@ void UR3000Gpu3DComponent::BindGpu(gpu::Gpu* InGpu)
 void UR3000Gpu3DComponent::BindGpu3D(gpu::Gpu3D* InGpu3D)
 {
     Gpu3D_ = InGpu3D;
-    UE_LOG(LogR3000Gpu3D, Warning, TEXT("GPU3D BindGpu3D: shadow=%p"), InGpu3D);
+    GPU3D_NOISE_UELOG(Log, TEXT("GPU3D BindGpu3D: shadow=%p"), InGpu3D);
 }
 
 // ===================================================================
@@ -95,7 +108,7 @@ void UR3000Gpu3DComponent::SetVramTexture(UTexture2D* InTexture)
             MatInst_[s]->SetTextureParameterValue(TEXT("VramTexture"), VramTexture_);
     }
 
-    UE_LOG(LogR3000Gpu3D, Log, TEXT("SetVramTexture: %p"), InTexture);
+    GPU3D_NOISE_UELOG(Log, TEXT("SetVramTexture: %p"), InTexture);
 }
 
 // ===================================================================
@@ -154,12 +167,27 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
     const uint32 TickFrame = Gpu3D_ ? Gpu3D_->frame_count() : 0;
     if (TickFrame <= 5 || (TickFrame % 300) == 0)
     {
-        UE_LOG(LogR3000Gpu3D, Warning, TEXT("GPU3D Tick frame=%u: Gpu3D_=%p MeshComp_=%p bEnabled=%d"),
+        GPU3D_NOISE_UELOG(Verbose, TEXT("GPU3D Tick frame=%u: Gpu3D_=%p MeshComp_=%p bEnabled=%d"),
             TickFrame, Gpu3D_, MeshComp_, bEnabled ? 1 : 0);
     }
 
     if (!Gpu3D_ || !MeshComp_)
         return;
+
+    // Optional free-roam mode: keep mesh fixed in world space.
+    if (TrackingMode == EGpu3DTrackingMode::WorldLocked)
+    {
+        if (!bMeshDetachedForWorldLock_)
+        {
+            MeshComp_->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+            bMeshDetachedForWorldLock_ = true;
+        }
+    }
+    else if (bMeshDetachedForWorldLock_)
+    {
+        MeshComp_->AttachToComponent(this, FAttachmentTransformRules::KeepWorldTransform);
+        bMeshDetachedForWorldLock_ = false;
+    }
 
     // Toggle visibility based on bEnabled
     if (!bEnabled)
@@ -219,7 +247,7 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             if (DL.cmds_3d[k].origin == gpu::PrimOrigin::origin_3d) ++N3D; else ++N2D;
             MaxOtZLocal = FMath::Max(MaxOtZLocal, DL.cmds_3d[k].ot_z);
         }
-        UE_LOG(LogR3000Gpu3D, Warning,
+        GPU3D_NOISE_UELOG(Verbose,
             TEXT("GPU3D RebuildMesh3D #%u: cmds=%d cmds_3d=%d frame_id=%u | 3D=%d 2D=%d maxOtZ=%u %s"),
             RebuildCount, NumCmds, Num3D, DL.frame_id, N3D, N2D, MaxOtZLocal,
             bSceneChange ? TEXT("*** SCENE CHANGE ***") : TEXT(""));
@@ -306,7 +334,7 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
         static uint32 ESLogCount = 0;
         if (ESLogCount < 10 || (ESLogCount % 300) == 0)
         {
-            UE_LOG(LogR3000Gpu3D, Log,
+            GPU3D_NOISE_UELOG(Log,
                 TEXT("Edge-strip fix: %d quad pairs reconstructed (%d tris)"),
                 EdgeStripFixed, EdgeStripFixed * 2);
         }
@@ -378,6 +406,27 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
         MaxOtZ = FMath::Max(MaxOtZ, DL.cmds_3d[i].ot_z);
     }
 
+    // Experimental world anchoring: use first 3D primitive transform as frame reference.
+    bool bHaveRefFrameTransform = false;
+    float RefRt[9] = {};
+    float RefTr[3] = {};
+    if (bApproxWorldFromFrameRef)
+    {
+        for (int32 i = 0; i < Count; ++i)
+        {
+            const gpu::DrawCmd3D& C = DL.cmds_3d[i];
+            if (C.origin != gpu::PrimOrigin::origin_3d)
+                continue;
+            for (int k = 0; k < 9; ++k)
+                RefRt[k] = static_cast<float>(C.transform.rt[k]) / 4096.0f;
+            RefTr[0] = static_cast<float>(C.transform.tr[0]);
+            RefTr[1] = static_cast<float>(C.transform.tr[1]);
+            RefTr[2] = static_cast<float>(C.transform.tr[2]);
+            bHaveRefFrameTransform = true;
+            break;
+        }
+    }
+
     for (int32 i = 0; i < Count; ++i)
     {
         const gpu::DrawCmd& Cmd = DL.cmds[i];
@@ -438,17 +487,51 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             if (bHas3D)
             {
                 const gte::GteVertex3D& V3 = Cmd3D.verts_3d[j];
-                const gte::GteTransform& T = Cmd3D.transform;
+                float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+                if (bApplyGteTransform)
+                {
+                    const gte::GteTransform& T = Cmd3D.transform;
 
-                // RT * vertex + TR → camera space.
-                // RT is 3×3 fixed-point 4.12 (int16_t). Use int64 to avoid
-                // overflow (int16 × int32 can exceed int32 range).
-                // Arithmetic right-shift (>> 12) matches GTE hardware behavior
-                // (truncates toward -∞, not toward zero like /4096).
-                const int64_t vx = V3.vx, vy = V3.vy, vz = V3.vz;
-                const float cx = static_cast<float>(((T.rt[0]*vx + T.rt[1]*vy + T.rt[2]*vz) >> 12) + T.tr[0]);
-                const float cy = static_cast<float>(((T.rt[3]*vx + T.rt[4]*vy + T.rt[5]*vz) >> 12) + T.tr[1]);
-                const float cz = static_cast<float>(((T.rt[6]*vx + T.rt[7]*vy + T.rt[8]*vz) >> 12) + T.tr[2]);
+                    // RT * vertex + TR → camera space.
+                    // RT is 3×3 fixed-point 4.12 (int16_t). Use int64 to avoid
+                    // overflow (int16 × int32 can exceed int32 range).
+                    // Arithmetic right-shift (>> 12) matches GTE hardware behavior
+                    // (truncates toward -∞, not toward zero like /4096).
+                    const int64_t vx = V3.vx, vy = V3.vy, vz = V3.vz;
+                    cx = static_cast<float>(((T.rt[0]*vx + T.rt[1]*vy + T.rt[2]*vz) >> 12) + T.tr[0]);
+                    cy = static_cast<float>(((T.rt[3]*vx + T.rt[4]*vy + T.rt[5]*vz) >> 12) + T.tr[1]);
+                    cz = static_cast<float>(((T.rt[6]*vx + T.rt[7]*vy + T.rt[8]*vz) >> 12) + T.tr[2]);
+                }
+                else
+                {
+                    // Raw model-space style mode for free exploration/debug.
+                    cx = static_cast<float>(V3.vx);
+                    cy = static_cast<float>(V3.vy);
+                    cz = static_cast<float>(V3.vz);
+                }
+
+                if (bApplyGteTransform && bApproxWorldFromFrameRef && bHaveRefFrameTransform)
+                {
+                    // Approximate camera-space -> world-space: p_w = R_ref^T * (p_c - T_ref)
+                    const float px = cx - RefTr[0];
+                    const float py = cy - RefTr[1];
+                    const float pz = cz - RefTr[2];
+                    const float wx =
+                        RefRt[0] * px +
+                        RefRt[3] * py +
+                        RefRt[6] * pz;
+                    const float wy =
+                        RefRt[1] * px +
+                        RefRt[4] * py +
+                        RefRt[7] * pz;
+                    const float wz =
+                        RefRt[2] * px +
+                        RefRt[5] * py +
+                        RefRt[8] * pz;
+                    cx = wx;
+                    cy = wy;
+                    cz = wz;
+                }
 
                 // GTE camera-space → UE5 coordinate mapping:
                 //   GTE: X=right, Y=down, Z=into screen
@@ -553,7 +636,7 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             if (bHas3D)
             {
                 const gte::GteTransform& T = Cmd3D.transform;
-                emu::logf(emu::LogLevel::warn, "GPU3D",
+                GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                     "=== 3D TRI[%d] frame=%u face_idx=%u quad=%d half=%d ===",
                     Tri3DCount, DL.frame_id, Cmd3D.face_idx, Cmd3D.is_quad ? 1 : 0, Cmd3D.quad_half);
 
@@ -561,14 +644,14 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
                 for (int32 j = 0; j < 3; ++j)
                 {
                     const gte::GteVertex3D& V3 = Cmd3D.verts_3d[j];
-                    emu::logf(emu::LogLevel::warn, "GPU3D",
+                    GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                         "  v[%d] model=(%d,%d,%d) normal=(%d,%d,%d) sz=%u",
                         j, V3.vx, V3.vy, V3.vz,
                         Cmd3D.nx[j], Cmd3D.ny[j], Cmd3D.nz[j], Cmd3D.sz[j]);
                 }
 
                 // Transform (RT 3x3 + TR)
-                emu::logf(emu::LogLevel::warn, "GPU3D",
+                GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                     "  RT=[%d,%d,%d / %d,%d,%d / %d,%d,%d] TR=(%d,%d,%d)",
                     T.rt[0], T.rt[1], T.rt[2],
                     T.rt[3], T.rt[4], T.rt[5],
@@ -583,20 +666,20 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
                     const int64_t cx = ((T.rt[0]*vx64 + T.rt[1]*vy64 + T.rt[2]*vz64) >> 12) + T.tr[0];
                     const int64_t cy = ((T.rt[3]*vx64 + T.rt[4]*vy64 + T.rt[5]*vz64) >> 12) + T.tr[1];
                     const int64_t cz = ((T.rt[6]*vx64 + T.rt[7]*vy64 + T.rt[8]*vz64) >> 12) + T.tr[2];
-                    emu::logf(emu::LogLevel::warn, "GPU3D",
+                    GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                         "  v[%d] cam=(%lld,%lld,%lld) -> UE(%.1f, %.1f, %.1f)",
                         j, (long long)cx, (long long)cy, (long long)cz,
                         TriPos[j].X, TriPos[j].Y, TriPos[j].Z);
                 }
 
                 // Screen coords from DrawCmd (should be dead-zone values for 3D)
-                emu::logf(emu::LogLevel::warn, "GPU3D",
+                GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                     "  screen=(%d,%d)(%d,%d)(%d,%d) color=(%d,%d,%d)",
                     Cmd.v[0].x, Cmd.v[0].y, Cmd.v[1].x, Cmd.v[1].y, Cmd.v[2].x, Cmd.v[2].y,
                     Cmd.v[0].r, Cmd.v[0].g, Cmd.v[0].b);
 
                 // Texture info
-                emu::logf(emu::LogLevel::warn, "GPU3D",
+                GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                     "  uv=(%d,%d)(%d,%d)(%d,%d) tp=0x%04X clut=0x%04X flags=0x%02X semi=%d tex=%d",
                     Cmd.v[0].u, Cmd.v[0].v, Cmd.v[1].u, Cmd.v[1].v, Cmd.v[2].u, Cmd.v[2].v,
                     Cmd.texpage, Cmd.clut, Cmd.flags, Cmd.semi_mode, Cmd.tex_depth);
@@ -604,20 +687,20 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             else
             {
                 // 2D triangle log
-                emu::logf(emu::LogLevel::warn, "GPU3D",
+                GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                     "=== 2D TRI[%d] frame=%u origin=%d ===",
                     Tri3DCount, DL.frame_id, (int)Cmd3D.origin);
 
                 for (int32 j = 0; j < 3; ++j)
                 {
                     const gpu::DrawVertex& V = Cmd.v[j];
-                    emu::logf(emu::LogLevel::warn, "GPU3D",
+                    GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                         "  v[%d] screen=(%d,%d) -> UE(%.1f, %.1f, %.1f) color=(%d,%d,%d) uv=(%d,%d)",
                         j, V.x, V.y, TriPos[j].X, TriPos[j].Y, TriPos[j].Z,
                         V.r, V.g, V.b, V.u, V.v);
                 }
 
-                emu::logf(emu::LogLevel::warn, "GPU3D",
+                GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                     "  origin2D=(%.1f,%.1f) tp=0x%04X clut=0x%04X flags=0x%02X semi=%d tex=%d",
                     OriginX, OriginY, Cmd.texpage, Cmd.clut, Cmd.flags, Cmd.semi_mode, Cmd.tex_depth);
             }
@@ -683,7 +766,7 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
         int32 TotalVerts = 0;
         for (const RunSection& R : Runs)
             TotalVerts += R.Vertices.Num();
-        UE_LOG(LogR3000Gpu3D, Warning,
+        GPU3D_NOISE_UELOG(Verbose,
             TEXT("GPU3D mesh: %d sections, %d verts, %d 3D tris, %d 2D skip, bSkip2D=%d"),
             NewNumSections, TotalVerts, Tri3DCount, Skip2DCount, bSkip2DElements ? 1 : 0);
     }
@@ -691,27 +774,27 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
     // Debug logging: frame summary with bounding box, display config, draw env
     if (bDebug3DLog)
     {
-        emu::logf(emu::LogLevel::warn, "GPU3D",
+        GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "======== FRAME %u SUMMARY ========", DL.frame_id);
-        emu::logf(emu::LogLevel::warn, "GPU3D",
+        GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "  Display: %dx%d (h_res=%d v_res=%d) enabled=%d pal=%d",
             DL.display.width(), DL.display.height(),
             DL.display.h_res, DL.display.v_res,
             DL.display.display_enabled ? 1 : 0, DL.display.is_pal ? 1 : 0);
-        emu::logf(emu::LogLevel::warn, "GPU3D",
+        GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "  DrawEnv: offset=(%d,%d) clip=(%d,%d)-(%d,%d) texpage=0x%08X",
             DL.draw_env.offset_x, DL.draw_env.offset_y,
             DL.draw_env.clip_x1, DL.draw_env.clip_y1,
             DL.draw_env.clip_x2, DL.draw_env.clip_y2,
             DL.draw_env.texpage_raw);
-        emu::logf(emu::LogLevel::warn, "GPU3D",
+        GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "  Origin2D=(%.1f,%.1f) WorldScale=%.3f WorldScale2D=%.3f EffScale2D=%.4f",
             OriginX, OriginY, WorldScale, WorldScale2D, EffScale2D);
-        emu::logf(emu::LogLevel::warn, "GPU3D",
+        GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "  Auto2D=%d DepthRange=[%.1f..%.1f] Last3D: X=[%.1f..%.1f] ExtY=%.1f",
             bAutoScale2D ? 1 : 0, EffDepthBack, EffDepthFront,
             Last3DMinX_, Last3DMaxX_, Last3DExtentY_);
-        emu::logf(emu::LogLevel::warn, "GPU3D",
+        GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "  Total: %d cmds, %d 3D tris, %d 2D skip, %d sections",
             Count, Tri3DCount, Skip2DCount, Runs.Num());
 
@@ -720,7 +803,7 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
         {
             const RunSection& Run = Runs[r];
             const bool bIs3DSec = (Run.MatIdx >= 5);
-            emu::logf(emu::LogLevel::warn, "GPU3D",
+            GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                 "  Section[%d]: mat=%d (%s) %d verts %d tris",
                 r, Run.MatIdx, bIs3DSec ? "3D" : "2D",
                 Run.Vertices.Num(), Run.Triangles.Num() / 3);
@@ -745,14 +828,16 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
             }
         }
         if (Cnt3D > 0)
-            emu::logf(emu::LogLevel::warn, "GPU3D",
+            GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                 "  BBox 3D: X=[%.1f..%.1f] Y=[%.1f..%.1f] Z=[%.1f..%.1f] (%d verts)",
                 Min3D[0], Max3D[0], Min3D[1], Max3D[1], Min3D[2], Max3D[2], Cnt3D);
         if (Cnt2D > 0)
-            emu::logf(emu::LogLevel::warn, "GPU3D",
+            GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
                 "  BBox 2D: X=[%.1f..%.1f] Y=[%.1f..%.1f] Z=[%.1f..%.1f] (%d verts)",
                 Min2D[0], Max2D[0], Min2D[1], Max2D[1], Min2D[2], Max2D[2], Cnt2D);
-        emu::logf(emu::LogLevel::warn, "GPU3D",
+        GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "======== END FRAME %u ========", DL.frame_id);
     }
 }
+
+

@@ -2674,7 +2674,7 @@ Cpu::StepResult Cpu::step()
         }
         return 1;
     };
-    auto store_u8 = [&](uint32_t vaddr, uint8_t v) -> int
+    auto store_u8 = [&](uint32_t vaddr, uint8_t v, uint32_t face_token = kNoFaceToken) -> int
     {
         Bus::MemFault f{};
         if (cache_isolated && is_cached_segment(vaddr))
@@ -2687,10 +2687,10 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
-        bus_.set_ram_face_token(paddr, kNoFaceToken);
+        bus_.set_ram_face_token(paddr, face_token);
         return 1;
     };
-    auto store_u16 = [&](uint32_t vaddr, uint16_t v) -> int
+    auto store_u16 = [&](uint32_t vaddr, uint16_t v, uint32_t face_token = kNoFaceToken) -> int
     {
         Bus::MemFault f{};
         if (cache_isolated && is_cached_segment(vaddr))
@@ -2703,7 +2703,7 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
-        bus_.set_ram_face_token(paddr, kNoFaceToken);
+        bus_.set_ram_face_token(paddr, face_token);
         return 1;
     };
     auto store_u32 = [&](uint32_t vaddr, uint32_t v, uint32_t face_token = kNoFaceToken) -> int
@@ -3704,6 +3704,7 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
+                next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
                 ld_valid = 1;
                 ld_op = "LB";
                 ld_reg = t;
@@ -3727,6 +3728,7 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
+                next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
                 ld_valid = 1;
                 ld_op = "LBU";
                 ld_reg = t;
@@ -3750,6 +3752,7 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
+                next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
                 ld_valid = 1;
                 ld_op = "LH";
                 ld_reg = t;
@@ -3773,6 +3776,7 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
+                next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
                 ld_valid = 1;
                 ld_op = "LHU";
                 ld_reg = t;
@@ -3785,7 +3789,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu)))
+                if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu), gpr_face_token_[t & 31u]))
                     break;
                 mem_valid = 1;
                 mem_op = "SB";
@@ -3799,7 +3803,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu)))
+                if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu), gpr_face_token_[t & 31u]))
                     break;
                 mem_valid = 1;
                 mem_op = "SH";
@@ -3841,6 +3845,7 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
+                next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(base));
                 ld_valid = 1;
                 ld_op = "LWL";
                 ld_reg = t;
@@ -3881,6 +3886,7 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
+                next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(base));
                 ld_valid = 1;
                 ld_op = "LWR";
                 ld_reg = t;
@@ -3914,7 +3920,7 @@ Cpu::StepResult Cpu::step()
                         w = v;
                         break;
                 }
-                store_u32(base, w);
+                store_u32(base, w, gpr_face_token_[t & 31u]);
                 break;
             }
         case 0x2E:
@@ -3944,7 +3950,7 @@ Cpu::StepResult Cpu::step()
                         w = (w & 0x00FFFFFFu) | (v << 24);
                         break;
                 }
-                store_u32(base, w);
+                store_u32(base, w, gpr_face_token_[t & 31u]);
                 break;
             }
         case 0x10:

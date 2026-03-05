@@ -65,7 +65,7 @@ class Gpu3D : public IGpu
         uint16_t x2, uint16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
         uint16_t x3, uint16_t y3, uint8_t r3, uint8_t g3, uint8_t b3, uint8_t u3, uint8_t v3,
         uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
-        PrimOrigin origin, uint32_t face_idx);
+        PrimOrigin origin, uint32_t face_idx, uint32_t face_idx_v3_hint = kNoFaceHint);
 
     // GP0 state machine
     enum class Gp0State : uint8_t

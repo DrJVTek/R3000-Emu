@@ -10,6 +10,15 @@ class UMaterialInstanceDynamic;
 
 namespace gpu { class Gpu; class Gpu3D; }
 
+UENUM(BlueprintType)
+enum class EGpu3DTrackingMode : uint8
+{
+    /** Legacy behavior: mesh follows component/owner transform (current behavior). */
+    LegacyFollowOwner UMETA(DisplayName = "Legacy Follow Owner"),
+    /** Detach mesh once and keep it fixed in world space (free roam around geometry). */
+    WorldLocked UMETA(DisplayName = "World Locked")
+};
+
 /**
  * PS1 GPU 3D reconstruction renderer.
  * Reads 3D data from the shadow GPU (Gpu3D) draw list which uses differential
@@ -59,6 +68,17 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D", meta = (ClampMin = "0.001", ClampMax = "10.0"))
     float WorldScale{0.1f};
 
+    /** Apply GTE transform (RT*V + TR) before UE mapping.
+     *  ON  = current behavior (camera-space reconstruction).
+     *  OFF = use raw GTE vertices directly (object/local space style). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
+    bool bApplyGteTransform{true};
+
+    /** Experimental: convert reconstructed camera-space to pseudo world-space
+     *  using a frame reference transform inverse. Keep OFF unless testing free-roam world anchoring. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
+    bool bApproxWorldFromFrameRef{false};
+
     /** Scale factor for 2D elements (HUD/UI) rendered in 3D space.
      *  PS1 screen coords are typically 0..320 × 0..240. 1.0 maps 1 PS1 pixel = 1 UE unit. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D", meta = (ClampMin = "0.001", ClampMax = "10.0"))
@@ -67,6 +87,10 @@ public:
     /** Offset for 3D geometry in UE world space (local to actor). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
     FVector WorldOffset{FVector::ZeroVector};
+
+    /** Mesh tracking mode. Keep Legacy to preserve old behavior, or use WorldLocked to freely move camera around mesh. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
+    EGpu3DTrackingMode TrackingMode{EGpu3DTrackingMode::LegacyFollowOwner};
 
     /** Skip 2D elements (HUD/UI) — only render GTE-correlated 3D geometry. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
@@ -164,4 +188,6 @@ private:
     float Last3DMinX_{0.0f};  // Min depth (UE X)
     float Last3DMaxX_{0.0f};  // Max depth (UE X)
     float Last3DExtentY_{0.0f}; // Horizontal extent (UE Y)
+
+    bool bMeshDetachedForWorldLock_{false};
 };
