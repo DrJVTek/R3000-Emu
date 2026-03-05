@@ -22,6 +22,8 @@ namespace gpu
 class Gpu3D : public IGpu
 {
   public:
+    static constexpr uint32_t kNoFaceHint = 0xFFFFFFFFu;
+
     Gpu3D();
 
     // Bind to shadow GTE for SXY→vertex lookup
@@ -30,6 +32,7 @@ class Gpu3D : public IGpu
     // IGpu interface
     void reset() override;
     void gp0(uint32_t word) override;
+    void gp0_with_face_hint(uint32_t word, uint32_t face_hint);
     void gp1(uint32_t word) override;
     void on_vblank() override;
     void set_ot_z(uint32_t z) override { current_ot_z_ = z; }
@@ -38,7 +41,7 @@ class Gpu3D : public IGpu
 
   private:
     // GP0 command processing
-    void gp0_start_command(uint32_t cmd_word);
+    void gp0_start_command(uint32_t cmd_word, uint32_t face_hint);
     void gp0_execute();
     void gp0_polygon();
     void gp0_fill_rect();
@@ -74,6 +77,7 @@ class Gpu3D : public IGpu
     };
     Gp0State gp0_state_{Gp0State::idle};
     uint32_t cmd_buf_[16]{};
+    uint32_t cmd_face_hint_[16]{};
     int cmd_buf_pos_{0};
     int cmd_words_needed_{0};
 

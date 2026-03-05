@@ -290,14 +290,17 @@ class Cpu
         int valid;
         uint32_t reg;
         uint32_t value;
+        uint32_t face_token;
     };
 
     void commit_pending_load();
 
     Bus& bus_;
     rlog::Logger* logger_{nullptr};
+    static constexpr uint32_t kNoFaceToken = 0xFFFFFFFFu;
 
     uint32_t gpr_[32]{};
+    uint32_t gpr_face_token_[32]{};
     uint32_t hi_{0};
     uint32_t lo_{0};
     uint32_t pc_{0};

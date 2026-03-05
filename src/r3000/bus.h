@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "../log/filelog.h"
 #include "../log/logger.h"
@@ -38,6 +39,7 @@ namespace r3000
 class Bus
 {
   public:
+    static constexpr uint32_t kNoFaceToken = 0xFFFFFFFFu;
     struct MemFault
     {
         enum class Kind
@@ -155,6 +157,10 @@ class Bus
     // Enable WAV output for audio debugging
     void enable_wav_output(const char* path);
 
+    // CPU->RAM->DMA face provenance (per-word token)
+    void set_ram_face_token(uint32_t paddr, uint32_t token);
+    uint32_t ram_face_token(uint32_t paddr) const;
+
   private:
     void dma_finish(int ch);
     bool is_in_ram(uint32_t addr, uint32_t size) const;
@@ -242,6 +248,7 @@ class Bus
     uint8_t scratch_[kScratchSize]{};
     uint8_t io_[kIoSize]{};
     uint8_t exp1_[kExp1Size]{};
+    std::vector<uint32_t> ram_face_tokens_{};
     uint32_t cache_ctrl_{0};
 
     // Minimal HW state (bring-up; non cycle-accurate, but explicit/observable)

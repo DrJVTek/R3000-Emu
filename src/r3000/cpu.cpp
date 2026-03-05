@@ -171,7 +171,7 @@ static int psx_is_mmio(uint32_t phys_addr)
 Cpu::Cpu(Bus& bus, rlog::Logger* logger) : bus_(bus), logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "CPU", "CPU source v7 (per_instr_cycles)");
+    emu::logf(emu::LogLevel::warn, "CPU", "CPU source v8 (face_token_flow)");
 }
 
 void Cpu::set_hle_vectors(int enabled)
@@ -184,7 +184,10 @@ void Cpu::reset(uint32_t reset_pc)
     // Reset minimal: on met tout à zéro et on positionne PC sur l'adresse de reset.
     // Dans une vraie PS1, le reset vector et certains registres auraient une valeur spécifique.
     for (int i = 0; i < 32; ++i)
+    {
         gpr_[i] = 0;
+        gpr_face_token_[i] = kNoFaceToken;
+    }
     hi_ = 0;
     lo_ = 0;
     pc_ = reset_pc;
@@ -211,6 +214,7 @@ void Cpu::reset(uint32_t reset_pc)
     pending_load_.valid = 0;
     pending_load_.reg = 0;
     pending_load_.value = 0;
+    pending_load_.face_token = kNoFaceToken;
 
     for (uint32_t i = 0; i < (uint32_t)icache_data_.size(); ++i)
     {
@@ -262,6 +266,7 @@ void Cpu::set_reg(uint32_t idx, uint32_t v)
     if ((idx & 31u) == 0u)
         return; // r0 = 0
     gpr_[idx & 31u] = v;
+    gpr_face_token_[idx & 31u] = kNoFaceToken;
 
     // R3000 load-delay cancellation: if the current instruction writes to the
     // same register targeted by a pending load delay, the load is cancelled.
@@ -487,7 +492,9 @@ void Cpu::commit_pending_load()
     // r0 ignore toujours les écritures.
     if ((pending_load_.reg & 31u) != 0u)
     {
-        gpr_[pending_load_.reg & 31u] = pending_load_.value;
+        const uint32_t reg = pending_load_.reg & 31u;
+        gpr_[reg] = pending_load_.value;
+        gpr_face_token_[reg] = pending_load_.face_token;
     }
 }
 
@@ -2448,6 +2455,7 @@ Cpu::StepResult Cpu::step()
     next_pending_load.valid = 0;
     next_pending_load.reg = 0;
     next_pending_load.value = 0;
+    next_pending_load.face_token = kNoFaceToken;
 
     // Sur MIPS, le PC avance "naturellement" de 4 (instructions 32-bit).
     // Les branches/jumps ne changent pas PC immédiatement: ils programment un target après le delay
@@ -2679,6 +2687,7 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
+        bus_.set_ram_face_token(paddr, kNoFaceToken);
         return 1;
     };
     auto store_u16 = [&](uint32_t vaddr, uint16_t v) -> int
@@ -2694,9 +2703,10 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
+        bus_.set_ram_face_token(paddr, kNoFaceToken);
         return 1;
     };
-    auto store_u32 = [&](uint32_t vaddr, uint32_t v) -> int
+    auto store_u32 = [&](uint32_t vaddr, uint32_t v, uint32_t face_token = kNoFaceToken) -> int
     {
         Bus::MemFault f{};
         if (cache_isolated && is_cached_segment(vaddr))
@@ -2709,7 +2719,29 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
+        bus_.set_ram_face_token(paddr, face_token);
         return 1;
+    };
+    auto decode_face_token_from_tagged_sxy = [&](uint32_t sxy) -> uint32_t
+    {
+        const uint16_t sx = (uint16_t)(sxy & 0xFFFFu);
+        const uint16_t sy = (uint16_t)(sxy >> 16);
+        if (sx < gte::Gte3D::DEAD_MIN || sx > gte::Gte3D::DEAD_MAX ||
+            sy < gte::Gte3D::DEAD_MIN || sy > gte::Gte3D::DEAD_MAX)
+            return kNoFaceToken;
+        if (sx == gte::Gte3D::REF_BASE || sy == gte::Gte3D::REF_BASE)
+            return kNoFaceToken;
+        const int dx = (int)sx - (int)gte::Gte3D::REF_BASE;
+        const int dy = (int)sy - (int)gte::Gte3D::REF_BASE;
+        if (dx < 0 || dy < 0)
+            return kNoFaceToken;
+        if ((dx % (int)gte::Gte3D::SPACING) != 0 || (dy % (int)gte::Gte3D::SPACING) != 0)
+            return kNoFaceToken;
+        const int lo = dx / (int)gte::Gte3D::SPACING;
+        const int hi = dy / (int)gte::Gte3D::SPACING;
+        if (lo < 0 || lo > 255 || hi < 0 || hi > 255)
+            return kNoFaceToken;
+        return (uint32_t)((hi << 8) | lo);
     };
 
     switch (opcode)
@@ -3440,6 +3472,7 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
+                next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
                 ld_valid = 1;
                 ld_op = "LW";
                 ld_reg = t;
@@ -3455,7 +3488,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u32(addr, gpr_[t]))
+                if (!store_u32(addr, gpr_[t], gpr_face_token_[t & 31u]))
                 {
                     // Exception déjà déclenchée (ADES). On sort.
                     break;
@@ -4000,17 +4033,16 @@ Cpu::StepResult Cpu::step()
                 if (rs_field == 0x00)
                 {
                     // MFC2: lecture data reg GTE -> CPU (avec load delay slot)
-                    // SXY regs 12-15: read from shadow GTE (tagged coords for 3D reconstruction).
-                    // This injects differential-encoded face indices into the game's SXY pipeline.
-                    // The primary GPU receives tagged coords (breaks 2D draw list positions),
-                    // but the shadow GPU decodes them to recover 3D face data.
-                    // TODO: replace with SXY correlation table to avoid corrupting primary GPU.
-                    const uint32_t v = (gte_shadow_ && d >= 12 && d <= 15)
-                        ? gte_shadow_->read_data(d)
-                        : gte_.read_data(d);
+                    // Cortex test: always read primary GTE (do not inject tagged coords in game path).
+                    const uint32_t v = gte_.read_data(d);
                     next_pending_load.valid = 1;
                     next_pending_load.reg = t;
                     next_pending_load.value = v;
+                    if (gte_shadow_ && d >= 12 && d <= 15)
+                    {
+                        const uint32_t tagged = gte_shadow_->read_data(d);
+                        next_pending_load.face_token = decode_face_token_from_tagged_sxy(tagged);
+                    }
                     ld_valid = 1;
                     ld_op = "MFC2";
                     ld_reg = t;
@@ -4023,6 +4055,7 @@ Cpu::StepResult Cpu::step()
                     next_pending_load.valid = 1;
                     next_pending_load.reg = t;
                     next_pending_load.value = v;
+                    next_pending_load.face_token = kNoFaceToken;
                     ld_valid = 1;
                     ld_op = "CFC2";
                     ld_reg = t;
@@ -4134,12 +4167,15 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr); // numéro de registre GTE (0..31)
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                // SXY regs 12-15: store from shadow GTE (tagged coords for 3D reconstruction).
-                // TODO: replace with SXY correlation table to avoid corrupting primary GPU.
-                const uint32_t v = (gte_shadow_ && t >= 12 && t <= 15)
-                    ? gte_shadow_->swc2(t)
-                    : gte_.swc2(t);
-                if (!store_u32(addr, v))
+                // Cortex test: always store primary GTE value to guest RAM.
+                const uint32_t v = gte_.swc2(t);
+                uint32_t face_token = kNoFaceToken;
+                if (gte_shadow_ && t >= 12 && t <= 15)
+                {
+                    const uint32_t tagged = gte_shadow_->swc2(t);
+                    face_token = decode_face_token_from_tagged_sxy(tagged);
+                }
+                if (!store_u32(addr, v, face_token))
                 {
                     break;
                 }

@@ -45,10 +45,11 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v25 (timer_refactor)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v26 (face_token_flow)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
+    ram_face_tokens_.assign((ram_size_ + 3u) / 4u, kNoFaceToken);
 
     // Create SPU
     spu_ = new audio::Spu();
@@ -106,6 +107,22 @@ Bus::~Bus()
 uint32_t Bus::ram_size() const
 {
     return ram_size_;
+}
+
+void Bus::set_ram_face_token(uint32_t paddr, uint32_t token)
+{
+    if (ram_face_tokens_.empty() || ram_size_ == 0)
+        return;
+    const uint32_t phys = paddr & (ram_size_ - 1u);
+    ram_face_tokens_[(phys >> 2) % ram_face_tokens_.size()] = token;
+}
+
+uint32_t Bus::ram_face_token(uint32_t paddr) const
+{
+    if (ram_face_tokens_.empty() || ram_size_ == 0)
+        return kNoFaceToken;
+    const uint32_t phys = paddr & (ram_size_ - 1u);
+    return ram_face_tokens_[(phys >> 2) % ram_face_tokens_.size()];
 }
 
 bool Bus::is_in_ram(uint32_t addr, uint32_t size) const
@@ -904,6 +921,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     {
         const uint32_t mp = phys & (ram_size_ - 1);
         ram_[mp] = v;
+        set_ram_face_token(mp, kNoFaceToken);
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1042,6 +1060,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         const uint32_t mp1 = (phys + 1u) & rm;
         ram_[mp0] = (uint8_t)(v & 0xFF);
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
+        set_ram_face_token(mp0, kNoFaceToken);
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1204,6 +1223,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
         ram_[mp2] = (uint8_t)((v >> 16) & 0xFF);
         ram_[mp3] = (uint8_t)((v >> 24) & 0xFF);
+        set_ram_face_token(mp0, kNoFaceToken);
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1295,7 +1315,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                                  ((uint32_t)ram_[ma + 2] << 16) |
                                                  ((uint32_t)ram_[ma + 3] << 24);
                                     gpu_->mmio_write32(kGpuBase, w);
-                                    if (gpu_3d_) gpu_3d_->gp0(w);
+                                    if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, ram_face_token(ma));
                                     ma = (ma + 4) & 0x1FFFFF;
                                 }
                             }
@@ -1340,7 +1360,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                                      ((uint32_t)ram_[off2 + 2] << 16) |
                                                      ((uint32_t)ram_[off2 + 3] << 24);
                                         gpu_->mmio_write32(kGpuBase, w);
-                                        if (gpu_3d_) gpu_3d_->gp0(w);
+                                        if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, ram_face_token(off2));
                                     }
                                     if ((header & 0x00FFFFFF) == 0x00FFFFFF)
                                         break;
@@ -1530,7 +1550,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         if (gpu_3d_)
         {
             if (phys == kGpuBase)
-                gpu_3d_->gp0(v);
+                gpu_3d_->gp0_with_face_hint(v, kNoFaceToken);
             else
                 gpu_3d_->gp1(v);
         }

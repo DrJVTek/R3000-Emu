@@ -100,12 +100,19 @@ void Gpu3D::reset()
     draw_active_ = 0;
     draw_lists_[0].clear();
     draw_lists_[1].clear();
+    for (int i = 0; i < 16; ++i)
+        cmd_face_hint_[i] = kNoFaceHint;
 }
 
 // ---------------------------------------------------------------------------
 // GP0 entry point
 // ---------------------------------------------------------------------------
 void Gpu3D::gp0(uint32_t word)
+{
+    gp0_with_face_hint(word, kNoFaceHint);
+}
+
+void Gpu3D::gp0_with_face_hint(uint32_t word, uint32_t face_hint)
 {
     ++gp0_words_accum_;
 
@@ -148,7 +155,7 @@ void Gpu3D::gp0(uint32_t word)
             if (term_c && !term_a && !term_b)
             {
                 ++gp0_cmds_accum_;
-                gp0_start_command(word);
+                gp0_start_command(word, kNoFaceHint);
             }
         }
         return;
@@ -158,7 +165,10 @@ void Gpu3D::gp0(uint32_t word)
     if (gp0_state_ == Gp0State::collecting_params)
     {
         if (cmd_buf_pos_ < 16)
+        {
             cmd_buf_[cmd_buf_pos_++] = word;
+            cmd_face_hint_[cmd_buf_pos_ - 1] = face_hint;
+        }
 
         if (cmd_buf_pos_ >= cmd_words_needed_)
         {
@@ -171,18 +181,19 @@ void Gpu3D::gp0(uint32_t word)
 
     // Idle: new command
     ++gp0_cmds_accum_;
-    gp0_start_command(word);
+    gp0_start_command(word, face_hint);
 }
 
 // ---------------------------------------------------------------------------
 // GP0 start command
 // ---------------------------------------------------------------------------
-void Gpu3D::gp0_start_command(uint32_t cmd_word)
+void Gpu3D::gp0_start_command(uint32_t cmd_word, uint32_t face_hint)
 {
     const uint8_t cmd = (uint8_t)(cmd_word >> 24);
     const int params = gp0_param_count(cmd);
 
     cmd_buf_[0] = cmd_word;
+    cmd_face_hint_[0] = face_hint;
     cmd_buf_pos_ = 1;
 
     if (params == 0)
@@ -296,6 +307,7 @@ void Gpu3D::gp0_polygon()
     const int nverts = quad ? 4 : 3;
 
     uint16_t raw_x[4], raw_y[4];
+    uint32_t face_hints[4] = {kNoFaceHint, kNoFaceHint, kNoFaceHint, kNoFaceHint};
     uint8_t cr[4], cg[4], cb[4];
     uint8_t tu[4] = {}, tv[4] = {};
     uint16_t clut = 0, texpage_attr = 0;
@@ -321,6 +333,7 @@ void Gpu3D::gp0_polygon()
 
         raw_x[i] = (uint16_t)(cmd_buf_[idx] & 0xFFFFu);
         raw_y[i] = (uint16_t)(cmd_buf_[idx] >> 16);
+        face_hints[i] = cmd_face_hint_[idx];
         idx++;
 
         if (textured)
@@ -343,10 +356,29 @@ void Gpu3D::gp0_polygon()
     if (textured)
         draw_env_.texpage_raw = (draw_env_.texpage_raw & ~0x7FFu) | (texpage_attr & 0x7FFu);
 
-    // Decode face_idx from differential encoding BEFORE splitting into triangles.
-    // For quads: use all 4 vertices (3 carriers + 1 reference) with majority vote.
-    // For tris: use 3 vertices (2 carriers + 1 reference) with consistency check.
+    // Cortex test: strict token path (no differential decode fallback).
     uint32_t face_idx = 0xFFFFFFFFu;
+    {
+        // Majority vote on per-vertex hints.
+        uint32_t best = kNoFaceHint;
+        int best_count = 0;
+        for (int i = 0; i < nverts; ++i)
+        {
+            const uint32_t h = face_hints[i];
+            if (h == kNoFaceHint)
+                continue;
+            int c = 0;
+            for (int j = 0; j < nverts; ++j)
+                if (face_hints[j] == h)
+                    ++c;
+            if (c > best_count)
+            {
+                best_count = c;
+                best = h;
+            }
+        }
+        face_idx = best;
+    }
 
     // --- 3D decode diagnostic (log first 5 polygons per frame + transitions) ---
     static uint32_t diag_frame = 0xFFFFFFFFu;
@@ -371,21 +403,15 @@ void Gpu3D::gp0_polygon()
 
     if (quad)
     {
-        face_idx = decode_face_quad(raw_x[0], raw_y[0], raw_x[1], raw_y[1],
-            raw_x[2], raw_y[2], raw_x[3], raw_y[3]);
-
-        // Diagnostic: log raw coords + decode result for first few polys
+        // Diagnostic: log raw coords + selected face token for first few polys
         if (diag_poly_in_frame < 5 && (frame_count_ < 5 || (frame_count_ % 300) == 0))
         {
             emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
-                "  QUAD[%u] raw=(%u,%u)(%u,%u)(%u,%u)(%u,%u) dz=(%d%d%d%d/%d%d%d%d) fi=0x%X",
+                "  QUAD[%u] raw=(%u,%u)(%u,%u)(%u,%u)(%u,%u) hints=(0x%X,0x%X,0x%X,0x%X) fi=0x%X",
                 diag_poly_in_frame,
                 raw_x[0], raw_y[0], raw_x[1], raw_y[1],
                 raw_x[2], raw_y[2], raw_x[3], raw_y[3],
-                in_dead_zone(raw_x[0]), in_dead_zone(raw_x[1]),
-                in_dead_zone(raw_x[2]), in_dead_zone(raw_x[3]),
-                in_dead_zone(raw_y[0]), in_dead_zone(raw_y[1]),
-                in_dead_zone(raw_y[2]), in_dead_zone(raw_y[3]),
+                face_hints[0], face_hints[1], face_hints[2], face_hints[3],
                 face_idx);
         }
 
@@ -398,17 +424,13 @@ void Gpu3D::gp0_polygon()
     }
     else
     {
-        face_idx = decode_face_tri(raw_x[0], raw_y[0], raw_x[1], raw_y[1],
-            raw_x[2], raw_y[2]);
-
         if (diag_poly_in_frame < 5 && (frame_count_ < 5 || (frame_count_ % 300) == 0))
         {
             emu::logf(emu::LogLevel::warn, "GPU3D_DIAG",
-                "  TRI[%u] raw=(%u,%u)(%u,%u)(%u,%u) dz=(%d%d%d/%d%d%d) fi=0x%X",
+                "  TRI[%u] raw=(%u,%u)(%u,%u)(%u,%u) hints=(0x%X,0x%X,0x%X) fi=0x%X",
                 diag_poly_in_frame,
                 raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2],
-                in_dead_zone(raw_x[0]), in_dead_zone(raw_x[1]), in_dead_zone(raw_x[2]),
-                in_dead_zone(raw_y[0]), in_dead_zone(raw_y[1]), in_dead_zone(raw_y[2]),
+                face_hints[0], face_hints[1], face_hints[2],
                 face_idx);
         }
 
