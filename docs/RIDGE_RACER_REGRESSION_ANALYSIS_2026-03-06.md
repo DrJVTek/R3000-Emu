@@ -31,6 +31,29 @@ Les iterations suivantes ont ajoute beaucoup de logique d'analyse et de cache (C
 
 Conclusion: l'echec est structurel et localise sur des routines CPU precises de construction OT/pack de commandes GPU.
 
+## Cas "drapeau" (Ridge Racer) - analyse breakpoint
+
+Objectif: comprendre pourquoi une partie des polygons du drapeau/menu apparait manquante/decalee alors qu'un etat precedent etait visuellement meilleur.
+
+### Observation A - les memes hotspots nohint pilotent aussi le cas drapeau
+
+- Les breakpoints/hotspots DMA2 montrent les memes PCs dominants sur les phases ou le drapeau est defectueux:
+  - `0x80026544`, `0x80026530`, `0x8002651C`, `0x8002650C`
+  - `0x80025EA8`, `0x80025E90`
+- Ces PCs sont deja en `ANALYZED_PC` dans le profil, mais l'analyse refresh n'ajoute aucune regle nouvelle (`added_pcs=0`).
+- Effet concret: les triangles "orphelins" restent en 2D fallback (`miss_no_hint` / `miss_decode_fail`), donc le drapeau perd des morceaux 3D attendus.
+
+### Observation B - regression secondaire 2D dans le pipeline UE5 GPU3D
+
+- Dans `Gpu3D`, les coords 2D stockees dans `DrawCmd` sont maintenant `se11(raw)` sans draw offset.
+- Mais dans `R3000Gpu3DComponent`, le filtre "clear rectangle" soustrait encore `draw_env.offset_x` en supposant que l'offset est bake dans `Cmd.v`.
+- Cette incoherence peut faire skipper des triangles non-clear (faux positifs), surtout sur les scenes 2D/HUD.
+- Le composant 2D de reference (`R3000GpuComponent`) n'applique pas ce filtre agressif et n'a pas ce couplage offset.
+
+Conclusion cas drapeau:
+- Cause principale: nohint structurel sur routines OT pack (meme probleme que la course).
+- Cause aggravante: regression locale du filtre clear-rect dans `Gpu3DComponent` apres changement de convention des coords 2D.
+
 ## Ce qui a ete ajoute (resume)
 
 - Pipeline token flow COP2->RAM->DMA2->Gpu3D.
