@@ -39,3 +39,12 @@ bios/*.rom
 # temp debug files
 nul
 *.wav
+
+# UE5 plugin generated artifacts (R3000Emu <-> PSXVR)
+integrations/ue5/R3000Emu/Binaries/
+integrations/ue5/R3000Emu/Intermediate/
+integrations/ue5/R3000Emu/Saved/
+
+# UE hot-reload patch outputs (can appear in Binaries/Win64)
+integrations/ue5/R3000Emu/**/*.patch_*.*
+integrations/ue5/R3000Emu/**/UnrealEditor*.modules

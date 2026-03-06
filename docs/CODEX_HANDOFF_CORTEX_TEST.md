@@ -18,6 +18,148 @@ Flux cible:
 ### Branche
 - Branche locale creee: `cortex-test`
 
+### Mise a jour recente (generic auto-adapt)
+
+20. `Psx3dModeManager` + modes runtime
+- Fichiers:
+  - `src/emu/psx3d_mode_manager.h`
+  - `src/emu/psx3d_mode_manager.cpp`
+- Integration `Core`:
+  - mode `game|analysis`
+  - autorisation d'analyse ON/OFF
+  - file de requetes refresh (`reason/scope`)
+- CLI:
+  - `--psx3d-mode=game|analysis`
+  - `--psx3d-analysis=0|1`
+  - `--psx3d-refresh=reason:scope`
+
+21. Stats miss decode GPU3D clarifiees
+- `src/gpu/gpu_3d.cpp/.h`:
+  - compteurs ajoutes:
+    - `miss_no_hint`
+    - `miss_hint_stale`
+    - `miss_decode_fail`
+- Diagnostic: sur les logs user, les trous viennent majoritairement de `miss_no_hint`
+  (pas d'indice token en amont), pas d'un cache stale.
+
+22. Tracage causal DMA2 nohint par PC ecrivain RAM
+- `src/r3000/bus.h/.cpp`:
+  - stockage writer PC par mot RAM (`ram_face_writer_pc_`)
+  - au DMA2 GPU: si token absent, histogramme par writer PC
+  - resume VBlank consommable via API:
+    - `consume_dma2_nohint_summary(...)`
+    - struct `Dma2NoHintSummary { vblank, nohint_words, top_pcs }`
+  - logs `DMA2_NOHINT` top PCs
+
+23. Profiler generic des hotspots (auto refresh)
+- Fichiers:
+  - `src/emu/provenance_hotspot_profiler.h`
+  - `src/emu/provenance_hotspot_profiler.cpp`
+- Integration `Core::step()`:
+  - ingest des `Dma2NoHintSummary`
+  - decision generique avec cooldown
+  - auto queue d'une requete refresh:
+    - reason=`auto_hotspot`
+    - scope=`pc=0xXXXXXXXX`
+
+24. Build chain
+- `CMakeLists.txt` maj:
+  - ajout `src/emu/provenance_hotspot_profiler.cpp` dans `CORE_SOURCES`
+- Build verifie:
+  - `cmake -S . -B build`
+  - `cmake --build build --config Debug -j 8` OK
+
+25. Persistance profil analyse par jeu (evite de refaire l'analyse)
+- Nouveaux fichiers:
+  - `src/emu/psx3d_profile_store.h`
+  - `src/emu/psx3d_profile_store.cpp`
+- Profil persiste:
+  - hotspots provenance (`pc`, `total_words`, `last_seen_vblank`, `last_refresh_vblank`)
+- Format fichier:
+  - texte V1 (`PSX3D_PROFILE_V1`) simple et diffable
+- Emplacement:
+  - `profiles/psx3d/<game>.psx3dprof`
+- Identification jeu:
+  - derivee du nom de fichier du `--cd` (via `insert_disc`) ou du `--load` EXE (via `fast_boot_from_exe`)
+- Integration Core:
+  - autoload du profil quand identity connue
+  - dirty flag quand nouvelles stats analyse ingerees
+  - autosave periodique (toutes 600 VBlank si dirty)
+  - save final en destructor `Core` (fin de session)
+
+26. Override explicite du profil (UE component)
+- Core:
+  - API ajoutee: `set_psx3d_profile_path_override(const char* path)`
+  - lock override: l'identity auto (`insert_disc`/`fast_boot_from_exe`) n'ecrase plus ce path
+- UE5:
+  - `UR3000EmuComponent` expose:
+    - `UPROPERTY FString Psx3dProfilePath` (Category `R3000Emu|PSX3D`)
+  - `InitEmulator()` applique l'override au `Core` avant boot/init.
+
+27. Cycle auto "analyse -> save -> game" (sans rester bloque en analyse)
+- `src/emu/core.cpp/.h`
+  - ajout set `psx3d_analyzed_pcs_` persiste dans le profil
+  - refresh analyse:
+    - marque les PCs scopes comme "deja analyses"
+    - applique cooldown profiler (`ack_refresh`)
+    - `try_save_psx3d_profile()`
+    - retour auto `mode=game` apres pass refresh
+  - detection runtime:
+    - si hotspot DMA2 nouveau PC -> bascule auto en `analysis` + refresh queue
+    - si PC deja analyse -> cooldown seulement (pas de spam refresh)
+- `src/emu/psx3d_profile_store.h/.cpp`
+  - format profil etendu:
+    - `ANALYZED_PC 0xXXXXXXXX`
+  - chargement/sauvegarde des PCs analyses.
+
+28. Tracker generique "camera root RAM" (premiere passe)
+- `src/r3000/cpu.h/.cpp`
+  - nouveau tracking quand `analysis_enabled=1`:
+    - memorise l'origine memoire recente des registres CPU (loads)
+    - observe `MTC2` vers regs GTE `0..11` (RT/TR matrix inputs)
+    - corrèle source registre -> adresse RAM candidate
+  - sorties logs periodiques:
+    - tag `CAM_ROOT`
+    - top adresses candidates avec `frame_hits`, `hits`, masque regs GTE touches, `last_pc`
+- `src/emu/core.cpp`
+  - propagation de `analysis_enabled` vers CPU:
+    - `cpu_->set_camera_analysis_enabled(...)`
+
+29. Persistance des candidates camera dans `.psx3dprof`
+- `src/emu/psx3d_profile_store.h/.cpp`
+  - nouveau bloc profile:
+    - `CAM 0xADDR HITS FRAME_HITS FIRST_VBL LAST_VBL 0xLAST_PC 0xREGMASK`
+  - load/save trie par `frame_hits` puis `hits`.
+- `src/r3000/cpu.h/.cpp`
+  - API snapshot/restore:
+    - `camera_candidates_snapshot()`
+    - `restore_camera_candidates(...)`
+    - `camera_candidates_serial()`
+- `src/emu/core.cpp`
+  - serialize/deserialize camera candidates via `Psx3dProfileData`
+  - dirty flag profile declenche seulement si serial camera change.
+
+30. Correctif auto-analyse (logs user 2026-03-06)
+- Probleme observe:
+  - refresh `high_fallback_2d` faisait `added_pcs=0` car scope non pris en charge.
+- Fix:
+  - `run_psx3d_analysis_refresh(...)`:
+    - pour scopes non `pc=...`/`global`, prend maintenant les top hotspots du profiler
+      (budget 32) et les marque analyses + cooldown.
+- Bruit camera:
+  - top CAM_ROOT etait pollue par `0x1F800xxx` (scratchpad), pas la vraie RAM jeu.
+- Fix:
+  - tracker camera filtre desormais `addr < ram_size` (RAM principale uniquement)
+    en observe + restore profil.
+
+### Note importante
+- Le systeme est maintenant structure pour etre **generique** (pas hardcode Ridge Racer):
+  - collecte causale par PC runtime
+  - detection hotspots dynamique
+  - refresh analyse declenche automatiquement
+- La phase suivante reste l'analyse plus profonde "call-aware" (trace inter-procedurale)
+  pour convertir ces hotspots en regles de provenance stables multi-jeux.
+
 ### Modifs deja faites
 
 1. `src/r3000/bus.h`
@@ -175,6 +317,33 @@ Flux cible:
   - `src/gpu/gpu_3d.h`
   - `src/gpu/gpu_3d.cpp`
 
+18. Instrumentation minimale "trous polygons" (GPU3D_VBLANK)
+- Ajout compteurs per-frame (reset a chaque VBlank):
+  - `tok_hint`: polygons avec au moins un hint token
+  - `tok_miss`: polygons sans hint exploitable
+  - `tok_cached`: polygons avec hint resolu en face cache
+  - `v3_hint`: quads dont `face_B` a ete resolu via hint explicite V3
+- Log ajoute dans `GPU3D_VBLANK`:
+  - `... quad_hit=.. quad_miss=.. tok_hint=.. tok_miss=.. tok_cached=.. v3_hint=..`
+- Fichiers:
+  - `src/gpu/gpu_3d.h`
+  - `src/gpu/gpu_3d.cpp`
+
+19. Nouvelle classe CPU: `CpuProvenanceAnalyzer` (cache par PC)
+- But:
+  - sortir la logique "bidouille" de propagation token hors de `Cpu::step()`
+  - analyser une fois par PC puis reutiliser une regle (plus propre/perf)
+- Fichiers ajoutes:
+  - `src/r3000/cpu_provenance_analyzer.h`
+  - `src/r3000/cpu_provenance_analyzer.cpp`
+- Integration:
+  - membre `provenance_analyzer_` ajoute dans `Cpu`
+  - `step()` appelle `apply_cached_provenance()` pour les ops move-like:
+    - `SLL sh=0`, `ADDU`, `SUBU`, `OR`, `ADDIU imm=0`, `ORI imm=0`
+  - regle deduite et cachee par PC, puis token derive de rs/rt selon regle
+- Build:
+  - `cmake --build build -j 4` OK
+
 12. Mode camera/mesh dans `R3000Gpu3DComponent`
 - Ajout `TrackingMode` (enum):
   - `LegacyFollowOwner` (defaut, comportement actuel)
@@ -260,9 +429,154 @@ Ne pas reset hard.
 
 ## Intention technique (rappel)
 
-Ce prototype vise un chemin deterministic "token flow" pour Ridge Racer:
+Ce prototype vise un chemin deterministic "token flow" 100% generique (tous jeux PS1):
+- lien GTE->CPU->RAM->DMA2->GPU resolu de maniere causale, pas specifique a un jeu
 - pas de dependance principale au decode des coordonnees taggees
-- pas de fallback heuristique pour ce test
+- pas de fallback heuristique en mode normal
+- Ridge Racer est utilise uniquement comme cas de validation/repro, pas comme cible unique
 
 Si le hit rate token est insuffisant, la prochaine iteration devra etendre la propagation
 token sur davantage d'instructions de copie/transfo CPU.
+
+17. Refactor propre: analyse provenance CPU centralisee (nouvelle classe)
+- Ajout d'une classe dediee:
+  - `src/r3000/cpu_provenance_analyzer.h`
+  - `src/r3000/cpu_provenance_analyzer.cpp`
+- Integration:
+  - `src/r3000/cpu.h`: membre `CpuProvenanceAnalyzer provenance_analyzer_{}`
+  - `CMakeLists.txt`: compile `cpu_provenance_analyzer.cpp`
+- Principe:
+  - cache par `PC` d'une regle de propagation de token (evite de re-analyser chaque fois)
+  - regles initiales: `SLL shamt=0`, `ADDU` avec registre zero, `SUBU rt=0`,
+    `OR` avec zero/meme registre, `ADDIU imm=0`, `ORI imm=0`
+- Nettoyage CPU step:
+  - suppression des appels ad-hoc `apply_cached_provenance(...)` dans les opcodes
+  - application UNIQUE apres decode/execute, basee sur `wb_valid/wb_reg`
+  - le token est applique seulement si regle valide et destination != r0
+- Fichier impacte:
+  - `src/r3000/cpu.cpp`
+- Build:
+  - `cmake --build build -j 4` OK
+- Objectif:
+  - rendre la logique de "bidouille" d'analyse plus propre, extensible et optimisable
+  - preparer les prochaines regles sans polluer le switch opcode principal
+
+18. Extension des regles de provenance (iteration perf/coverage)
+- Fichier:
+  - `src/r3000/cpu_provenance_analyzer.cpp`
+- Nouvelles regles:
+  - `ADDU` -> `merge_rs_rt` (propage si un seul cote est tokenise, ou si les 2 tokens sont egaux)
+  - `OR` -> `merge_rs_rt`
+  - `XOR` -> `merge_rs_rt`
+  - `SUBU` -> `copy_rs_if_rt_none`
+  - `ADDIU` -> `copy_rs` (plus seulement `imm==0`)
+- Intention:
+  - mieux suivre les tables d'index/offsets dans les boucles CPU avant emission GPU
+  - conserver une politique conservative: si conflit de tokens (rs != rt), on n'infere pas
+- Build:
+  - `cmake --build build -j 4` OK
+
+19. Recuperation 3D sans token face via table SXY->vertex (Gpu3D)
+- Constat:
+  - `tok_miss` restait stable a 248 (frames 540/600/660), donc les regles CPU seules ne suffisent pas.
+- Implementation:
+  - `src/gpu/gpu_3d.cpp`:
+    - ajout fallback "vertex lookup" dans `push_triangle` et `push_quad`
+    - si `face_idx` absent/invalide:
+      - lookup de chaque vertex via `gte_3d_->lookup_by_sxy(pack(x,y))`
+      - validation: les vertices trouves doivent partager la meme transform
+      - si ok: on remplit `DrawCmd3D` directement depuis `GteCacheVertex`
+  - `src/gpu/gpu_3d.h`:
+    - nouveaux compteurs: `vtx_lookup_hits_`, `vtx_lookup_misses_`
+  - logs vblank:
+    - ajout `vtx_hit` / `vtx_miss` dans `[GPU3D_VBLANK]`
+- Intention:
+  - couvrir les polygons 3D qui ne portent pas de token face exploitable, en utilisant
+    une correspondance directe 2D->3D deja maintenue dans GTE3D.
+- Build:
+  - `cmake --build build -j 4` OK
+
+20. Integration du contexte d'appels dans l'analyse CPU (cache par PC+call)
+- Motivation:
+  - meme code (meme PC) peut etre execute depuis des callsites differents avec des flux
+    de donnees differents; un cache par PC seul melange ces cas.
+- Changements:
+  - `src/r3000/cpu_provenance_analyzer.h/.cpp`
+    - `infer_reg_token(pc, call_ctx, instr, reg_tokens)`
+    - cle de cache: `(call_ctx << 32) | pc`
+  - `src/r3000/cpu.h`
+    - ajout etat call-context:
+      - `call_ctx_hash_`
+      - `call_ctx_stack_[64]`
+      - `call_ctx_sp_`
+  - `src/r3000/cpu.cpp`
+    - reset du call-context dans `Cpu::reset()`
+    - push call-context sur:
+      - `JAL`
+      - `JALR`
+      - `BLTZAL/BGEZAL` quand branch prise
+    - pop call-context sur:
+      - `JR ra`
+    - propagation token centralisee utilise maintenant `call_ctx_hash_`
+- Build:
+  - `cmake --build build -j 4` OK
+
+21. Outil d'analyse GPU3D: decomposition des misses token (sans fallback)
+- Objectif:
+  - identifier exactement OU casse le lien GTE->GPU, sans masquer via rendu fallback.
+- Changements:
+  - `src/gpu/gpu_3d.h/.cpp`
+    - nouveaux compteurs:
+      - `miss_no_hint`: aucun hint token dans le packet polygon
+      - `miss_hint_stale`: hint present mais absent du cache face (token stale)
+      - `miss_decode_fail`: decode fallback n'a pas produit de face_idx valide
+    - ajout dans log `[GPU3D_VBLANK]` de ces 3 colonnes
+- Build:
+  - `cmake --build build -j 4` OK
+
+22. Squelette runtime "mode game / mode analysis" + refresh a la demande
+- Nouvelles classes:
+  - `src/emu/psx3d_mode_manager.h`
+  - `src/emu/psx3d_mode_manager.cpp`
+- Integration Core:
+  - `src/emu/core.h/.cpp`
+  - API exposee:
+    - `set_psx3d_mode(Psx3dRunMode)`
+    - `set_psx3d_analysis_enabled(bool)`
+    - `request_psx3d_analysis_refresh(reason, scope)`
+    - getters `psx3d_mode()/psx3d_analysis_active()`
+- Comportement actuel:
+  - gestion d'etat centralisee (game vs analysis + autorisation)
+  - file d'attente simple d'une requete refresh
+  - hook runtime non-intrusif dans `Core::step()`:
+    - consomme la requete et log l'evenement (placeholder pour futur analyseur)
+- Build:
+  - `CMakeLists.txt` ajoute `src/emu/psx3d_mode_manager.cpp`
+
+23. CLI smoke-test + flags PSX3D
+- `cli/main.cpp`:
+  - nouveaux flags:
+    - `--psx3d-mode=game|analysis`
+    - `--psx3d-analysis=0|1`
+    - `--psx3d-refresh=reason:scope`
+- Test execute:
+  - `.\lib\Debug\r3000_emu.exe --max-steps=2 --psx3d-analysis=1 --psx3d-mode=analysis --psx3d-refresh=manual:global`
+  - Logs verifies:
+    - `analysis_enabled=1`
+    - `mode=analysis`
+    - `refresh queued ...`
+    - `analysis refresh request ...` consommee dans `Core::step()`
+
+24. Trace causale des `miss_no_hint` (DMA2 -> dernier writer PC)
+- Objectif:
+  - identifier les chemins CPU qui produisent les mots GP0 sans token.
+- `src/r3000/bus.h/.cpp`:
+  - ajoute meta par mot RAM:
+    - `ram_face_writer_pc_`
+    - accessor `ram_face_writer_pc(paddr)`
+  - `set_ram_face_token(...)` enregistre aussi `cpu_pc_` comme dernier writer
+  - pendant DMA2 (block + linked-list), pour chaque mot envoye au GPU:
+    - si token absent (`kNoFaceToken`), incremente histogramme par writer PC
+  - a VBlank: log `DMA2_NOHINT` avec top PCs responsables, puis reset histogramme
+- Build:
+  - `cmake --build build -j 4` OK

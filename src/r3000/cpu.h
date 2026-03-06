@@ -3,12 +3,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <array>
+#include <unordered_map>
+#include <vector>
 
 #include "../log/filelog.h"
 #include "../gte/gte.h"
 #include "../gte/gte_3d.h"
 #include "../log/logger.h"
 #include "bus.h"
+#include "cpu_provenance_analyzer.h"
 
 namespace r3000
 {
@@ -120,6 +123,20 @@ class Cpu
 
     // Shadow GTE for differential tag encoding (3D reconstruction)
     void set_gte_shadow(gte::Gte3D* g) { gte_shadow_ = g; }
+    void set_camera_analysis_enabled(int enabled) { camera_analysis_enabled_ = enabled ? 1 : 0; }
+    struct CameraCandidateSnapshot
+    {
+        uint32_t addr{0};
+        uint32_t hits{0};
+        uint32_t frame_hits{0};
+        uint32_t first_vblank{0};
+        uint32_t last_vblank{0};
+        uint32_t last_pc{0};
+        uint32_t gte_reg_mask{0};
+    };
+    std::vector<CameraCandidateSnapshot> camera_candidates_snapshot() const;
+    void restore_camera_candidates(const std::vector<CameraCandidateSnapshot>& in);
+    uint64_t camera_candidates_serial() const { return camera_candidates_serial_; }
 
     // Debug: fichier de sortie texte (BIOS putc / syscalls "write-like" / etc).
     // Objectif: avoir un "console.log" séparé et facile à relire pendant le live.
@@ -291,9 +308,13 @@ class Cpu
         uint32_t reg;
         uint32_t value;
         uint32_t face_token;
+        uint32_t mem_paddr;
+        int from_mem;
     };
 
     void commit_pending_load();
+    void observe_camera_mtc2(uint32_t pc, uint32_t gte_data_reg, uint32_t cpu_src_reg);
+    void maybe_log_camera_candidates();
 
     Bus& bus_;
     rlog::Logger* logger_{nullptr};
@@ -301,6 +322,9 @@ class Cpu
 
     uint32_t gpr_[32]{};
     uint32_t gpr_face_token_[32]{};
+    uint32_t reg_last_mem_addr_[32]{};
+    uint32_t reg_last_mem_vblank_[32]{};
+    uint8_t reg_last_mem_valid_[32]{};
     uint32_t hi_{0};
     uint32_t lo_{0};
     uint32_t pc_{0};
@@ -346,6 +370,25 @@ class Cpu
     uint32_t last_instr_cycles_{1}; // raw cycles set during instruction execution
     uint32_t last_multiplied_cycles_{2}; // last_instr_cycles_ * cycle_multiplier_ (returned by last_cycles())
     uint32_t gte_corr_diag_count_{0}; // diagnostic: limit GTE correlation debug logs
+    CpuProvenanceAnalyzer provenance_analyzer_{};
+    uint32_t call_ctx_hash_{0};
+    uint32_t call_ctx_stack_[64]{};
+    uint8_t call_ctx_sp_{0};
+    int camera_analysis_enabled_{0};
+    uint32_t camera_last_vblank_seen_{0};
+    uint32_t camera_last_log_vblank_{0};
+    uint64_t camera_candidates_serial_{0};
+    struct CameraRootCandidate
+    {
+        uint32_t addr{0};
+        uint32_t hits{0};
+        uint32_t frame_hits{0};
+        uint32_t first_vblank{0};
+        uint32_t last_vblank{0};
+        uint32_t last_pc{0};
+        uint32_t gte_reg_mask{0};
+    };
+    std::unordered_map<uint32_t, CameraRootCandidate> camera_root_candidates_{};
 
     std::FILE* compare_file_{nullptr};
 

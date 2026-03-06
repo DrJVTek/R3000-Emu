@@ -12,6 +12,23 @@ namespace gpu
 // Forward declaration (defined later with decode functions)
 static bool in_dead_zone(uint16_t v);
 
+// Controlled recovery path: only used when no token hint is available.
+#ifndef R3000_GPU3D_MISS_ONLY_DECODE_FALLBACK
+#define R3000_GPU3D_MISS_ONLY_DECODE_FALLBACK 1
+#endif
+
+// Intra-packet token carry: if some coord words in a GP0 packet have no token,
+// reuse a valid token observed in the same packet (bounded, deterministic).
+#ifndef R3000_GPU3D_PACKET_TOKEN_CARRY
+#define R3000_GPU3D_PACKET_TOKEN_CARRY 1
+#endif
+
+// Debug-only fallback: rebuild 3D using SXY->vertex table when face token is missing.
+// Keep disabled by default to avoid hiding real correlation issues.
+#ifndef R3000_GPU3D_VTX_LOOKUP_FALLBACK
+#define R3000_GPU3D_VTX_LOOKUP_FALLBACK 0
+#endif
+
 // ---------------------------------------------------------------------------
 // GP0 parameter count (handles ALL commands to prevent desync)
 // Returns -1 for polyline (variable length), -2 for CPU→VRAM (special)
@@ -358,7 +375,30 @@ void Gpu3D::gp0_polygon()
     if (textured)
         draw_env_.texpage_raw = (draw_env_.texpage_raw & ~0x7FFu) | (texpage_attr & 0x7FFu);
 
-    // Cortex test: strict token path (no differential decode fallback).
+#if R3000_GPU3D_PACKET_TOKEN_CARRY
+    // Recover missing coord hints from any valid hint in the same command packet.
+    uint32_t packet_hint = kNoFaceHint;
+    for (int k = 0; k < cmd_buf_pos_; ++k)
+    {
+        const uint32_t h = cmd_face_hint_[k];
+        if (h == kNoFaceHint || h == 0u)
+            continue;
+        if (gte_3d_ && gte_3d_->face_by_index(h) == nullptr)
+            continue;
+        packet_hint = h;
+        break;
+    }
+    if (packet_hint != kNoFaceHint)
+    {
+        for (int i = 0; i < nverts; ++i)
+        {
+            if (face_hints[i] == kNoFaceHint || face_hints[i] == 0u)
+                face_hints[i] = packet_hint;
+        }
+    }
+#endif
+
+    // Token-first path. If no token is available, optional miss-only decode fallback.
     // Select a hint that is both frequent and present in face cache.
     uint32_t face_idx = 0xFFFFFFFFu;
     {
@@ -392,9 +432,34 @@ void Gpu3D::gp0_polygon()
             }
         }
 
+        const bool had_any_hint = (best_any != kNoFaceHint);
+        const bool had_cached_hint = (best_cached != kNoFaceHint);
+        if (had_any_hint)
+            ++token_poly_hinted_;
+        else
+            ++token_poly_missing_;
+        if (had_cached_hint)
+            ++token_poly_cached_;
+        if (!had_any_hint)
+            ++tok_miss_no_hint_;
+        else if (!had_cached_hint)
+            ++tok_miss_hint_not_cached_;
+
         // Prefer cache-valid token to avoid dropping to 2D when majority token is stale.
         face_idx = (best_cached != kNoFaceHint) ? best_cached : best_any;
     }
+
+#if R3000_GPU3D_MISS_ONLY_DECODE_FALLBACK
+    if (face_idx == kNoFaceHint || face_idx == 0u)
+    {
+        if (quad)
+            face_idx = decode_face_quad(raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2], raw_x[3], raw_y[3]);
+        else
+            face_idx = decode_face_tri(raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2]);
+    }
+#endif
+    if (face_idx == kNoFaceHint || face_idx == 0u)
+        ++tok_miss_decode_fail_;
 
     // --- 3D decode diagnostic (log first 5 polygons per frame + transitions) ---
     static uint32_t diag_frame = 0xFFFFFFFFu;
@@ -1101,6 +1166,47 @@ static void fill_cmd3d_from_quad(DrawCmd3D& cmd3d, const gte::GteCacheQuad* qc,
     cmd3d.transform = qc->transform;
 }
 
+static bool same_transform(const gte::GteTransform& a, const gte::GteTransform& b)
+{
+    return std::memcmp(a.rt, b.rt, sizeof(a.rt)) == 0 &&
+           std::memcmp(a.tr, b.tr, sizeof(a.tr)) == 0;
+}
+
+struct VertexLookupHit
+{
+    const gte::GteCacheVertex* v{nullptr};
+    uint32_t idx{0xFFFFFFFFu};
+};
+
+static VertexLookupHit lookup_vertex_by_sxy(
+    gte::Gte3D* gte_3d, uint16_t x, uint16_t y)
+{
+    VertexLookupHit out{};
+    if (!gte_3d)
+        return out;
+    const uint32_t sxy = ((uint32_t)y << 16) | (uint32_t)x;
+    const uint32_t vi = gte_3d->lookup_by_sxy(sxy);
+    if (vi == 0xFFFFFFFFu || vi == 0u)
+        return out;
+    out.idx = vi;
+    out.v = gte_3d->vertex_by_index(vi);
+    return out;
+}
+
+static bool indices_are_local(const uint32_t* idx, int n, uint32_t max_span)
+{
+    uint32_t mn = 0xFFFFFFFFu;
+    uint32_t mx = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        if (idx[i] == 0xFFFFFFFFu || idx[i] == 0u)
+            return false;
+        if (idx[i] < mn) mn = idx[i];
+        if (idx[i] > mx) mx = idx[i];
+    }
+    return (mx - mn) <= max_span;
+}
+
 // ---------------------------------------------------------------------------
 // push_triangle — a real triangle (3 vertices)
 // ---------------------------------------------------------------------------
@@ -1141,6 +1247,43 @@ void Gpu3D::push_triangle(
     }
     else
         face_idx = 0xFFFFFFFFu; // no gte_3d_ or no tag decoded
+
+    // Fallback: direct per-vertex SXY lookup (no face token required).
+    if (!is_3d && gte_3d_
+#if R3000_GPU3D_VTX_LOOKUP_FALLBACK
+        )
+#else
+        && false)
+#endif
+    {
+        const VertexLookupHit h0 = lookup_vertex_by_sxy(gte_3d_, x0, y0);
+        const VertexLookupHit h1 = lookup_vertex_by_sxy(gte_3d_, x1, y1);
+        const VertexLookupHit h2 = lookup_vertex_by_sxy(gte_3d_, x2, y2);
+        const gte::GteCacheVertex* v0 = h0.v;
+        const gte::GteCacheVertex* v1 = h1.v;
+        const gte::GteCacheVertex* v2 = h2.v;
+        const uint32_t idxs[3] = {h0.idx, h1.idx, h2.idx};
+        if (v0 && v1 && v2 &&
+            indices_are_local(idxs, 3, 24u) &&
+            same_transform(v0->transform, v1->transform) &&
+            same_transform(v0->transform, v2->transform))
+        {
+            is_3d = true;
+            origin = PrimOrigin::origin_3d;
+            cmd3d.verts_3d[0] = {v0->vx, v0->vy, v0->vz};
+            cmd3d.verts_3d[1] = {v1->vx, v1->vy, v1->vz};
+            cmd3d.verts_3d[2] = {v2->vx, v2->vy, v2->vz};
+            cmd3d.nx[0] = v0->nx; cmd3d.ny[0] = v0->ny; cmd3d.nz[0] = v0->nz; cmd3d.sz[0] = v0->sz;
+            cmd3d.nx[1] = v1->nx; cmd3d.ny[1] = v1->ny; cmd3d.nz[1] = v1->nz; cmd3d.sz[1] = v1->sz;
+            cmd3d.nx[2] = v2->nx; cmd3d.ny[2] = v2->ny; cmd3d.nz[2] = v2->nz; cmd3d.sz[2] = v2->sz;
+            cmd3d.transform = v0->transform;
+            ++vtx_lookup_hits_;
+        }
+        else
+        {
+            ++vtx_lookup_misses_;
+        }
+    }
 
     cmd3d.face_idx = face_idx;
     cmd3d.origin = origin;
@@ -1196,6 +1339,40 @@ void Gpu3D::push_quad(
     else
         face_idx = 0xFFFFFFFFu; // no gte_3d_ or no tag decoded
 
+    // Fallback: direct per-vertex SXY lookup (no face token required).
+    const gte::GteCacheVertex* vtx[4] = {nullptr, nullptr, nullptr, nullptr};
+    uint32_t vtx_idx[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    bool vtx_lookup_3d = false;
+    if (!is_3d && gte_3d_
+#if R3000_GPU3D_VTX_LOOKUP_FALLBACK
+        )
+#else
+        && false)
+#endif
+    {
+        const VertexLookupHit h0 = lookup_vertex_by_sxy(gte_3d_, x0, y0);
+        const VertexLookupHit h1 = lookup_vertex_by_sxy(gte_3d_, x1, y1);
+        const VertexLookupHit h2 = lookup_vertex_by_sxy(gte_3d_, x2, y2);
+        const VertexLookupHit h3 = lookup_vertex_by_sxy(gte_3d_, x3, y3);
+        vtx[0] = h0.v; vtx[1] = h1.v; vtx[2] = h2.v; vtx[3] = h3.v;
+        vtx_idx[0] = h0.idx; vtx_idx[1] = h1.idx; vtx_idx[2] = h2.idx; vtx_idx[3] = h3.idx;
+        if (vtx[0] && vtx[1] && vtx[2] && vtx[3] &&
+            indices_are_local(vtx_idx, 4, 32u) &&
+            same_transform(vtx[0]->transform, vtx[1]->transform) &&
+            same_transform(vtx[0]->transform, vtx[2]->transform) &&
+            same_transform(vtx[0]->transform, vtx[3]->transform))
+        {
+            vtx_lookup_3d = true;
+            is_3d = true;
+            origin = PrimOrigin::origin_3d;
+            ++vtx_lookup_hits_;
+        }
+        else
+        {
+            ++vtx_lookup_misses_;
+        }
+    }
+
     // Shared 2D coord processing params
     const bool is_2d = !is_3d;
     const int16_t ox = is_2d ? draw_env_.offset_x : 0;
@@ -1221,7 +1398,11 @@ void Gpu3D::push_quad(
     {
         // Preferred in token-flow mode: explicit hint from V3 coord word.
         if (face_idx_v3_hint != kNoFaceHint && face_idx_v3_hint != 0 && face_idx_v3_hint != face_idx)
+        {
             face_b = gte_3d_->face_by_index(face_idx_v3_hint);
+            if (face_b)
+                ++quad_v3_hint_used_;
+        }
 
         if (face_b)
         {
@@ -1275,7 +1456,17 @@ void Gpu3D::push_quad(
 
         if (is_3d)
         {
-            if (edge_strip_ok)
+            if (vtx_lookup_3d)
+            {
+                cmd3d.verts_3d[0] = {vtx[0]->vx, vtx[0]->vy, vtx[0]->vz};
+                cmd3d.verts_3d[1] = {vtx[1]->vx, vtx[1]->vy, vtx[1]->vz};
+                cmd3d.verts_3d[2] = {vtx[2]->vx, vtx[2]->vy, vtx[2]->vz};
+                cmd3d.nx[0] = vtx[0]->nx; cmd3d.ny[0] = vtx[0]->ny; cmd3d.nz[0] = vtx[0]->nz; cmd3d.sz[0] = vtx[0]->sz;
+                cmd3d.nx[1] = vtx[1]->nx; cmd3d.ny[1] = vtx[1]->ny; cmd3d.nz[1] = vtx[1]->nz; cmd3d.sz[1] = vtx[1]->sz;
+                cmd3d.nx[2] = vtx[2]->nx; cmd3d.ny[2] = vtx[2]->ny; cmd3d.nz[2] = vtx[2]->nz; cmd3d.sz[2] = vtx[2]->sz;
+                cmd3d.transform = vtx[0]->transform;
+            }
+            else if (edge_strip_ok)
             {
                 // Tri 1 of quad: face_A.V0, face_A.V1, face_B.V0
                 cmd3d.verts_3d[0] = {face->vx[0], face->vy[0], face->vz[0]};
@@ -1316,7 +1507,17 @@ void Gpu3D::push_quad(
 
         if (is_3d)
         {
-            if (edge_strip_ok)
+            if (vtx_lookup_3d)
+            {
+                cmd3d.verts_3d[0] = {vtx[1]->vx, vtx[1]->vy, vtx[1]->vz};
+                cmd3d.verts_3d[1] = {vtx[3]->vx, vtx[3]->vy, vtx[3]->vz};
+                cmd3d.verts_3d[2] = {vtx[2]->vx, vtx[2]->vy, vtx[2]->vz};
+                cmd3d.nx[0] = vtx[1]->nx; cmd3d.ny[0] = vtx[1]->ny; cmd3d.nz[0] = vtx[1]->nz; cmd3d.sz[0] = vtx[1]->sz;
+                cmd3d.nx[1] = vtx[3]->nx; cmd3d.ny[1] = vtx[3]->ny; cmd3d.nz[1] = vtx[3]->nz; cmd3d.sz[1] = vtx[3]->sz;
+                cmd3d.nx[2] = vtx[2]->nx; cmd3d.ny[2] = vtx[2]->ny; cmd3d.nz[2] = vtx[2]->nz; cmd3d.sz[2] = vtx[2]->sz;
+                cmd3d.transform = vtx[0]->transform;
+            }
+            else if (edge_strip_ok)
             {
                 // Tri 2 of quad: face_A.V1, face_B.V1 (or V0 if not edge), face_B.V0
                 cmd3d.verts_3d[0] = {face->vx[1], face->vy[1], face->vz[1]};
@@ -1353,6 +1554,8 @@ void Gpu3D::push_quad(
                 {
                     fb = gte_3d_->face_by_index(face_idx_v3_hint);
                     v3_vert_idx = 0;
+                    if (fb)
+                        ++quad_v3_hint_used_;
                 }
 
                 if (!fb && in_dead_zone(v3x) && in_dead_zone(v3y) &&
@@ -1422,27 +1625,47 @@ void Gpu3D::on_vblank()
     dbg_vram_skips_ = gp0_vram_skips_accum_;
     dbg_state_ = gp0_state_;
     dbg_vram_remaining_ = vram_words_remaining_;
+    dbg_last_tris_ = static_cast<uint32_t>(draw_lists_[draw_active_].cmds_3d.size());
 
-    // Diagnostic: log GP0 activity per frame (first 10 + every 300)
-    if (frame_count_ < 10 || (frame_count_ % 300) == 0)
+    const auto& dl = draw_lists_[draw_active_];
+    uint32_t n3d = 0, n2d = 0;
+    for (size_t i = 0; i < dl.cmds_3d.size(); ++i)
     {
-        const auto& dl = draw_lists_[draw_active_];
-        uint32_t n3d = 0, n2d = 0;
-        for (size_t i = 0; i < dl.cmds_3d.size(); ++i)
-        {
-            if (dl.cmds_3d[i].origin == PrimOrigin::origin_3d) ++n3d;
-            else ++n2d;
-        }
-        emu::logf(emu::LogLevel::info, "GPU3D_VBLANK",
-            "frame=%u words=%u cmds=%u vram_skips=%u tris=%zu 3d=%u 2d=%u state=%d quad_hit=%u quad_miss=%u",
+        if (dl.cmds_3d[i].origin == PrimOrigin::origin_3d) ++n3d;
+        else ++n2d;
+    }
+    dbg_last_3d_ = n3d;
+    dbg_last_2d_ = n2d;
+    dbg_last_miss_no_hint_ = tok_miss_no_hint_;
+    dbg_last_miss_hint_stale_ = tok_miss_hint_not_cached_;
+    dbg_last_miss_decode_fail_ = tok_miss_decode_fail_;
+
+    // Diagnostic: log GP0 activity per frame (first 10 + every 60).
+    // 60 keeps logs readable while still capturing transient issues (e.g. flag/menu).
+    if (frame_count_ < 10 || (frame_count_ % 60) == 0)
+    {
+        emu::logf(emu::LogLevel::warn, "GPU3D_VBLANK",
+            "frame=%u words=%u cmds=%u vram_skips=%u tris=%zu 3d=%u 2d=%u state=%d quad_hit=%u quad_miss=%u tok_hint=%u tok_miss=%u tok_cached=%u v3_hint=%u vtx_hit=%u vtx_miss=%u miss_no_hint=%u miss_hint_stale=%u miss_decode_fail=%u",
             frame_count_, gp0_words_accum_, gp0_cmds_accum_, gp0_vram_skips_accum_,
             dl.cmds_3d.size(), n3d, n2d, (int)gp0_state_,
-            quad_cache_hits_, quad_cache_misses_);
+            quad_cache_hits_, quad_cache_misses_,
+            token_poly_hinted_, token_poly_missing_, token_poly_cached_, quad_v3_hint_used_,
+            vtx_lookup_hits_, vtx_lookup_misses_,
+            tok_miss_no_hint_, tok_miss_hint_not_cached_, tok_miss_decode_fail_);
     }
 
     // Reset quad stats
     quad_cache_hits_ = 0;
     quad_cache_misses_ = 0;
+    token_poly_hinted_ = 0;
+    token_poly_missing_ = 0;
+    token_poly_cached_ = 0;
+    quad_v3_hint_used_ = 0;
+    vtx_lookup_hits_ = 0;
+    vtx_lookup_misses_ = 0;
+    tok_miss_no_hint_ = 0;
+    tok_miss_hint_not_cached_ = 0;
+    tok_miss_decode_fail_ = 0;
 
     draw_active_ = 1 - draw_active_;
     draw_lists_[draw_active_].clear();

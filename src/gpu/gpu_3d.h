@@ -111,12 +111,27 @@ class Gpu3D : public IGpu
     uint32_t dbg_vram_skips_{0};
     Gp0State dbg_state_{Gp0State::idle};
     uint32_t dbg_vram_remaining_{0};
+    uint32_t dbg_last_tris_{0};
+    uint32_t dbg_last_3d_{0};
+    uint32_t dbg_last_2d_{0};
+    uint32_t dbg_last_miss_no_hint_{0};
+    uint32_t dbg_last_miss_hint_stale_{0};
+    uint32_t dbg_last_miss_decode_fail_{0};
   private:
     uint32_t gp0_words_accum_{0};
     uint32_t gp0_cmds_accum_{0};
     uint32_t gp0_vram_skips_accum_{0};
     uint32_t quad_cache_hits_{0};
     uint32_t quad_cache_misses_{0};
+    uint32_t token_poly_hinted_{0};
+    uint32_t token_poly_missing_{0};
+    uint32_t token_poly_cached_{0};
+    uint32_t quad_v3_hint_used_{0};
+    uint32_t vtx_lookup_hits_{0};
+    uint32_t vtx_lookup_misses_{0};
+    uint32_t tok_miss_no_hint_{0};
+    uint32_t tok_miss_hint_not_cached_{0};
+    uint32_t tok_miss_decode_fail_{0};
 };
 
 } // namespace gpu

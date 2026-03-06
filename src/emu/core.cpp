@@ -1,9 +1,13 @@
 #include "core.h"
 
 #include <new>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <string>
+#include <vector>
 
 // Explicit include to keep tooling in sync with Cpu API.
 #include "../r3000/cpu.h"
@@ -42,9 +46,32 @@ Core::Core(rlog::Logger* logger) : logger_(logger), cdrom_(logger), gpu_(logger)
 {
     // Version marker - update when making changes!
     emu::logf(emu::LogLevel::warn, "CORE", "R3000-Emu core v6 (vsync_stuck_detect)");
+    psx3d_mode_mgr_.reset();
+    provenance_profiler_.reset();
 }
 
-Core::~Core() = default;
+static std::string psx3d_sanitize_game_id(std::string s)
+{
+    if (s.empty())
+        return "unknown";
+    for (char& c : s)
+    {
+        const bool ok = (c >= 'a' && c <= 'z') ||
+                        (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') ||
+                        c == '_' || c == '-' || c == '.';
+        if (!ok)
+            c = '_';
+    }
+    while (!s.empty() && (s.back() == '.' || s.back() == ' '))
+        s.pop_back();
+    return s.empty() ? "unknown" : s;
+}
+
+Core::~Core()
+{
+    try_save_psx3d_profile();
+}
 
 void Core::set_err(char* err, size_t err_cap, const char* msg) const
 {
@@ -139,6 +166,11 @@ bool Core::insert_disc(const char* path, char* err, size_t err_cap)
     }
     bool ok = cdrom_.insert_disc(path, err, err_cap);
     emu::logf(emu::LogLevel::info, "CORE", "insert_disc result: %d", ok);
+    if (ok)
+    {
+        set_psx3d_profile_identity_from_path(path);
+        try_load_psx3d_profile();
+    }
     return ok;
 }
 
@@ -225,6 +257,7 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     cpu_->set_stop_on_high_ram(opt.stop_on_high_ram ? 1 : 0);
     cpu_->set_stop_on_bios_to_ram_nop(opt.stop_on_bios_to_ram_nop ? 1 : 0);
     cpu_->set_stop_on_ram_nop(opt.stop_on_ram_nop ? 1 : 0);
+    cpu_->set_camera_analysis_enabled(psx3d_mode_mgr_.analysis_enabled() ? 1 : 0);
     if (opt.stop_on_pc_enabled)
         cpu_->set_stop_on_pc(opt.stop_on_pc, 1);
 
@@ -252,6 +285,15 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     if (img.has_sp)
         cpu_->set_gpr(29, img.sp);
     cpu_->set_pc(img.entry_pc);
+    last_vblank_seen_ = 0;
+    last_gpu3d_frame_seen_ = 0;
+    last_gpu3d_refresh_frame_ = 0;
+    provenance_profiler_.reset();
+    psx3d_analyzed_pcs_.clear();
+    psx3d_cam_serial_seen_ = 0;
+    psx3d_profile_dirty_ = false;
+    psx3d_profile_loaded_ = false;
+    try_load_psx3d_profile();
 
     return true;
 }
@@ -276,6 +318,139 @@ r3000::Cpu::StepResult Core::step()
     const uint32_t pc_before = cpu_->pc();
     const auto res = cpu_->step();
     ++g_step_count;
+
+    // PSX3D analysis refresh trigger (manual queue).
+    if (psx3d_mode_mgr_.analysis_enabled() &&
+        psx3d_mode_mgr_.analysis_active() &&
+        psx3d_mode_mgr_.has_refresh_request())
+    {
+        const auto req = psx3d_mode_mgr_.consume_refresh_request();
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D",
+            "analysis refresh request id=%u reason=%s scope=%s",
+            req.id,
+            req.reason.empty() ? "(none)" : req.reason.c_str(),
+            req.scope.empty() ? "(none)" : req.scope.c_str());
+        run_psx3d_analysis_refresh(req);
+        try_save_psx3d_profile();
+        // Return automatically to normal game mode after a refresh pass.
+        if (!psx3d_mode_mgr_.has_refresh_request())
+            set_psx3d_mode(Psx3dRunMode::game);
+    }
+
+    // Generic auto-profiling: detect no-token DMA2 hotspots and auto-request refresh.
+    if (psx3d_mode_mgr_.analysis_enabled() && bus_)
+    {
+        r3000::Bus::Dma2NoHintSummary s{};
+        if (bus_->consume_dma2_nohint_summary(s))
+        {
+            psx3d_last_nohint_top_pcs_.clear();
+            psx3d_last_nohint_top_pcs_.reserve(s.top_pcs.size());
+            for (const auto& p : s.top_pcs)
+            {
+                if (p.first != 0)
+                    psx3d_last_nohint_top_pcs_.push_back(p.first);
+            }
+            if (provenance_profiler_.ingest(s))
+                psx3d_profile_dirty_ = true;
+            last_vblank_seen_ = s.vblank;
+            const auto d = provenance_profiler_.decide_refresh(s.vblank);
+            if (d.request)
+            {
+                if (psx3d_analyzed_pcs_.find(d.pc) == psx3d_analyzed_pcs_.end())
+                {
+                    if (psx3d_mode_mgr_.mode() != Psx3dRunMode::analysis)
+                        set_psx3d_mode(Psx3dRunMode::analysis);
+                    char scope[64];
+                    std::snprintf(scope, sizeof(scope), "pc=0x%08X", d.pc);
+                    request_psx3d_analysis_refresh("auto_hotspot", scope);
+                    emu::logf(
+                        emu::LogLevel::warn,
+                        "PSX3D",
+                        "auto hotspot refresh pc=0x%08X weight=%u vblank=%u",
+                        d.pc,
+                        d.weight,
+                        s.vblank);
+                }
+                // Even if already analyzed, ack to apply cooldown and avoid spam.
+                provenance_profiler_.ack_refresh(d.pc, s.vblank);
+            }
+            if (psx3d_profile_dirty_ && (s.vblank % 600u) == 0u)
+                try_save_psx3d_profile();
+        }
+    }
+
+    // Persist camera-root analysis only when it changed.
+    if (psx3d_mode_mgr_.analysis_enabled() && cpu_)
+    {
+        const uint64_t cam_serial = cpu_->camera_candidates_serial();
+        if (cam_serial != psx3d_cam_serial_seen_)
+        {
+            psx3d_cam_serial_seen_ = cam_serial;
+            psx3d_profile_dirty_ = true;
+        }
+    }
+
+    // Generic fallback monitor: detect abnormal 3D->2D collapse and trigger analysis refresh.
+    if (psx3d_mode_mgr_.analysis_enabled())
+    {
+        const uint32_t gframe = gpu_3d_.frame_count();
+        if (gframe != last_gpu3d_frame_seen_)
+        {
+            last_gpu3d_frame_seen_ = gframe;
+            const uint32_t tris = gpu_3d_.dbg_last_tris_;
+            const uint32_t n3d = gpu_3d_.dbg_last_3d_;
+            const uint32_t n2d = gpu_3d_.dbg_last_2d_;
+            if (tris >= 128u && n2d > 0)
+            {
+                const float fallback_ratio = (float)n2d / (float)tris;
+                const bool cooldown_ok =
+                    (gframe > last_gpu3d_refresh_frame_) &&
+                    ((gframe - last_gpu3d_refresh_frame_) >= 120u);
+                bool has_unknown_nohint_pc = false;
+                for (uint32_t pc : psx3d_last_nohint_top_pcs_)
+                {
+                    if (pc == 0)
+                        continue;
+                    if (psx3d_analyzed_pcs_.find(pc) == psx3d_analyzed_pcs_.end())
+                    {
+                        has_unknown_nohint_pc = true;
+                        break;
+                    }
+                }
+                if (fallback_ratio >= 0.20f && cooldown_ok && has_unknown_nohint_pc)
+                {
+                    char scope[96];
+                    std::snprintf(
+                        scope,
+                        sizeof(scope),
+                        "fallback2d f=%u 3d=%u 2d=%u nh=%u stale=%u dec=%u",
+                        gframe,
+                        n3d,
+                        n2d,
+                        gpu_3d_.dbg_last_miss_no_hint_,
+                        gpu_3d_.dbg_last_miss_hint_stale_,
+                        gpu_3d_.dbg_last_miss_decode_fail_);
+                    request_psx3d_analysis_refresh("high_fallback_2d", scope);
+                    if (psx3d_mode_mgr_.mode() != Psx3dRunMode::analysis)
+                        set_psx3d_mode(Psx3dRunMode::analysis);
+                    last_gpu3d_refresh_frame_ = gframe;
+                    emu::logf(
+                        emu::LogLevel::warn,
+                        "PSX3D",
+                        "fallback monitor refresh frame=%u ratio=%.3f 3d=%u 2d=%u nh=%u stale=%u dec=%u",
+                        gframe,
+                        (double)fallback_ratio,
+                        n3d,
+                        n2d,
+                        gpu_3d_.dbg_last_miss_no_hint_,
+                        gpu_3d_.dbg_last_miss_hint_stale_,
+                        gpu_3d_.dbg_last_miss_decode_fail_);
+                }
+            }
+        }
+    }
 
     // Fire per-instruction hooks (zero-cost when no hooks registered)
     if (hooks_.has_step())
@@ -406,6 +581,274 @@ void Core::set_cycle_multiplier(uint32_t n)
 uint32_t Core::last_cycles() const
 {
     return cpu_ ? cpu_->last_cycles() : 1;
+}
+
+void Core::set_psx3d_mode(Psx3dRunMode m)
+{
+    psx3d_mode_mgr_.set_mode(m);
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "mode=%s analysis_enabled=%d",
+        (m == Psx3dRunMode::analysis) ? "analysis" : "game",
+        psx3d_mode_mgr_.analysis_enabled() ? 1 : 0);
+}
+
+void Core::set_psx3d_analysis_enabled(bool enabled)
+{
+    psx3d_mode_mgr_.set_analysis_enabled(enabled);
+    if (cpu_)
+        cpu_->set_camera_analysis_enabled(enabled ? 1 : 0);
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "analysis_enabled=%d mode=%s",
+        enabled ? 1 : 0,
+        (psx3d_mode_mgr_.mode() == Psx3dRunMode::analysis) ? "analysis" : "game");
+}
+
+uint32_t Core::request_psx3d_analysis_refresh(const char* reason, const char* scope)
+{
+    const std::string r = reason ? reason : "";
+    const std::string s = scope ? scope : "";
+    const uint32_t id = psx3d_mode_mgr_.request_refresh(r, s);
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "refresh queued id=%u reason=%s scope=%s",
+        id,
+        r.empty() ? "(none)" : r.c_str(),
+        s.empty() ? "(none)" : s.c_str());
+    return id;
+}
+
+void Core::run_psx3d_analysis_refresh(const Psx3dRefreshRequest& req)
+{
+    uint32_t added = 0;
+    if (req.scope.rfind("pc=0x", 0) == 0)
+    {
+        uint32_t pc = 0;
+        if (std::sscanf(req.scope.c_str(), "pc=0x%X", &pc) == 1 && pc != 0)
+        {
+            if (psx3d_analyzed_pcs_.insert(pc).second)
+                ++added;
+            provenance_profiler_.ack_refresh(pc, last_vblank_seen_);
+        }
+    }
+    else if (req.scope == "global" || req.scope.empty())
+    {
+        const auto snaps = provenance_profiler_.snapshot();
+        for (const auto& s : snaps)
+        {
+            if (s.pc == 0)
+                continue;
+            if (psx3d_analyzed_pcs_.insert(s.pc).second)
+                ++added;
+            provenance_profiler_.ack_refresh(s.pc, last_vblank_seen_);
+        }
+    }
+    else
+    {
+        // Fallback scopes (ex: fallback2d ...) still trigger a useful refresh:
+        // first learn current-frame DMA2 nohint PCs, then fill from cumulative hotspots.
+        uint32_t budget = 32;
+        for (uint32_t pc : psx3d_last_nohint_top_pcs_)
+        {
+            if (budget == 0)
+                break;
+            if (pc == 0)
+                continue;
+            if (psx3d_analyzed_pcs_.insert(pc).second)
+            {
+                ++added;
+                --budget;
+            }
+            provenance_profiler_.ack_refresh(pc, last_vblank_seen_);
+        }
+
+        auto snaps = provenance_profiler_.snapshot();
+        std::sort(snaps.begin(), snaps.end(), [](const auto& a, const auto& b) {
+            if (a.total_words != b.total_words)
+                return a.total_words > b.total_words;
+            return a.pc < b.pc;
+        });
+        for (const auto& s : snaps)
+        {
+            if (budget == 0)
+                break;
+            if (s.pc == 0)
+                continue;
+            if (psx3d_analyzed_pcs_.insert(s.pc).second)
+            {
+                ++added;
+                --budget;
+            }
+            provenance_profiler_.ack_refresh(s.pc, last_vblank_seen_);
+        }
+    }
+
+    if (added > 0)
+        psx3d_profile_dirty_ = true;
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "analysis pass done id=%u reason=%s scope=%s added_pcs=%u total_analyzed=%u",
+        req.id,
+        req.reason.empty() ? "(none)" : req.reason.c_str(),
+        req.scope.empty() ? "(none)" : req.scope.c_str(),
+        added,
+        (uint32_t)psx3d_analyzed_pcs_.size());
+}
+
+void Core::set_psx3d_profile_path_override(const char* path)
+{
+    if (!path || !*path)
+        return;
+    std::filesystem::path p(path);
+    psx3d_profile_path_ = p.string();
+    psx3d_profile_game_id_ = psx3d_sanitize_game_id(p.stem().string());
+    if (psx3d_profile_game_id_.empty())
+        psx3d_profile_game_id_ = "unknown";
+    psx3d_profile_override_ = true;
+    psx3d_profile_loaded_ = false;
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "profile override path=%s game=%s",
+        psx3d_profile_path_.c_str(),
+        psx3d_profile_game_id_.c_str());
+    try_load_psx3d_profile();
+}
+
+void Core::set_psx3d_profile_identity_from_path(const char* path)
+{
+    if (psx3d_profile_override_)
+        return;
+    if (!path || !*path)
+        return;
+    std::filesystem::path p(path);
+    std::string stem = psx3d_sanitize_game_id(p.stem().string());
+    if (stem.empty())
+        stem = "unknown";
+    psx3d_profile_game_id_ = stem;
+    psx3d_profile_path_ = Psx3dProfileStore::default_profile_path(stem);
+    psx3d_profile_loaded_ = false;
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "profile identity game=%s path=%s",
+        psx3d_profile_game_id_.c_str(),
+        psx3d_profile_path_.c_str());
+}
+
+void Core::try_load_psx3d_profile()
+{
+    if (psx3d_profile_loaded_)
+        return;
+    if (psx3d_profile_path_.empty())
+        return;
+
+    Psx3dProfileData data{};
+    if (!Psx3dProfileStore::load(psx3d_profile_path_, data))
+    {
+        psx3d_profile_loaded_ = true;
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D",
+            "profile load miss path=%s",
+            psx3d_profile_path_.c_str());
+        return;
+    }
+
+    provenance_profiler_.restore(data.hotspots);
+    psx3d_analyzed_pcs_.clear();
+    for (uint32_t pc : data.analyzed_pcs)
+    {
+        if (pc != 0)
+            psx3d_analyzed_pcs_.insert(pc);
+    }
+    if (cpu_)
+    {
+        std::vector<r3000::Cpu::CameraCandidateSnapshot> cams;
+        cams.reserve(data.camera_candidates.size());
+        for (const auto& c : data.camera_candidates)
+        {
+            r3000::Cpu::CameraCandidateSnapshot s{};
+            s.addr = c.addr;
+            s.hits = c.hits;
+            s.frame_hits = c.frame_hits;
+            s.first_vblank = c.first_vblank;
+            s.last_vblank = c.last_vblank;
+            s.last_pc = c.last_pc;
+            s.gte_reg_mask = c.gte_reg_mask;
+            cams.push_back(s);
+        }
+        cpu_->restore_camera_candidates(cams);
+        psx3d_cam_serial_seen_ = cpu_->camera_candidates_serial();
+    }
+    psx3d_profile_loaded_ = true;
+    psx3d_profile_dirty_ = false;
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "profile loaded path=%s hotspots=%u analyzed=%u cam=%u game=%s",
+        psx3d_profile_path_.c_str(),
+        (uint32_t)data.hotspots.size(),
+        (uint32_t)psx3d_analyzed_pcs_.size(),
+        (uint32_t)data.camera_candidates.size(),
+        data.game_id.empty() ? "(none)" : data.game_id.c_str());
+}
+
+void Core::try_save_psx3d_profile()
+{
+    if (psx3d_profile_path_.empty())
+        return;
+    if (!psx3d_profile_dirty_)
+        return;
+
+    Psx3dProfileData data{};
+    data.game_id = psx3d_profile_game_id_.empty() ? "unknown" : psx3d_profile_game_id_;
+    data.hotspots = provenance_profiler_.snapshot();
+    data.analyzed_pcs.reserve(psx3d_analyzed_pcs_.size());
+    for (uint32_t pc : psx3d_analyzed_pcs_)
+        data.analyzed_pcs.push_back(pc);
+    if (cpu_)
+    {
+        const auto cams = cpu_->camera_candidates_snapshot();
+        data.camera_candidates.reserve(cams.size());
+        for (const auto& s : cams)
+        {
+            Psx3dProfileData::CameraCandidate c{};
+            c.addr = s.addr;
+            c.hits = s.hits;
+            c.frame_hits = s.frame_hits;
+            c.first_vblank = s.first_vblank;
+            c.last_vblank = s.last_vblank;
+            c.last_pc = s.last_pc;
+            c.gte_reg_mask = s.gte_reg_mask;
+            data.camera_candidates.push_back(c);
+        }
+    }
+    if (Psx3dProfileStore::save(psx3d_profile_path_, data))
+    {
+        psx3d_profile_dirty_ = false;
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D",
+            "profile saved path=%s hotspots=%u analyzed=%u cam=%u",
+            psx3d_profile_path_.c_str(),
+            (uint32_t)data.hotspots.size(),
+            (uint32_t)data.analyzed_pcs.size(),
+            (uint32_t)data.camera_candidates.size());
+    }
+    else
+    {
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D",
+            "profile save failed path=%s",
+            psx3d_profile_path_.c_str());
+    }
 }
 
 bool Core::fast_boot_from_cd(char* err, size_t err_cap)
@@ -635,6 +1078,8 @@ bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
         set_err(err, err_cap, "core not initialized");
         return false;
     }
+    set_psx3d_profile_identity_from_path(exe_path);
+    try_load_psx3d_profile();
 
     // 1. Load EXE file into RAM
     loader::LoadedImage img{};

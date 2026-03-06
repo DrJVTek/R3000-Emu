@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "../log/filelog.h"
@@ -160,6 +161,14 @@ class Bus
     // CPU->RAM->DMA face provenance (per-word token)
     void set_ram_face_token(uint32_t paddr, uint32_t token);
     uint32_t ram_face_token(uint32_t paddr) const;
+    uint32_t ram_face_writer_pc(uint32_t paddr) const;
+    struct Dma2NoHintSummary
+    {
+        uint32_t vblank{0};
+        uint32_t nohint_words{0};
+        std::vector<std::pair<uint32_t, uint32_t>> top_pcs{};
+    };
+    bool consume_dma2_nohint_summary(Dma2NoHintSummary& out);
 
   private:
     void dma_finish(int ch);
@@ -249,7 +258,14 @@ class Bus
     uint8_t io_[kIoSize]{};
     uint8_t exp1_[kExp1Size]{};
     std::vector<uint32_t> ram_face_tokens_{};
+    std::vector<uint32_t> ram_face_writer_pc_{};
     uint32_t cache_ctrl_{0};
+
+    // DMA2 no-token diagnostics (per-frame histogram by writer PC)
+    std::unordered_map<uint32_t, uint32_t> dma2_nohint_pc_hist_{};
+    uint32_t dma2_nohint_words_{0};
+    Dma2NoHintSummary dma2_nohint_last_{};
+    bool dma2_nohint_last_valid_{false};
 
     // Minimal HW state (bring-up; non cycle-accurate, but explicit/observable)
     uint32_t i_stat_{0};

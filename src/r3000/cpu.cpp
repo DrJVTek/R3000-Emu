@@ -3,6 +3,8 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <vector>
 
 #include "../cdrom/cdrom.h"
 #include "../gpu/gte_correlation.h"
@@ -10,6 +12,15 @@
 
 namespace r3000
 {
+
+static int is_camera_track_addr(uint32_t paddr, uint32_t ram_size)
+{
+    if (paddr < ram_size)
+        return 1; // Main RAM
+    if (paddr >= 0x1F800000u && paddr < 0x1F801000u)
+        return 1; // Scratchpad (often used for matrix staging)
+    return 0;
+}
 
 static int is_printable_ascii(uint8_t b)
 {
@@ -171,7 +182,7 @@ static int psx_is_mmio(uint32_t phys_addr)
 Cpu::Cpu(Bus& bus, rlog::Logger* logger) : bus_(bus), logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "CPU", "CPU source v8 (face_token_flow)");
+    emu::logf(emu::LogLevel::warn, "CPU", "CPU source v9 (camera_root_tracking)");
 }
 
 void Cpu::set_hle_vectors(int enabled)
@@ -215,6 +226,22 @@ void Cpu::reset(uint32_t reset_pc)
     pending_load_.reg = 0;
     pending_load_.value = 0;
     pending_load_.face_token = kNoFaceToken;
+    pending_load_.mem_paddr = 0;
+    pending_load_.from_mem = 0;
+    for (int i = 0; i < 32; ++i)
+    {
+        reg_last_mem_addr_[i] = 0;
+        reg_last_mem_vblank_[i] = 0;
+        reg_last_mem_valid_[i] = 0;
+    }
+    call_ctx_hash_ = 0;
+    call_ctx_sp_ = 0;
+    for (uint32_t i = 0; i < 64; ++i)
+        call_ctx_stack_[i] = 0;
+    camera_last_vblank_seen_ = 0;
+    camera_last_log_vblank_ = 0;
+    camera_candidates_serial_ = 0;
+    camera_root_candidates_.clear();
 
     for (uint32_t i = 0; i < (uint32_t)icache_data_.size(); ++i)
     {
@@ -267,6 +294,7 @@ void Cpu::set_reg(uint32_t idx, uint32_t v)
         return; // r0 = 0
     gpr_[idx & 31u] = v;
     gpr_face_token_[idx & 31u] = kNoFaceToken;
+    reg_last_mem_valid_[idx & 31u] = 0;
 
     // R3000 load-delay cancellation: if the current instruction writes to the
     // same register targeted by a pending load delay, the load is cancelled.
@@ -495,7 +523,165 @@ void Cpu::commit_pending_load()
         const uint32_t reg = pending_load_.reg & 31u;
         gpr_[reg] = pending_load_.value;
         gpr_face_token_[reg] = pending_load_.face_token;
+        if (pending_load_.from_mem)
+        {
+            reg_last_mem_addr_[reg] = pending_load_.mem_paddr;
+            reg_last_mem_vblank_[reg] = bus_.vblank_count();
+            reg_last_mem_valid_[reg] = 1;
+        }
+        else
+        {
+            reg_last_mem_valid_[reg] = 0;
+        }
     }
+}
+
+void Cpu::observe_camera_mtc2(uint32_t pc, uint32_t gte_data_reg, uint32_t cpu_src_reg)
+{
+    if (!camera_analysis_enabled_)
+        return;
+    if ((gte_data_reg & 31u) > 11u)
+        return;
+    const uint32_t s = cpu_src_reg & 31u;
+    if (s == 0u || !reg_last_mem_valid_[s])
+        return;
+
+    const uint32_t vb = bus_.vblank_count();
+    const uint32_t load_vb = reg_last_mem_vblank_[s];
+    if (vb < load_vb || (vb - load_vb) > 3u)
+        return;
+
+    const uint32_t addr = reg_last_mem_addr_[s] & ~3u;
+    if (!is_camera_track_addr(addr, bus_.ram_size()))
+        return;
+    auto it = camera_root_candidates_.find(addr);
+    if (it == camera_root_candidates_.end())
+    {
+        CameraRootCandidate c{};
+        c.addr = addr;
+        c.first_vblank = vb;
+        c.last_vblank = vb;
+        c.last_pc = pc;
+        c.hits = 1;
+        c.frame_hits = 1;
+        c.gte_reg_mask = (1u << (gte_data_reg & 31u));
+        camera_root_candidates_.emplace(addr, c);
+        ++camera_candidates_serial_;
+        return;
+    }
+
+    CameraRootCandidate& c = it->second;
+    ++c.hits;
+    if (c.last_vblank != vb)
+        ++c.frame_hits;
+    c.last_vblank = vb;
+    c.last_pc = pc;
+    c.gte_reg_mask |= (1u << (gte_data_reg & 31u));
+    ++camera_candidates_serial_;
+}
+
+void Cpu::maybe_log_camera_candidates()
+{
+    if (!camera_analysis_enabled_)
+        return;
+    const uint32_t vb = bus_.vblank_count();
+    if (vb == camera_last_vblank_seen_)
+        return;
+    camera_last_vblank_seen_ = vb;
+    if (camera_root_candidates_.empty())
+        return;
+
+    if (vb < 120u || (vb - camera_last_log_vblank_) < 120u)
+        return;
+    camera_last_log_vblank_ = vb;
+
+    std::vector<const CameraRootCandidate*> top;
+    top.reserve(camera_root_candidates_.size());
+    for (const auto& kv : camera_root_candidates_)
+        top.push_back(&kv.second);
+
+    std::sort(top.begin(), top.end(),
+        [this](const CameraRootCandidate* a, const CameraRootCandidate* b) {
+            const int a_main = (a->addr < bus_.ram_size()) ? 1 : 0;
+            const int b_main = (b->addr < bus_.ram_size()) ? 1 : 0;
+            if (a_main != b_main)
+                return a_main > b_main; // Prefer true game RAM candidates
+            if (a->frame_hits != b->frame_hits)
+                return a->frame_hits > b->frame_hits;
+            if (a->hits != b->hits)
+                return a->hits > b->hits;
+            return a->addr < b->addr;
+        });
+
+    const uint32_t n = (uint32_t)top.size() > 6u ? 6u : (uint32_t)top.size();
+    emu::logf(
+        emu::LogLevel::warn,
+        "CAM_ROOT",
+        "vblank=%u candidates=%u top=%u",
+        vb,
+        (uint32_t)top.size(),
+        n);
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const CameraRootCandidate* c = top[i];
+        emu::logf(
+            emu::LogLevel::warn,
+            "CAM_ROOT",
+            "  #%u addr=0x%08X region=%s frame_hits=%u hits=%u regs=0x%03X last_pc=0x%08X",
+            i,
+            c->addr,
+            (c->addr < bus_.ram_size()) ? "ram" : "scratch",
+            c->frame_hits,
+            c->hits,
+            c->gte_reg_mask & 0xFFFu,
+            c->last_pc);
+    }
+}
+
+std::vector<Cpu::CameraCandidateSnapshot> Cpu::camera_candidates_snapshot() const
+{
+    std::vector<CameraCandidateSnapshot> out;
+    out.reserve(camera_root_candidates_.size());
+    for (const auto& kv : camera_root_candidates_)
+    {
+        const CameraRootCandidate& c = kv.second;
+        CameraCandidateSnapshot s{};
+        s.addr = c.addr;
+        s.hits = c.hits;
+        s.frame_hits = c.frame_hits;
+        s.first_vblank = c.first_vblank;
+        s.last_vblank = c.last_vblank;
+        s.last_pc = c.last_pc;
+        s.gte_reg_mask = c.gte_reg_mask;
+        out.push_back(s);
+    }
+    return out;
+}
+
+void Cpu::restore_camera_candidates(const std::vector<CameraCandidateSnapshot>& in)
+{
+    camera_root_candidates_.clear();
+    camera_last_vblank_seen_ = 0;
+    camera_last_log_vblank_ = 0;
+    for (const auto& s : in)
+    {
+        if (s.addr == 0 || s.hits == 0)
+            continue;
+        if (!is_camera_track_addr(s.addr, bus_.ram_size()))
+            continue;
+        CameraRootCandidate c{};
+        c.addr = s.addr;
+        c.hits = s.hits;
+        c.frame_hits = s.frame_hits;
+        c.first_vblank = s.first_vblank;
+        c.last_vblank = s.last_vblank;
+        c.last_pc = s.last_pc;
+        c.gte_reg_mask = s.gte_reg_mask;
+        camera_root_candidates_[c.addr] = c;
+        if (c.last_vblank > camera_last_vblank_seen_)
+            camera_last_vblank_seen_ = c.last_vblank;
+    }
+    ++camera_candidates_serial_;
 }
 
 Cpu::StepResult Cpu::step()
@@ -510,6 +696,7 @@ Cpu::StepResult Cpu::step()
     // 4) Commit  : r0=0, et si un branch "pending" arrive à échéance, on applique PC=target
     StepResult r;
     r.pc = pc_;
+    maybe_log_camera_candidates();
 
     // Arm exception trace when B(0x4B) StartPAD is called (right before the critical exception)
     if (!exc_trace_armed_ && pc_ == 0xB0u && (gpr_[9] & 0xFFu) == 0x4Bu)
@@ -2456,6 +2643,8 @@ Cpu::StepResult Cpu::step()
     next_pending_load.reg = 0;
     next_pending_load.value = 0;
     next_pending_load.face_token = kNoFaceToken;
+    next_pending_load.mem_paddr = 0;
+    next_pending_load.from_mem = 0;
 
     // Sur MIPS, le PC avance "naturellement" de 4 (instructions 32-bit).
     // Les branches/jumps ne changent pas PC immédiatement: ils programment un target après le delay
@@ -2687,7 +2876,9 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
-        bus_.set_ram_face_token(paddr, face_token);
+        if (face_token != kNoFaceToken)
+            bus_.set_ram_face_token(paddr, face_token);
+        // For partial writes with unknown provenance, preserve existing word token.
         return 1;
     };
     auto store_u16 = [&](uint32_t vaddr, uint16_t v, uint32_t face_token = kNoFaceToken) -> int
@@ -2703,7 +2894,9 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
-        bus_.set_ram_face_token(paddr, face_token);
+        if (face_token != kNoFaceToken)
+            bus_.set_ram_face_token(paddr, face_token);
+        // For partial writes with unknown provenance, preserve existing word token.
         return 1;
     };
     auto store_u32 = [&](uint32_t vaddr, uint32_t v, uint32_t face_token = kNoFaceToken) -> int
@@ -2721,6 +2914,17 @@ Cpu::StepResult Cpu::step()
         }
         bus_.set_ram_face_token(paddr, face_token);
         return 1;
+    };
+    auto infer_store_token_from_reg = [&](uint32_t reg_idx, uint32_t face_token) -> uint32_t
+    {
+        const uint32_t r = reg_idx & 31u;
+        if (face_token != kNoFaceToken)
+            return face_token;
+        if (!reg_last_mem_valid_[r])
+            return kNoFaceToken;
+        const uint32_t src_paddr = reg_last_mem_addr_[r];
+        const uint32_t src_tok = bus_.ram_face_token(src_paddr);
+        return src_tok;
     };
     auto decode_face_token_from_tagged_sxy = [&](uint32_t sxy) -> uint32_t
     {
@@ -2743,7 +2947,29 @@ Cpu::StepResult Cpu::step()
             return kNoFaceToken;
         return (uint32_t)((hi << 8) | lo);
     };
-
+    auto callctx_mix = [](uint32_t h, uint32_t v) -> uint32_t
+    {
+        h ^= v;
+        h *= 16777619u;
+        return h;
+    };
+    auto callctx_push = [&](uint32_t call_pc, uint32_t target, uint32_t ra)
+    {
+        if (call_ctx_sp_ < 64u)
+            call_ctx_stack_[call_ctx_sp_++] = call_ctx_hash_;
+        uint32_t h = (call_ctx_hash_ == 0u) ? 2166136261u : call_ctx_hash_;
+        h = callctx_mix(h, call_pc);
+        h = callctx_mix(h, target);
+        h = callctx_mix(h, ra);
+        call_ctx_hash_ = h;
+    };
+    auto callctx_pop = [&]()
+    {
+        if (call_ctx_sp_ > 0u)
+            call_ctx_hash_ = call_ctx_stack_[--call_ctx_sp_];
+        else
+            call_ctx_hash_ = 0u;
+    };
     switch (opcode)
     {
         case 0x00:
@@ -2856,6 +3082,8 @@ Cpu::StepResult Cpu::step()
                     case 0x08:
                         { // JR
                             const uint32_t s = rs(instr);
+                            if ((s & 31u) == 31u)
+                                callctx_pop();
                             if (gpr_[s] == 0xFFFFFFFFu)
                             {
                                 emu::logf(emu::LogLevel::error, "CPU",
@@ -2882,6 +3110,7 @@ Cpu::StepResult Cpu::step()
                                 wb_valid = 1;
                             }
                             set_reg(d ? d : 31u, ra);
+                            callctx_push(r.pc, gpr_[s], ra);
                             schedule_branch(gpr_[s]);
                             break;
                         }
@@ -3473,6 +3702,8 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
                 next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
+                next_pending_load.mem_paddr = virt_to_phys(addr);
+                next_pending_load.from_mem = 1;
                 ld_valid = 1;
                 ld_op = "LW";
                 ld_reg = t;
@@ -3488,7 +3719,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u32(addr, gpr_[t], gpr_face_token_[t & 31u]))
+                if (!store_u32(addr, gpr_[t], infer_store_token_from_reg(t, gpr_face_token_[t & 31u])))
                 {
                     // Exception déjà déclenchée (ADES). On sort.
                     break;
@@ -3592,6 +3823,7 @@ Cpu::StepResult Cpu::step()
                     wb_new = ra;
                     wb_valid = 1;
                     set_reg(31, ra);
+                    callctx_push(r.pc, target, ra);
                 }
 
                 if (take)
@@ -3619,6 +3851,7 @@ Cpu::StepResult Cpu::step()
                 wb_new = ra;
                 wb_valid = 1;
                 set_reg(31, ra);
+                callctx_push(r.pc, target, ra);
                 schedule_branch(target);
                 break;
             }
@@ -3705,6 +3938,8 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
                 next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
+                next_pending_load.mem_paddr = virt_to_phys(addr);
+                next_pending_load.from_mem = 1;
                 ld_valid = 1;
                 ld_op = "LB";
                 ld_reg = t;
@@ -3729,6 +3964,8 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
                 next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
+                next_pending_load.mem_paddr = virt_to_phys(addr);
+                next_pending_load.from_mem = 1;
                 ld_valid = 1;
                 ld_op = "LBU";
                 ld_reg = t;
@@ -3753,6 +3990,8 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
                 next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
+                next_pending_load.mem_paddr = virt_to_phys(addr);
+                next_pending_load.from_mem = 1;
                 ld_valid = 1;
                 ld_op = "LH";
                 ld_reg = t;
@@ -3777,6 +4016,8 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
                 next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(addr));
+                next_pending_load.mem_paddr = virt_to_phys(addr);
+                next_pending_load.from_mem = 1;
                 ld_valid = 1;
                 ld_op = "LHU";
                 ld_reg = t;
@@ -3789,7 +4030,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu), gpr_face_token_[t & 31u]))
+                if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu), infer_store_token_from_reg(t, gpr_face_token_[t & 31u])))
                     break;
                 mem_valid = 1;
                 mem_op = "SB";
@@ -3803,7 +4044,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu), gpr_face_token_[t & 31u]))
+                if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu), infer_store_token_from_reg(t, gpr_face_token_[t & 31u])))
                     break;
                 mem_valid = 1;
                 mem_op = "SH";
@@ -3846,6 +4087,8 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
                 next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(base));
+                next_pending_load.mem_paddr = virt_to_phys(base);
+                next_pending_load.from_mem = 1;
                 ld_valid = 1;
                 ld_op = "LWL";
                 ld_reg = t;
@@ -3887,6 +4130,8 @@ Cpu::StepResult Cpu::step()
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
                 next_pending_load.face_token = bus_.ram_face_token(virt_to_phys(base));
+                next_pending_load.mem_paddr = virt_to_phys(base);
+                next_pending_load.from_mem = 1;
                 ld_valid = 1;
                 ld_op = "LWR";
                 ld_reg = t;
@@ -3920,7 +4165,7 @@ Cpu::StepResult Cpu::step()
                         w = v;
                         break;
                 }
-                store_u32(base, w, gpr_face_token_[t & 31u]);
+                store_u32(base, w, infer_store_token_from_reg(t, gpr_face_token_[t & 31u]));
                 break;
             }
         case 0x2E:
@@ -3950,7 +4195,7 @@ Cpu::StepResult Cpu::step()
                         w = (w & 0x00FFFFFFu) | (v << 24);
                         break;
                 }
-                store_u32(base, w, gpr_face_token_[t & 31u]);
+                store_u32(base, w, infer_store_token_from_reg(t, gpr_face_token_[t & 31u]));
                 break;
             }
         case 0x10:
@@ -4072,6 +4317,7 @@ Cpu::StepResult Cpu::step()
                     // MTC2: écriture CPU -> data reg GTE
                     gte_.write_data(d, gpr_[t]);
                     if (gte_shadow_) gte_shadow_->write_data(d, gpr_[t]);
+                    observe_camera_mtc2(r.pc, d, t);
                 }
                 else if (rs_field == 0x06)
                 {
@@ -4200,6 +4446,20 @@ Cpu::StepResult Cpu::step()
         default:
             raise_exception(EXC_RI, 0, r.pc);
             break;
+    }
+
+    // Centralized token provenance update for register writes:
+    // we infer once per instruction (cached by PC) and apply only when a WB happened.
+    if (wb_valid)
+    {
+        const uint32_t d = wb_reg & 31u;
+        if (d != 0u)
+        {
+            const uint32_t tok = provenance_analyzer_.infer_reg_token(
+                r.pc, call_ctx_hash_, instr, gpr_face_token_);
+            if (tok != kNoFaceToken && tok != CpuProvenanceAnalyzer::kNoToken)
+                gpr_face_token_[d] = tok;
+        }
     }
 
     // -----------------------------

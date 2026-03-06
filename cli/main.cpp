@@ -470,6 +470,7 @@ static void print_usage(void)
         "Usage:\n"
         "  r3000_emu [--bios=<bios.bin>] [--cd=<image>] [--gpu-dump=<file>] [--wav-output=<file.wav>]\n"
         "            [--max-steps=N] [--pretty] [--log-level=..] [--log-cats=..] [--emu-log-level=..]\n"
+        "            [--psx3d-mode=game|analysis] [--psx3d-analysis=0|1] [--psx3d-refresh=reason:scope]\n"
         "  r3000_emu --load=<file> [--format=auto|elf|psxexe] [--pretty] [--max-steps=N]\n"
         "\n"
         "Options:\n"
@@ -478,6 +479,9 @@ static void print_usage(void)
         "  --gpu-dump=<file>     Dump GPU commands to file\n"
         "  --wav-output=<file>   Save SPU audio to WAV file\n"
         "  --max-steps=N         Stop after N instructions\n"
+        "  --psx3d-mode=...      Set PSX3D runtime mode (game|analysis)\n"
+        "  --psx3d-analysis=0|1  Authorize/disallow PSX3D analysis path\n"
+        "  --psx3d-refresh=R:S   Queue analysis refresh request (reason:scope)\n"
         "  --max-time=N          Stop after N seconds wall clock (default: 300)\n"
         "  --load=<file>         Load ELF or PS-X EXE directly (skips BIOS)\n"
         "  --pretty              Pretty print instructions\n"
@@ -628,6 +632,9 @@ int main(int argc, char** argv)
     const char* gpu_dump = arg_value(argc, argv, "--gpu-dump=");
     const char* wav_output = arg_value(argc, argv, "--wav-output=");
     const int trace_io = has_flag(argc, argv, "--trace-io");
+    const char* psx3d_mode_s = arg_value(argc, argv, "--psx3d-mode=");
+    const char* psx3d_analysis_s = arg_value(argc, argv, "--psx3d-analysis=");
+    const char* psx3d_refresh_s = arg_value(argc, argv, "--psx3d-refresh=");
 
     const char* fmt_s = arg_value(argc, argv, "--format=");
     loader::Format fmt = loader::Format::auto_detect;
@@ -690,6 +697,41 @@ int main(int argc, char** argv)
 
     const uint32_t kRamSize = 2u * 1024u * 1024u;
     emu::Core core(&logger);
+    if (psx3d_analysis_s)
+    {
+        const bool enabled =
+            (std::strcmp(psx3d_analysis_s, "1") == 0) ||
+            (std::strcmp(psx3d_analysis_s, "true") == 0) ||
+            (std::strcmp(psx3d_analysis_s, "on") == 0);
+        core.set_psx3d_analysis_enabled(enabled);
+    }
+    if (psx3d_mode_s)
+    {
+        if (std::strcmp(psx3d_mode_s, "analysis") == 0)
+            core.set_psx3d_mode(emu::Psx3dRunMode::analysis);
+        else if (std::strcmp(psx3d_mode_s, "game") == 0)
+            core.set_psx3d_mode(emu::Psx3dRunMode::game);
+        else
+            emu::logf(emu::LogLevel::warn, "MAIN", "Unknown --psx3d-mode=%s (use game|analysis)", psx3d_mode_s);
+    }
+    if (psx3d_refresh_s && *psx3d_refresh_s)
+    {
+        const char* colon = std::strchr(psx3d_refresh_s, ':');
+        if (colon)
+        {
+            char reason[64]{};
+            char scope[64]{};
+            const size_t rn = (size_t)(colon - psx3d_refresh_s);
+            const size_t rsz = (rn < sizeof(reason) - 1) ? rn : (sizeof(reason) - 1);
+            std::memcpy(reason, psx3d_refresh_s, rsz);
+            std::strncpy(scope, colon + 1, sizeof(scope) - 1);
+            core.request_psx3d_analysis_refresh(reason, scope);
+        }
+        else
+        {
+            core.request_psx3d_analysis_refresh(psx3d_refresh_s, "global");
+        }
+    }
     {
         char err[256];
         err[0] = '\0';

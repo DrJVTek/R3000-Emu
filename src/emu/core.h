@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 #include "../cdrom/cdrom.h"
 #include "../gpu/gpu.h"
@@ -15,6 +18,9 @@
 #include "../r3000/bus.h"
 #include "../r3000/cpu.h"
 #include "hooks.h"
+#include "provenance_hotspot_profiler.h"
+#include "psx3d_profile_store.h"
+#include "psx3d_mode_manager.h"
 
 namespace emu
 {
@@ -116,6 +122,16 @@ class Core
     // Per-instruction cycle count from last step()
     uint32_t last_cycles() const;
 
+    // PSX3D runtime mode controls (analysis authorization + refresh trigger).
+    void set_psx3d_mode(Psx3dRunMode m);
+    Psx3dRunMode psx3d_mode() const { return psx3d_mode_mgr_.mode(); }
+    void set_psx3d_analysis_enabled(bool enabled);
+    bool psx3d_analysis_enabled() const { return psx3d_mode_mgr_.analysis_enabled(); }
+    bool psx3d_analysis_active() const { return psx3d_mode_mgr_.analysis_active(); }
+    uint32_t request_psx3d_analysis_refresh(const char* reason, const char* scope);
+    void set_psx3d_profile_path_override(const char* path);
+    Psx3dModeManager& psx3d_mode_manager() { return psx3d_mode_mgr_; }
+
     // Boot milestone tracking (for debug comparison with DuckStation)
     struct BootMilestones
     {
@@ -133,6 +149,10 @@ class Core
 
   private:
     void set_err(char* err, size_t err_cap, const char* msg) const;
+    void set_psx3d_profile_identity_from_path(const char* path);
+    void try_load_psx3d_profile();
+    void try_save_psx3d_profile();
+    void run_psx3d_analysis_refresh(const Psx3dRefreshRequest& req);
 
     rlog::Logger* logger_{nullptr};
     BootMilestones milestones_{};
@@ -169,6 +189,20 @@ class Core
     flog::Sink text_io_{};
     flog::Clock text_clock_{};
     int has_text_clock_{0};
+
+    Psx3dModeManager psx3d_mode_mgr_{};
+    ProvenanceHotspotProfiler provenance_profiler_{};
+    uint32_t last_vblank_seen_{0};
+    uint32_t last_gpu3d_frame_seen_{0};
+    uint32_t last_gpu3d_refresh_frame_{0};
+    std::string psx3d_profile_game_id_{};
+    std::string psx3d_profile_path_{};
+    bool psx3d_profile_loaded_{false};
+    bool psx3d_profile_dirty_{false};
+    bool psx3d_profile_override_{false};
+    std::unordered_set<uint32_t> psx3d_analyzed_pcs_{};
+    uint64_t psx3d_cam_serial_seen_{0};
+    std::vector<uint32_t> psx3d_last_nohint_top_pcs_{};
 };
 
 } // namespace emu

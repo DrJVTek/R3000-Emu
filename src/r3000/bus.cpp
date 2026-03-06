@@ -1,7 +1,10 @@
 #include "bus.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include "../audio/spu.h"
 #include "../audio/wav_writer.h"
@@ -50,6 +53,7 @@ Bus::Bus(
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
     ram_face_tokens_.assign((ram_size_ + 3u) / 4u, kNoFaceToken);
+    ram_face_writer_pc_.assign((ram_size_ + 3u) / 4u, 0u);
 
     // Create SPU
     spu_ = new audio::Spu();
@@ -114,7 +118,10 @@ void Bus::set_ram_face_token(uint32_t paddr, uint32_t token)
     if (ram_face_tokens_.empty() || ram_size_ == 0)
         return;
     const uint32_t phys = paddr & (ram_size_ - 1u);
-    ram_face_tokens_[(phys >> 2) % ram_face_tokens_.size()] = token;
+    const size_t idx = (phys >> 2) % ram_face_tokens_.size();
+    ram_face_tokens_[idx] = token;
+    if (!ram_face_writer_pc_.empty())
+        ram_face_writer_pc_[idx] = cpu_pc_;
 }
 
 uint32_t Bus::ram_face_token(uint32_t paddr) const
@@ -123,6 +130,23 @@ uint32_t Bus::ram_face_token(uint32_t paddr) const
         return kNoFaceToken;
     const uint32_t phys = paddr & (ram_size_ - 1u);
     return ram_face_tokens_[(phys >> 2) % ram_face_tokens_.size()];
+}
+
+uint32_t Bus::ram_face_writer_pc(uint32_t paddr) const
+{
+    if (ram_face_writer_pc_.empty() || ram_size_ == 0)
+        return 0u;
+    const uint32_t phys = paddr & (ram_size_ - 1u);
+    return ram_face_writer_pc_[(phys >> 2) % ram_face_writer_pc_.size()];
+}
+
+bool Bus::consume_dma2_nohint_summary(Dma2NoHintSummary& out)
+{
+    if (!dma2_nohint_last_valid_)
+        return false;
+    out = dma2_nohint_last_;
+    dma2_nohint_last_valid_ = false;
+    return true;
 }
 
 bool Bus::is_in_ram(uint32_t addr, uint32_t size) const
@@ -1315,7 +1339,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                                  ((uint32_t)ram_[ma + 2] << 16) |
                                                  ((uint32_t)ram_[ma + 3] << 24);
                                     gpu_->mmio_write32(kGpuBase, w);
-                                    if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, ram_face_token(ma));
+                                    const uint32_t tok = ram_face_token(ma);
+                                    if (tok == kNoFaceToken)
+                                    {
+                                        ++dma2_nohint_words_;
+                                        ++dma2_nohint_pc_hist_[ram_face_writer_pc(ma)];
+                                    }
+                                    if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, tok);
                                     ma = (ma + 4) & 0x1FFFFF;
                                 }
                             }
@@ -1360,7 +1390,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                                      ((uint32_t)ram_[off2 + 2] << 16) |
                                                      ((uint32_t)ram_[off2 + 3] << 24);
                                         gpu_->mmio_write32(kGpuBase, w);
-                                        if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, ram_face_token(off2));
+                                        const uint32_t tok = ram_face_token(off2);
+                                        if (tok == kNoFaceToken)
+                                        {
+                                            ++dma2_nohint_words_;
+                                            ++dma2_nohint_pc_hist_[ram_face_writer_pc(off2)];
+                                        }
+                                        if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, tok);
                                     }
                                     if ((header & 0x00FFFFFF) == 0x00FFFFFF)
                                         break;
@@ -1892,6 +1928,50 @@ void Bus::tick(uint32_t cycles)
             // Fire VBlank hooks (zero-cost when no hooks registered)
             if (hooks_ && hooks_->has_vblank())
                 hooks_->fire_vblank(vblank_total_count_);
+
+            // DMA2 no-token diagnostics: build per-vblank summary and optionally log top PCs.
+            if (dma2_nohint_words_ > 0)
+            {
+                std::vector<std::pair<uint32_t, uint32_t>> top;
+                top.reserve(dma2_nohint_pc_hist_.size());
+                for (const auto& kv : dma2_nohint_pc_hist_)
+                    top.emplace_back(kv.first, kv.second);
+                std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+                    return a.second > b.second;
+                });
+
+                dma2_nohint_last_.vblank = vblank_total_count_;
+                dma2_nohint_last_.nohint_words = dma2_nohint_words_;
+                dma2_nohint_last_.top_pcs.clear();
+                const size_t keep = (top.size() < 16) ? top.size() : 16;
+                for (size_t i = 0; i < keep; ++i)
+                    dma2_nohint_last_.top_pcs.push_back(top[i]);
+                dma2_nohint_last_valid_ = true;
+
+                if (vblank_total_count_ < 10 || (vblank_total_count_ % 60) == 0)
+                {
+                const size_t n = (top.size() < 6) ? top.size() : 6;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "DMA2_NOHINT",
+                    "vblank=%u nohint_words=%u unique_pcs=%u",
+                    vblank_total_count_,
+                    dma2_nohint_words_,
+                    (uint32_t)top.size());
+                for (size_t i = 0; i < n; ++i)
+                {
+                    emu::logf(
+                        emu::LogLevel::warn,
+                        "DMA2_NOHINT",
+                        "  top[%u] pc=0x%08X words=%u",
+                        (uint32_t)i,
+                        top[i].first,
+                        top[i].second);
+                }
+                }
+            }
+            dma2_nohint_words_ = 0;
+            dma2_nohint_pc_hist_.clear();
 
             // ===== VBlank STUCK DETECTION =====
             // Check if GPU is making real frame progress (submitting primitives)

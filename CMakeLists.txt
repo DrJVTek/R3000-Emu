@@ -26,6 +26,9 @@ set(CORE_SOURCES
   src/audio/wav_writer.cpp
   src/cdrom/cdrom.cpp
   src/emu/core.cpp
+  src/emu/provenance_hotspot_profiler.cpp
+  src/emu/psx3d_profile_store.cpp
+  src/emu/psx3d_mode_manager.cpp
   src/gpu/gpu.cpp
   src/gpu/gpu_3d.cpp
   src/gpu/gte_correlation.cpp
@@ -37,6 +40,7 @@ set(CORE_SOURCES
   src/loader/loader.cpp
   src/r3000/bus.cpp
   src/r3000/cpu.cpp
+  src/r3000/cpu_provenance_analyzer.cpp
 )
 
 # CLI emulator — links core sources directly (no separate library needed)

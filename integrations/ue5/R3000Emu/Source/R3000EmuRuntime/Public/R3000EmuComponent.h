@@ -29,6 +29,23 @@ class FR3000EmuWorker;
 // Delegate fired when the BIOS prints a complete line via putchar (B(3Dh)).
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBiosPrint, const FString&, Line);
 
+UENUM(BlueprintType)
+enum class EPsx3dRefreshReason : uint8
+{
+    Manual UMETA(DisplayName = "Manual"),
+    SceneChange UMETA(DisplayName = "Scene Change"),
+    HighFallback2D UMETA(DisplayName = "High Fallback 2D"),
+    NewGteCode UMETA(DisplayName = "New GTE Code")
+};
+
+UENUM(BlueprintType)
+enum class EPsx3dRefreshScope : uint8
+{
+    Global UMETA(DisplayName = "Global"),
+    CurrentPcRegion UMETA(DisplayName = "Current PC Region"),
+    CurrentOtWindow UMETA(DisplayName = "Current OT Window")
+};
+
 UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
 class UR3000EmuComponent : public UActorComponent
 {
@@ -82,6 +99,30 @@ class UR3000EmuComponent : public UActorComponent
     // Use this to load test ROMs compiled with PSn00bSDK.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     FString ExePath;
+
+    // Optional: explicit PSX3D analysis profile file path (.psx3dprof).
+    // If set, this overrides the automatic per-game profile path.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|PSX3D")
+    FString Psx3dProfilePath;
+
+    // PSX3D runtime mode:
+    // false = game mode (use existing profile/rules), true = analysis mode.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|PSX3D")
+    bool bPsx3dAnalysisMode{false};
+
+    // Authorize analysis passes (in addition to mode).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|PSX3D")
+    bool bPsx3dAnalysisEnabled{false};
+
+    // Trigger one PSX3D refresh request at InitEmulator.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|PSX3D")
+    bool bPsx3dRefreshOnInit{false};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|PSX3D", meta = (EditCondition = "bPsx3dRefreshOnInit"))
+    EPsx3dRefreshReason Psx3dRefreshReason{EPsx3dRefreshReason::Manual};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|PSX3D", meta = (EditCondition = "bPsx3dRefreshOnInit"))
+    EPsx3dRefreshScope Psx3dRefreshScope{EPsx3dRefreshScope::Global};
 
     // Optional: run N steps on BeginPlay (0 = don't run).
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
@@ -333,4 +374,3 @@ class UR3000EmuComponent : public UActorComponent
     TAtomic<bool> bWorkerShouldStop_{false};
     TAtomic<bool> bWorkerPaused_{false};
 };
-

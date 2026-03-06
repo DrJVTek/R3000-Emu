@@ -326,6 +326,29 @@ static void UELogCallback(emu::LogLevel Level, const char* Tag, const char* Msg,
 
 static const TCHAR* kPSXInputDir = TEXT("/Game/PSX/Input/");
 
+static const char* ToPsx3dRefreshReason(EPsx3dRefreshReason V)
+{
+    switch (V)
+    {
+    case EPsx3dRefreshReason::Manual: return "manual";
+    case EPsx3dRefreshReason::SceneChange: return "scene_change";
+    case EPsx3dRefreshReason::HighFallback2D: return "high_fallback_2d";
+    case EPsx3dRefreshReason::NewGteCode: return "new_gte_code";
+    default: return "manual";
+    }
+}
+
+static const char* ToPsx3dRefreshScope(EPsx3dRefreshScope V)
+{
+    switch (V)
+    {
+    case EPsx3dRefreshScope::Global: return "global";
+    case EPsx3dRefreshScope::CurrentPcRegion: return "current_pc_region";
+    case EPsx3dRefreshScope::CurrentOtWindow: return "current_ot_window";
+    default: return "global";
+    }
+}
+
 UR3000EmuComponent::UR3000EmuComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
@@ -511,6 +534,22 @@ void UR3000EmuComponent::InitEmulator()
     }
 
     Core_ = new emu::Core(&CoreLogger_);
+    if (Core_)
+    {
+        Core_->set_psx3d_analysis_enabled(bPsx3dAnalysisEnabled);
+        Core_->set_psx3d_mode(bPsx3dAnalysisMode ? emu::Psx3dRunMode::analysis : emu::Psx3dRunMode::game);
+    }
+    if (Core_ && !Psx3dProfilePath.IsEmpty())
+    {
+        FTCHARToUTF8 ProfileUtf8(*Psx3dProfilePath);
+        Core_->set_psx3d_profile_path_override(ProfileUtf8.Get());
+    }
+    if (Core_ && bPsx3dRefreshOnInit)
+    {
+        Core_->request_psx3d_analysis_refresh(
+            ToPsx3dRefreshReason(Psx3dRefreshReason),
+            ToPsx3dRefreshScope(Psx3dRefreshScope));
+    }
     char err[256];
     err[0] = '\0';
     if (!Core_->alloc_ram(2u * 1024u * 1024u, err, sizeof(err)))
