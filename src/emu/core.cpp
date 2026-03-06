@@ -27,6 +27,22 @@ static void on_garbage_setloc(uint32_t lba, uint32_t disc_end, void* /*user*/)
     emu::logf(emu::LogLevel::warn, "CDROM", "Garbage SetLoc: LBA=%u >= disc_end=%u", lba, disc_end);
 }
 
+static void on_psx3d_vblank_hook(uint32_t vblank_count, void* user)
+{
+    if (!user)
+        return;
+    auto* core = reinterpret_cast<Core*>(user);
+    core->on_psx3d_vblank(vblank_count);
+}
+
+static void on_psx3d_step_hook(uint32_t pc, void* user)
+{
+    if (!user)
+        return;
+    auto* core = reinterpret_cast<Core*>(user);
+    core->on_psx3d_step_pc(pc);
+}
+
 static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nullptr)
 {
     if (!err || cap == 0)
@@ -229,6 +245,21 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
 
     // Hook system: pass hooks to Bus for VBlank/write dispatch.
     bus_->set_hooks(&hooks_);
+    if (!psx3d_hooks_registered_)
+    {
+        const int vblank_idx = hooks_.add_vblank(&on_psx3d_vblank_hook, this);
+        const int step_idx = hooks_.add_step(&on_psx3d_step_hook, this);
+        psx3d_hooks_registered_ = (vblank_idx >= 0 && step_idx >= 0);
+        if (!psx3d_hooks_registered_)
+        {
+            emu::logf(
+                emu::LogLevel::warn,
+                "PSX3D",
+                "hook registration failed vblank_idx=%d step_idx=%d",
+                vblank_idx,
+                step_idx);
+        }
+    }
 
     // Shadow GTE/GPU for 3D tag-based reconstruction.
     gpu_3d_.bind_gte_3d(&gte_3d_);
@@ -293,6 +324,7 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     psx3d_cam_serial_seen_ = 0;
     psx3d_profile_dirty_ = false;
     psx3d_profile_loaded_ = false;
+    psx3d_step_hook_pcs_.clear();
     try_load_psx3d_profile();
 
     return true;
@@ -337,48 +369,6 @@ r3000::Cpu::StepResult Core::step()
         // Return automatically to normal game mode after a refresh pass.
         if (!psx3d_mode_mgr_.has_refresh_request())
             set_psx3d_mode(Psx3dRunMode::game);
-    }
-
-    // Generic auto-profiling: detect no-token DMA2 hotspots and auto-request refresh.
-    if (psx3d_mode_mgr_.analysis_enabled() && bus_)
-    {
-        r3000::Bus::Dma2NoHintSummary s{};
-        if (bus_->consume_dma2_nohint_summary(s))
-        {
-            psx3d_last_nohint_top_pcs_.clear();
-            psx3d_last_nohint_top_pcs_.reserve(s.top_pcs.size());
-            for (const auto& p : s.top_pcs)
-            {
-                if (p.first != 0)
-                    psx3d_last_nohint_top_pcs_.push_back(p.first);
-            }
-            if (provenance_profiler_.ingest(s))
-                psx3d_profile_dirty_ = true;
-            last_vblank_seen_ = s.vblank;
-            const auto d = provenance_profiler_.decide_refresh(s.vblank);
-            if (d.request)
-            {
-                if (psx3d_analyzed_pcs_.find(d.pc) == psx3d_analyzed_pcs_.end())
-                {
-                    if (psx3d_mode_mgr_.mode() != Psx3dRunMode::analysis)
-                        set_psx3d_mode(Psx3dRunMode::analysis);
-                    char scope[64];
-                    std::snprintf(scope, sizeof(scope), "pc=0x%08X", d.pc);
-                    request_psx3d_analysis_refresh("auto_hotspot", scope);
-                    emu::logf(
-                        emu::LogLevel::warn,
-                        "PSX3D",
-                        "auto hotspot refresh pc=0x%08X weight=%u vblank=%u",
-                        d.pc,
-                        d.weight,
-                        s.vblank);
-                }
-                // Even if already analyzed, ack to apply cooldown and avoid spam.
-                provenance_profiler_.ack_refresh(d.pc, s.vblank);
-            }
-            if (psx3d_profile_dirty_ && (s.vblank % 600u) == 0u)
-                try_save_psx3d_profile();
-        }
     }
 
     // Persist camera-root analysis only when it changed.
@@ -698,6 +688,105 @@ void Core::run_psx3d_analysis_refresh(const Psx3dRefreshRequest& req)
         req.scope.empty() ? "(none)" : req.scope.c_str(),
         added,
         (uint32_t)psx3d_analyzed_pcs_.size());
+}
+
+void Core::refresh_psx3d_step_hook_hotspots(const r3000::Bus::Dma2NoHintSummary& s)
+{
+    std::vector<uint32_t> next;
+    next.reserve(kMaxHooks);
+    for (const auto& p : s.top_pcs)
+    {
+        if (next.size() >= (size_t)kMaxHooks)
+            break;
+        const uint32_t pc = p.first;
+        if (pc == 0)
+            continue;
+        if (psx3d_analyzed_pcs_.find(pc) != psx3d_analyzed_pcs_.end())
+            continue;
+        next.push_back(pc);
+    }
+    psx3d_step_hook_pcs_.swap(next);
+}
+
+void Core::on_psx3d_vblank(uint32_t /*vblank_count*/)
+{
+    if (!psx3d_mode_mgr_.analysis_enabled() || !bus_)
+        return;
+
+    r3000::Bus::Dma2NoHintSummary s{};
+    if (!bus_->consume_dma2_nohint_summary(s))
+        return;
+
+    psx3d_last_nohint_top_pcs_.clear();
+    psx3d_last_nohint_top_pcs_.reserve(s.top_pcs.size());
+    for (const auto& p : s.top_pcs)
+    {
+        if (p.first != 0)
+            psx3d_last_nohint_top_pcs_.push_back(p.first);
+    }
+    refresh_psx3d_step_hook_hotspots(s);
+
+    if (provenance_profiler_.ingest(s))
+        psx3d_profile_dirty_ = true;
+    last_vblank_seen_ = s.vblank;
+
+    const auto d = provenance_profiler_.decide_refresh(s.vblank);
+    if (d.request)
+    {
+        if (psx3d_analyzed_pcs_.find(d.pc) == psx3d_analyzed_pcs_.end())
+        {
+            if (psx3d_mode_mgr_.mode() != Psx3dRunMode::analysis)
+                set_psx3d_mode(Psx3dRunMode::analysis);
+            char scope[64];
+            std::snprintf(scope, sizeof(scope), "pc=0x%08X", d.pc);
+            request_psx3d_analysis_refresh("auto_hotspot", scope);
+            emu::logf(
+                emu::LogLevel::warn,
+                "PSX3D",
+                "auto hotspot refresh pc=0x%08X weight=%u vblank=%u",
+                d.pc,
+                d.weight,
+                s.vblank);
+        }
+        provenance_profiler_.ack_refresh(d.pc, s.vblank);
+    }
+
+    if (psx3d_profile_dirty_ && (s.vblank % 600u) == 0u)
+        try_save_psx3d_profile();
+}
+
+void Core::on_psx3d_step_pc(uint32_t pc)
+{
+    if (!psx3d_mode_mgr_.analysis_enabled())
+        return;
+    if (psx3d_mode_mgr_.mode() == Psx3dRunMode::analysis)
+        return;
+    if (psx3d_mode_mgr_.has_refresh_request())
+        return;
+    if (psx3d_analyzed_pcs_.find(pc) != psx3d_analyzed_pcs_.end())
+        return;
+
+    bool watched = false;
+    for (uint32_t wpc : psx3d_step_hook_pcs_)
+    {
+        if (wpc == pc)
+        {
+            watched = true;
+            break;
+        }
+    }
+    if (!watched)
+        return;
+
+    set_psx3d_mode(Psx3dRunMode::analysis);
+    char scope[64];
+    std::snprintf(scope, sizeof(scope), "pc=0x%08X", pc);
+    request_psx3d_analysis_refresh("hook_breakpoint", scope);
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "hook breakpoint refresh pc=0x%08X",
+        pc);
 }
 
 void Core::set_psx3d_profile_path_override(const char* path)

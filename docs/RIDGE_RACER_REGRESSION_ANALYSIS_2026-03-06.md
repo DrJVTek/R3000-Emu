@@ -59,6 +59,27 @@ Le token "generique" est insuffisant pour ces routines car:
 - ecritures partielles/merge,
 - structures OT indirectes.
 
+## Revue de code (regression structurelle)
+
+### Finding 1 - Le mode "analysis refresh" n'apprend pas de nouvelle logique (critique)
+
+- Fichier: `src/emu/core.cpp` (`run_psx3d_analysis_refresh`, autour de `added_pcs`).
+- Comportement actuel: un refresh ajoute seulement des PCs dans `psx3d_analyzed_pcs_` et fait `ack_refresh`.
+- Effet: aucune nouvelle regle CPU/GPU n'est derivee ni appliquee; on marque "analyzed" sans enrichir la resolution des tokens.
+- Symptom log associe: `analysis pass done ... added_pcs=0 total_analyzed=110` en boucle, avec `miss_no_hint=248`.
+
+### Finding 2 - Le fallback monitor se coupe quand tous les hotspots sont deja connus (critique)
+
+- Fichier: `src/emu/core.cpp` (bloc `fallback monitor`, condition `has_unknown_nohint_pc`).
+- Comportement actuel: si les PCs top nohint sont deja dans `ANALYZED_PC`, aucun refresh fallback n'est re-declenche, meme si le ratio 2D reste mauvais.
+- Effet: etat de "stagnation" permanent: on reste en echec mais le systeme se considere "fini".
+
+### Finding 3 - Le profil persiste un etat "analyzed" qui masque les regressions (majeur)
+
+- Fichier: `src/emu/core.cpp` (`try_load_psx3d_profile` + `run_psx3d_analysis_refresh`).
+- Comportement actuel: au chargement, les PCs restent tags "analyzed" indefiniment; les nouvelles executions sur les memes PCs ne relancent pas d'analyse utile.
+- Effet: impossible d'apprendre des variantes de call-path pour le meme PC (cas Ridge Racer OT pack).
+
 ## Ce qu'on a rate
 
 1. Analyse specifique par PC critique (call-aware + memflow local) absente.
@@ -94,6 +115,16 @@ Definition "ca marche":
 - `tok_miss` baisse,
 - `3d` augmente sur frames 540+,
 - pas de degradation du menu/drapeau.
+
+### Etape D - Correctif architecture court terme (sans casser UE5)
+
+1. Garder le hook system actuel (vblank + step).
+2. Remplacer le statut binaire `ANALYZED_PC` par un etat versionne:
+   - `last_analyzed_vblank`,
+   - `analysis_level`,
+   - `last_result_quality` (miss rate apres analyse).
+3. Autoriser une reanalyse des memes PCs si la qualite reste mauvaise (`miss_no_hint/decode_fail` eleves).
+4. En mode game, n'activer le surcout uniquement sur PCs critiques (top nohint + call_ctx), pas globalement.
 
 ## Decision immediate
 

@@ -131,6 +131,9 @@ class Core
     uint32_t request_psx3d_analysis_refresh(const char* reason, const char* scope);
     void set_psx3d_profile_path_override(const char* path);
     Psx3dModeManager& psx3d_mode_manager() { return psx3d_mode_mgr_; }
+    // Internal hook dispatchers (registered in Core::init_from_image).
+    void on_psx3d_vblank(uint32_t vblank_count);
+    void on_psx3d_step_pc(uint32_t pc);
 
     // Boot milestone tracking (for debug comparison with DuckStation)
     struct BootMilestones
@@ -153,6 +156,7 @@ class Core
     void try_load_psx3d_profile();
     void try_save_psx3d_profile();
     void run_psx3d_analysis_refresh(const Psx3dRefreshRequest& req);
+    void refresh_psx3d_step_hook_hotspots(const r3000::Bus::Dma2NoHintSummary& s);
 
     rlog::Logger* logger_{nullptr};
     BootMilestones milestones_{};
@@ -200,9 +204,11 @@ class Core
     bool psx3d_profile_loaded_{false};
     bool psx3d_profile_dirty_{false};
     bool psx3d_profile_override_{false};
+    bool psx3d_hooks_registered_{false};
     std::unordered_set<uint32_t> psx3d_analyzed_pcs_{};
     uint64_t psx3d_cam_serial_seen_{0};
     std::vector<uint32_t> psx3d_last_nohint_top_pcs_{};
+    std::vector<uint32_t> psx3d_step_hook_pcs_{};
 };
 
 } // namespace emu
