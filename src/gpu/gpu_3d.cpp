@@ -401,7 +401,6 @@ void Gpu3D::gp0_polygon()
     // Token-first path. If no token is available, optional miss-only decode fallback.
     // Select a hint that is both frequent and present in face cache.
     uint32_t face_idx = 0xFFFFFFFFu;
-    bool hint_stale = false;
     {
         uint32_t best_cached = kNoFaceHint;
         int best_cached_count = 0;
@@ -445,25 +444,18 @@ void Gpu3D::gp0_polygon()
             ++tok_miss_no_hint_;
         else if (!had_cached_hint)
             ++tok_miss_hint_not_cached_;
-        hint_stale = had_any_hint && !had_cached_hint;
 
         // Prefer cache-valid token to avoid dropping to 2D when majority token is stale.
         face_idx = (best_cached != kNoFaceHint) ? best_cached : best_any;
     }
 
 #if R3000_GPU3D_MISS_ONLY_DECODE_FALLBACK
-    // Important generic fallback:
-    // when a token exists but points to an evicted/invalid cache entry (stale),
-    // run geometric decode and prefer that result if available.
-    if (face_idx == kNoFaceHint || face_idx == 0u || hint_stale)
+    if (face_idx == kNoFaceHint || face_idx == 0u)
     {
-        uint32_t decoded = kNoFaceHint;
         if (quad)
-            decoded = decode_face_quad(raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2], raw_x[3], raw_y[3]);
+            face_idx = decode_face_quad(raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2], raw_x[3], raw_y[3]);
         else
-            decoded = decode_face_tri(raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2]);
-        if (decoded != kNoFaceHint && decoded != 0u)
-            face_idx = decoded;
+            face_idx = decode_face_tri(raw_x[0], raw_y[0], raw_x[1], raw_y[1], raw_x[2], raw_y[2]);
     }
 #endif
     if (face_idx == kNoFaceHint || face_idx == 0u)

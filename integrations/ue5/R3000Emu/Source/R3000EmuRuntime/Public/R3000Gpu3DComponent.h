@@ -16,8 +16,12 @@ enum class EGpu3DTrackingMode : uint8
     /** Legacy behavior: mesh follows component/owner transform (current behavior). */
     LegacyFollowOwner UMETA(DisplayName = "Legacy Follow Owner"),
     /** Detach mesh once and keep it fixed in world space (free roam around geometry). */
-    WorldLocked UMETA(DisplayName = "World Locked")
+    WorldLocked UMETA(DisplayName = "World Locked"),
+    /** Keep mesh world-locked, but allow recentering from the active player/HMD view. */
+    VRRecenterable UMETA(DisplayName = "VR Recenterable")
 };
+
+class FR3000Gpu3DTrackingController;
 
 /**
  * PS1 GPU 3D reconstruction renderer.
@@ -57,6 +61,10 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU3D|Stats")
     int32 GetLast2DSkipCount() const { return Last2DSkipCount_; }
 
+    /** Recenter the reconstructed mesh from the active player/HMD view. */
+    UFUNCTION(BlueprintCallable, Category = "R3000Emu|GPU3D")
+    void RecenterToPlayerView();
+
     // ------- Rendering settings -------
 
     /** Enable/disable this 3D renderer at runtime. OFF by default (2D is primary). */
@@ -91,6 +99,18 @@ public:
     /** Mesh tracking mode. Keep Legacy to preserve old behavior, or use WorldLocked to freely move camera around mesh. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
     EGpu3DTrackingMode TrackingMode{EGpu3DTrackingMode::LegacyFollowOwner};
+
+    /** Offset applied when recentering from the active player/HMD view. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D|VR")
+    FVector VrViewOffset{FVector(150.0f, 0.0f, 0.0f)};
+
+    /** Automatically recenter when entering VRRecenterable mode. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D|VR")
+    bool bAutoRecenterVrOnModeEnter{true};
+
+    /** Recenter every tick from the active player/HMD view. Keep off unless explicitly testing a view-follow mode. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D|VR")
+    bool bTrackVrViewEveryTick{false};
 
     /** Skip 2D elements (HUD/UI) — only render GTE-correlated 3D geometry. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
@@ -190,4 +210,5 @@ private:
     float Last3DExtentY_{0.0f}; // Horizontal extent (UE Y)
 
     bool bMeshDetachedForWorldLock_{false};
+    FR3000Gpu3DTrackingController* TrackingController_{nullptr};
 };

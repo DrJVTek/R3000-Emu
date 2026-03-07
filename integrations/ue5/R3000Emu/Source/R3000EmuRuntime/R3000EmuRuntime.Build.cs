@@ -32,6 +32,7 @@ public class R3000EmuRuntime : ModuleRules
 
         // Same defines as CMake
         PublicDefinitions.Add("R3000_DBG_LOOP_DETECTORS=1");
+        PublicDefinitions.Add("_CRT_SECURE_NO_WARNINGS=1");
     }
 
     private string FindRepoRoot()

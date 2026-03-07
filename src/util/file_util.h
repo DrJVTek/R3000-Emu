@@ -46,7 +46,10 @@ inline std::FILE* fopen_utf8(const char* path, const char* mode)
     MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wpath_len);
     MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, wmode_len);
 
-    return _wfopen(wpath, wmode);
+    std::FILE* file = nullptr;
+    if (_wfopen_s(&file, wpath, wmode) != 0)
+        return nullptr;
+    return file;
 #else
     return std::fopen(path, mode);
 #endif

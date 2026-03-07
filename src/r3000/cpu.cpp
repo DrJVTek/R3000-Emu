@@ -4777,14 +4777,14 @@ Cpu::StepResult Cpu::step()
             std::snprintf(
                 tmp, sizeof(tmp), "  ; %s:0x%08X->0x%08X", reg_name(wb_reg), wb_old, wb_new
             );
-            ::strncat(line, tmp, sizeof(line) - ::strlen(line) - 1);
+            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
         }
 
         if (mem_valid)
         {
             char tmp[128];
             std::snprintf(tmp, sizeof(tmp), "  ; %s [0x%08X]=0x%08X", mem_op, mem_addr, mem_val);
-            ::strncat(line, tmp, sizeof(line) - ::strlen(line) - 1);
+            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
         }
 
         if (ld_valid)
@@ -4793,7 +4793,7 @@ Cpu::StepResult Cpu::step()
             std::snprintf(
                 tmp, sizeof(tmp), "  ; (LD sched) %s -> %s=0x%08X", ld_op, reg_name(ld_reg), ld_val
             );
-            ::strncat(line, tmp, sizeof(line) - ::strlen(line) - 1);
+            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
         }
 
         if (wb2_valid)
@@ -4807,7 +4807,7 @@ Cpu::StepResult Cpu::step()
                 wb2_old,
                 wb2_new
             );
-            ::strncat(line, tmp, sizeof(line) - ::strlen(line) - 1);
+            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
         }
 
         std::printf("%s\n", line);

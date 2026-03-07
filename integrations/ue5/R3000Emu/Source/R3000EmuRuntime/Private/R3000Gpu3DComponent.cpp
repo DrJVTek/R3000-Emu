@@ -1,4 +1,5 @@
 #include "R3000Gpu3DComponent.h"
+#include "R3000Gpu3DTrackingController.h"
 
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -40,6 +41,8 @@ void UR3000Gpu3DComponent::BeginPlay()
 {
     Super::BeginPlay();
     SetComponentTickEnabled(true);
+    if (!TrackingController_)
+        TrackingController_ = new FR3000Gpu3DTrackingController(*this);
 }
 
 // ===================================================================
@@ -49,6 +52,8 @@ void UR3000Gpu3DComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
     Gpu3D_ = nullptr;
+    delete TrackingController_;
+    TrackingController_ = nullptr;
     Super::EndPlay(EndPlayReason);
 }
 
@@ -109,6 +114,14 @@ void UR3000Gpu3DComponent::SetVramTexture(UTexture2D* InTexture)
     }
 
     GPU3D_NOISE_UELOG(Log, TEXT("SetVramTexture: %p"), InTexture);
+}
+
+void UR3000Gpu3DComponent::RecenterToPlayerView()
+{
+    if (!TrackingController_ || !MeshComp_)
+        return;
+
+    TrackingController_->RecenterToPlayerView(MeshComp_, VrViewOffset, bMeshDetachedForWorldLock_);
 }
 
 // ===================================================================
@@ -174,19 +187,15 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
     if (!Gpu3D_ || !MeshComp_)
         return;
 
-    // Optional free-roam mode: keep mesh fixed in world space.
-    if (TrackingMode == EGpu3DTrackingMode::WorldLocked)
+    if (TrackingController_)
     {
-        if (!bMeshDetachedForWorldLock_)
-        {
-            MeshComp_->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-            bMeshDetachedForWorldLock_ = true;
-        }
-    }
-    else if (bMeshDetachedForWorldLock_)
-    {
-        MeshComp_->AttachToComponent(this, FAttachmentTransformRules::KeepWorldTransform);
-        bMeshDetachedForWorldLock_ = false;
+        TrackingController_->Update(
+            MeshComp_,
+            TrackingMode,
+            bAutoRecenterVrOnModeEnter,
+            bTrackVrViewEveryTick,
+            VrViewOffset,
+            bMeshDetachedForWorldLock_);
     }
 
     // Toggle visibility based on bEnabled

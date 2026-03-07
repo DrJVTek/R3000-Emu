@@ -11,6 +11,8 @@ This is especially relevant for the long-term PSXVR target:
 - better fit for future standalone VR constraints,
 - cleaner path toward true object instances instead of flat per-frame reprojection.
 
+The cache must preserve canonical mesh attributes, not only positions.
+
 ## Core idea
 
 Because the emulator controls the GTE path, it can observe:
@@ -68,8 +70,10 @@ Stores canonical object data:
 - canonical vertices
 - indices / topology
 - UVs
+- colors
+- normals
 - material state keys
-- optional normals / inferred attributes
+- optional inferred attributes only when source data is missing
 
 ### 2. Instance cache
 
@@ -85,6 +89,15 @@ The correct long-term runtime path is:
 - detect object
 - resolve canonical mesh
 - update instance transform only
+
+The canonical mesh should preserve source attributes whenever possible:
+
+- positions
+- normals
+- UVs
+- colors
+- topology
+- material state
 
 ## Auto-detection signals
 
@@ -158,6 +171,13 @@ Promote to canonical mesh if confidence stays high:
 - repeated recurrence,
 - low invalidation rate.
 
+When promoted:
+
+- preserve source normals if valid,
+- preserve source UVs,
+- preserve source colors,
+- do not recompute these attributes unless the source path is absent or invalid.
+
 ### Stage 4: instance mode
 
 Once promoted:
@@ -172,6 +192,7 @@ The cache must be invalidated or downgraded if:
 
 - topology changes,
 - UV/material state changes incompatibly,
+- normals/colors change incompatibly,
 - source memory changes structurally,
 - per-vertex motion can no longer be explained by a single transform,
 - the object turns out to be CPU-deformed or subdivided dynamically.
@@ -211,6 +232,13 @@ So:
 - `.psx3dprof` remains the correlation knowledge base,
 - mesh cache becomes a higher-level optimization / runtime exploitation layer.
 
+This also means the mesh cache should benefit from future analysis of:
+
+- source normals,
+- lighting-related structures,
+- stable UV/material layouts,
+- canonical vertex colors.
+
 ## Runtime vs offline split
 
 Auto-detection can happen in both places, but not with the same cost.
@@ -248,6 +276,13 @@ to:
 That is much closer to how a real engine wants to operate.
 
 It is likely a necessary step if the final target is performant PS1-in-VR rendering.
+
+Compared to caching positions only, preserving full canonical attributes gives:
+
+- more faithful shading,
+- stable UV mapping,
+- preserved vertex colors,
+- less unnecessary recomputation.
 
 ## Open problem
 
