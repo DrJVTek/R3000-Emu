@@ -89,6 +89,57 @@ Par défaut : `logs/compare_r3000.txt` vs `logs/compare_duckstation_ref.txt`. 
 - `src/loader/` : loaders (ELF32 MIPS, PS-X EXE minimal).
 - `integrations/ue5/` : intégration Unreal Engine 5 (plugin) + docs.
 
+## PSXVR / PSX3D direction
+
+Le but long terme n'est pas seulement d'émuler la PS1 "à plat", mais de reconstruire suffisamment d'information 3D pour viser plus tard un runtime VR performant.
+
+La direction retenue est:
+
+- analyse lourde en **CLI / offline** autant que possible,
+- génération d'un profil par jeu,
+- exploitation runtime légère dans `UE5` puis plus tard sur cible contrainte.
+
+### Profil par jeu
+
+Le fast path runtime doit reposer sur un profil par jeu:
+
+- convention de nom recommandée: `SCUS-943.00.psx3dprof`
+- identité principale portée par le **nom du fichier**
+- validation technique interne via hash(s) (`main_exe_hash`, etc.)
+
+Le `.psx3dprof` doit rester un artefact runtime-friendly:
+
+- règles validées,
+- hotspots utiles,
+- racines caméra,
+- données de corrélation exploitables rapidement.
+
+Il ne doit pas devenir un dump de reverse engineering.
+
+### Pipeline d'analyse recommandé
+
+Le pipeline d'authoring visé est hybride:
+
+- `CLI` pour les longues captures, hooks, breakpoints et profils
+- `UE5` pour l'acquisition interactive et la validation visuelle
+- `GhidraMCP` pour l'analyse statique et la compréhension du code jeu
+- `LLM` pour synthétiser traces + reverse et produire de meilleurs `.psx3dprof`
+
+Important:
+
+- `GhidraMCP` / `LLM` / outils lourds = pipeline **offline**
+- le runtime final doit rester **léger**
+
+### Couches séparées
+
+Il faut distinguer trois choses:
+
+- `psx3dprof` : corrélation GTE/GPU/caméra et fast path runtime
+- `lighting` : extraction éventuelle des lumières pour proxy UE5 ou approximation shader
+- `VR patch layer` : correctifs par jeu pour HUD, menus, caméra, confort VR, input, etc.
+
+Le patch VR par jeu ne doit pas être mélangé directement au profil de corrélation 3D.
+
 ## Toolchain R3000 / PS1 (Windows)
 
 Sur ce PC, `mipsel-none-elf-gcc` est déjà présent (toolchain MIPS little-endian).
@@ -152,4 +203,3 @@ Le `hello` utilise les **host syscalls** (SYSCALL) pour imprimer dans la console
 
 Le PowerPoint de la partie 1 (spec) du live **PSXVR** est dans le repo :
 - [psxvr 1.pptx](psxvr%201.pptx)
-

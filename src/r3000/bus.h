@@ -259,6 +259,8 @@ class Bus
     uint8_t exp1_[kExp1Size]{};
     std::vector<uint32_t> ram_face_tokens_{};
     std::vector<uint32_t> ram_face_writer_pc_{};
+    std::vector<uint32_t> scratch_face_tokens_{};
+    std::vector<uint32_t> scratch_face_writer_pc_{};
     uint32_t cache_ctrl_{0};
 
     // DMA2 no-token diagnostics (per-frame histogram by writer PC)

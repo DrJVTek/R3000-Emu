@@ -54,6 +54,8 @@ Bus::Bus(
     std::memset(exp1_, 0xFF, sizeof(exp1_));
     ram_face_tokens_.assign((ram_size_ + 3u) / 4u, kNoFaceToken);
     ram_face_writer_pc_.assign((ram_size_ + 3u) / 4u, 0u);
+    scratch_face_tokens_.assign((kScratchSize + 3u) / 4u, kNoFaceToken);
+    scratch_face_writer_pc_.assign((kScratchSize + 3u) / 4u, 0u);
 
     // Create SPU
     spu_ = new audio::Spu();
@@ -115,6 +117,17 @@ uint32_t Bus::ram_size() const
 
 void Bus::set_ram_face_token(uint32_t paddr, uint32_t token)
 {
+    if (paddr >= kScratchBase && paddr < (kScratchBase + kScratchSize))
+    {
+        if (scratch_face_tokens_.empty())
+            return;
+        const uint32_t off = paddr - kScratchBase;
+        const size_t idx = (off >> 2) % scratch_face_tokens_.size();
+        scratch_face_tokens_[idx] = token;
+        if (!scratch_face_writer_pc_.empty())
+            scratch_face_writer_pc_[idx] = cpu_pc_;
+        return;
+    }
     if (ram_face_tokens_.empty() || ram_size_ == 0)
         return;
     const uint32_t phys = paddr & (ram_size_ - 1u);
@@ -126,6 +139,13 @@ void Bus::set_ram_face_token(uint32_t paddr, uint32_t token)
 
 uint32_t Bus::ram_face_token(uint32_t paddr) const
 {
+    if (paddr >= kScratchBase && paddr < (kScratchBase + kScratchSize))
+    {
+        if (scratch_face_tokens_.empty())
+            return kNoFaceToken;
+        const uint32_t off = paddr - kScratchBase;
+        return scratch_face_tokens_[(off >> 2) % scratch_face_tokens_.size()];
+    }
     if (ram_face_tokens_.empty() || ram_size_ == 0)
         return kNoFaceToken;
     const uint32_t phys = paddr & (ram_size_ - 1u);
@@ -134,6 +154,13 @@ uint32_t Bus::ram_face_token(uint32_t paddr) const
 
 uint32_t Bus::ram_face_writer_pc(uint32_t paddr) const
 {
+    if (paddr >= kScratchBase && paddr < (kScratchBase + kScratchSize))
+    {
+        if (scratch_face_writer_pc_.empty())
+            return 0u;
+        const uint32_t off = paddr - kScratchBase;
+        return scratch_face_writer_pc_[(off >> 2) % scratch_face_writer_pc_.size()];
+    }
     if (ram_face_writer_pc_.empty() || ram_size_ == 0)
         return 0u;
     const uint32_t phys = paddr & (ram_size_ - 1u);
@@ -945,7 +972,6 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     {
         const uint32_t mp = phys & (ram_size_ - 1);
         ram_[mp] = v;
-        set_ram_face_token(mp, kNoFaceToken);
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1084,7 +1110,6 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         const uint32_t mp1 = (phys + 1u) & rm;
         ram_[mp0] = (uint8_t)(v & 0xFF);
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
-        set_ram_face_token(mp0, kNoFaceToken);
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1247,7 +1272,6 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
         ram_[mp2] = (uint8_t)((v >> 16) & 0xFF);
         ram_[mp3] = (uint8_t)((v >> 24) & 0xFF);
-        set_ram_face_token(mp0, kNoFaceToken);
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())

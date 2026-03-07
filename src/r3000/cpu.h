@@ -374,6 +374,13 @@ class Cpu
     uint32_t call_ctx_hash_{0};
     uint32_t call_ctx_stack_[64]{};
     uint8_t call_ctx_sp_{0};
+    struct CallCtxFaceState
+    {
+        uint32_t token{kNoFaceToken};
+        uint64_t seq{0};
+    };
+    uint64_t token_seq_{0};
+    std::unordered_map<uint32_t, CallCtxFaceState> call_ctx_face_tokens_{};
     int camera_analysis_enabled_{0};
     uint32_t camera_last_vblank_seen_{0};
     uint32_t camera_last_log_vblank_{0};

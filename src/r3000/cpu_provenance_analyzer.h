@@ -29,6 +29,7 @@ class CpuProvenanceAnalyzer
         copy_rt,
         merge_rs_rt,
         copy_rs_if_rt_none,
+        prefer_rs_then_rt,
     };
 
     struct Rule

@@ -54,6 +54,27 @@ Conclusion cas drapeau:
 - Cause principale: nohint structurel sur routines OT pack (meme probleme que la course).
 - Cause aggravante: regression locale du filtre clear-rect dans `Gpu3DComponent` apres changement de convention des coords 2D.
 
+### Preuves runtime (CLI) ajoutees
+
+Run de reference:
+- `lib/Debug/r3000_emu.exe --cd=ridgeracer.cue --max-steps=500000000 --psx3d-analysis=1 --psx3d-mode=game --emu-log-level=warn`
+
+Constats:
+- La phase critique est bien reproduite en CLI:
+  - `frame=720 ... tris=1242 3d=626 2d=616 ... tok_miss=248 ... miss_no_hint=248 miss_decode_fail=248`
+  - `DMA2_NOHINT top`: `0x80026544 / 0x80026530 / 0x8002651C / 0x8002650C / 0x80025EA8 / 0x80025E90`
+- Les breakpoints CPU sur ces PCs montrent une perte de provenance *avant* l'ecriture RAM:
+  - Exemple 1 (hotspots SW):
+    - `pc=0x8002650C..44 op=SW ... reg=r2 gtok=0xFFFFFFFF mem_valid=0 ... final_tok=0xFFFFFFFF`
+    - contextes observés: `callctx=0x15CCE8A1`, `0x823FEEBD` (et autres)
+  - Exemple 2 (hotspots SB):
+    - `pc=0x80025E90/EA8 op=SB ... reg=r10 gtok=0xFFFFFFFF mem_valid=0 ... final_tok=0xFFFFFFFF`
+    - contexte observé: `callctx=0x0E77B975` (puis variantes)
+
+Interpretation:
+- Le probleme n'est pas "GPU side" en premier lieu: les mots envoyes au DMA2 arrivent deja sans token.
+- L'analyse actuelle (`ANALYZED_PC`) n'apprend aucune regle nouvelle pour ces chemins, donc les memes misses reviennent.
+
 ## Ce qui a ete ajoute (resume)
 
 - Pipeline token flow COP2->RAM->DMA2->Gpu3D.

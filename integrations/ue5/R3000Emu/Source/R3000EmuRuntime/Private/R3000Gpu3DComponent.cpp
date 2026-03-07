@@ -443,16 +443,15 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
 
             // Filter full-screen clear rectangles: untextured primitives that span
             // the full display width. PS1 games draw these to clear the framebuffer.
-            // V.x/V.y have draw offset baked in by shadow GPU, so subtract it to get
-            // logical screen-relative positions for the width check.
+            // GPU3D now stores 2D coords as raw screen-space (no draw offset baked in),
+            // so compare directly against display width.
             if (!(Cmd.flags & 1)) // untextured only
             {
                 const int16_t dw = static_cast<int16_t>(DL.display.width());
-                const int16_t ox = static_cast<int16_t>(DL.draw_env.offset_x);
                 int16_t MinVx = 32767, MaxVx = -32768;
                 for (int32 j = 0; j < 3; ++j)
                 {
-                    const int16_t vx = static_cast<int16_t>(Cmd.v[j].x - ox);
+                    const int16_t vx = static_cast<int16_t>(Cmd.v[j].x);
                     MinVx = FMath::Min(MinVx, vx);
                     MaxVx = FMath::Max(MaxVx, vx);
                 }

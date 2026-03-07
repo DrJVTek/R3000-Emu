@@ -1,13 +1,62 @@
-# PSX3D Analysis + Profile Spec (V1)
+# PSX3D Analysis + Profile Spec (V2 direction)
 
 ## But
 
-Construire un pipeline 100% generique (tous jeux PS1) pour lier de maniere causale:
+Construire un pipeline suffisamment generique pour reutiliser un socle commun sur tous les jeux PS1, mais avec des profils par jeu pour le fast path runtime.
+
+Le but final n'est pas seulement de "faire marcher un jeu".
+
+Le but final est:
+
+- un runtime suffisamment leger pour viser plus tard la VR standalone (`Quest 3` ou equivalent),
+- avec une analyse lourde deplacee hors-ligne autant que possible,
+- et une exploitation runtime basee sur des profils par jeu valides.
+
+Le pipeline causal cible reste:
 
 - GTE -> CPU -> RAM -> DMA2 -> GPU
 
-Sans fallback visuel en mode normal.  
-Ridge Racer est un cas de validation, pas une cible speciale.
+Ridge Racer reste un cas de validation, pas une cible speciale.
+
+---
+
+## Principe d'architecture
+
+### Offline-first
+
+L'analyse profonde doit etre faite en priorite:
+
+- en CLI,
+- avec traces runtime,
+- avec breakpoints/hooks,
+- avec reverse engineering assiste si necessaire,
+- puis persistee dans un profil par jeu.
+
+Pipeline authoring recommande:
+
+- MCP CLI / emulator
+- MCP UE5 pour acquisition interactive si necessaire
+- GhidraMCP pour analyse statique
+- LLM pour synthese / generation / validation de profils
+
+### Runtime lean
+
+Le runtime (`UE5`, plus tard standalone VR) doit:
+
+- charger un profil deja produit,
+- executer un fast path profile,
+- faire seulement des validations runtime legeres,
+- ne basculer en analyse que si la couverture est insuffisante.
+
+### UE5 garde un mode analyse
+
+UE5 garde un mode analyse utile pour:
+
+- acquisition interactive,
+- validation visuelle,
+- collecte complementaire quand le CLI ne suffit pas.
+
+Mais UE5 ne doit pas porter la logique d'analyse la plus lourde.
 
 ---
 
@@ -177,7 +226,7 @@ Important:
 
 ---
 
-## Fichier de profil `.psx3d` (format V1)
+## Fichier de profil `.psx3dprof`
 
 ## Objectif
 
@@ -185,52 +234,165 @@ Persist des regles apprises pour accelerer le resolve au demarrage suivant.
 
 ## Encodage
 
-- JSON versionne (V1), lisible et diffable
+- JSON versionne, lisible et diffable
 - plus tard possible: binaire compact V2
+
+## Identite du jeu
+
+L'identite principale du jeu doit etre portee par le **nom du fichier**, pas par un champ du JSON.
+
+Convention recommandee:
+
+- `SCUS-943.00.psx3dprof`
+- `SLUS-000.00.psx3dprof`
+- `SCES-xxxxx.xx.psx3dprof`
+
+Le runtime peut completer cette identite avec des verifications internes:
+
+- `main_exe_hash`
+- `disc_hash` (optionnel plus tard)
+- autres fingerprints si necessaire
+
+Donc:
+
+- identite canonique humaine = nom du fichier
+- validation technique = hashes internes
+
+## Organisation logique du profil
+
+Le contenu du profil doit tendre vers 3 couches:
+
+### 1) Validation technique
+
+- `profile_version`
+- `main_exe_hash`
+- `disc_hash` optionnel
+- metadata de creation
+
+### 2) Runtime fast path
+
+Partie directement exploitee par le runtime:
+
+- `analyzed_pcs`
+- hotspots valides
+- regles de correlation valides
+- camera roots valides
+- signatures de scene si necessaire
+
+### 3) Offline knowledge
+
+Partie utile a l'auteur de profil / au pipeline offline:
+
+- labels de fonctions
+- observations reverse engineering
+- hypotheses
+- notes de compatibilite
+
+Cette couche ne doit pas alourdir le runtime.
+
+## Ce que le profil ne doit pas porter
+
+Le `.psx3dprof` ne doit pas devenir un fourre-tout.
+
+Il ne doit pas porter directement:
+
+- des traces brutes longues,
+- des dumps massifs,
+- la logique de patch VR du jeu,
+- des dependances directes a Ghidra/MCP/LLM,
+- des heuristiques opaques non validables.
+
+Le profil doit rester un artefact runtime-friendly.
+
+## Extension prevue: metadata lumieres
+
+Le profil peut plus tard porter une section optionnelle de donnees de lumiere reconstruites.
+
+Exemples de cibles:
+
+- ambient color
+- directional lights
+- light vectors
+- confidence / provenance
+
+Mais cette couche doit rester separee des regles geometriques principales.
+
+Le runtime pourra choisir entre:
+
+- vraies lumieres UE5,
+- approximation shader,
+- ou desactiver cette couche selon la plateforme cible.
+
+## Extension prevue: patch VR par jeu
+
+La compatibilite VR ne doit pas etre confondue avec la reconstruction 3D.
+
+Il faut prevoir une couche separee de patch par jeu pour:
+
+- HUD
+- menus
+- camera behavior
+- input remapping
+- ajustements de confort VR
+
+Cette couche doit etre distincte du `.psx3dprof`, meme si les deux peuvent partager la meme identite de jeu.
 
 ## Structure proposee
 
 ```json
 {
-  "version": 1,
-  "game_id": {
-    "exe_name": "SLUS_000.00",
-    "exe_crc32": "A1B2C3D4"
+  "profile_version": 2,
+  "validation": {
+    "main_exe_hash": "A1B2C3D4",
+    "disc_hash": null
   },
-  "build_fingerprint": {
+  "build_info": {
     "emu_git": "abcdef12",
     "profile_created_utc": "2026-03-05T12:34:56Z"
   },
-  "rules": [
-    {
-      "type": "dma_word_to_face",
-      "pc": "0x80012340",
-      "call_ctx": "0x8F11AA22",
-      "opcode_shape": "SWC2->SW chain",
-      "ram_offset": 16,
-      "confidence": 0.97,
-      "hits": 14520,
-      "misses": 231
+  "runtime_fast_path": {
+    "analyzed_pcs": [
+      "0x80012340"
+    ],
+    "rules": [
+      {
+        "type": "dma_word_to_face",
+        "pc": "0x80012340",
+        "call_ctx": "0x8F11AA22",
+        "opcode_shape": "SWC2->SW chain",
+        "ram_offset": 16,
+        "confidence": 0.97,
+        "hits": 14520,
+        "misses": 231,
+        "status": "validated"
+      }
+    ],
+    "camera_roots": [
+      {
+        "addr": "0x80045A00",
+        "kind": "view_matrix",
+        "confidence": 0.93,
+        "frame_stability": 0.99,
+        "status": "validated"
+      }
+    ],
+    "heuristics": {
+      "subdiv_uv_screen_enabled": true,
+      "subdiv_threshold": 0.92
     }
-  ],
-  "camera_roots": [
-    {
-      "addr": "0x80045A00",
-      "kind": "view_matrix",
-      "confidence": 0.93,
-      "frame_stability": 0.99
-    }
-  ],
-  "heuristics": {
-    "subdiv_uv_screen_enabled": true,
-    "subdiv_threshold": 0.92
   },
-  "exclusions": [
-    {
-      "pc": "0x8009AB10",
-      "reason": "false_positive_conflict"
-    }
-  ],
+  "offline_knowledge": {
+    "labels": [
+      {
+        "pc": "0x8009AB10",
+        "name": "possible_packet_builder",
+        "status": "hypothesis"
+      }
+    ],
+    "notes": [
+      "example note"
+    ]
+  },
   "stats": {
     "resolved": 0,
     "no_tag": 0,
@@ -244,9 +406,9 @@ Persist des regles apprises pour accelerer le resolve au demarrage suivant.
 
 ## Chargement au demarrage
 
-1. Identifier le jeu (`exe_name`, CRC).  
-2. Charger le `.psx3d` correspondant.  
-3. Valider `version` + compatibilite build.  
+1. Identifier le jeu et resoudre le nom de profil attendu.  
+2. Charger le `.psx3dprof` correspondant.  
+3. Valider `profile_version` + hashes internes.  
 4. Installer les regles en cache (lecture seule).
 5. Appliquer politique mode/autorisation:
    - si `analysis_enabled=false`: rester en `game` strict
@@ -263,6 +425,7 @@ Persist des regles apprises pour accelerer le resolve au demarrage suivant.
 - Logs obligatoires pour toute decision non triviale (`why`, `score`, `source`).
 - Une relance d'analyse ne doit pas invalider brutalement les regles stables:
   - marquer `candidate` puis promotion apres validation multi-frame.
+- Les hypotheses offline ne doivent pas etre traitees comme des regles runtime valides tant qu'elles ne sont pas promues explicitement.
 
 ---
 
@@ -271,5 +434,6 @@ Persist des regles apprises pour accelerer le resolve au demarrage suivant.
 1. Ajouter `DnaTag` RAM + stats (sans changer le rendu).  
 2. Ajouter resolve DMA2 -> GPU avec motifs d'echec explicites.  
 3. Ajouter call-context complet dans le cache d'analyse (deja partiellement en place).  
-4. Ajouter serialization `.psx3d` V1 (save/load).  
-5. Ajouter module C (subdiv) derriere flag runtime.
+4. Stabiliser le format `.psx3dprof` avec identite par nom de fichier et validation par hash.  
+5. Separer clairement `runtime_fast_path` et `offline_knowledge`.  
+6. Ajouter module C (subdiv) derriere flag runtime.

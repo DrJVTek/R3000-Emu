@@ -238,6 +238,8 @@ void Cpu::reset(uint32_t reset_pc)
     call_ctx_sp_ = 0;
     for (uint32_t i = 0; i < 64; ++i)
         call_ctx_stack_[i] = 0;
+    token_seq_ = 0;
+    call_ctx_face_tokens_.clear();
     camera_last_vblank_seen_ = 0;
     camera_last_log_vblank_ = 0;
     camera_candidates_serial_ = 0;
@@ -697,6 +699,7 @@ Cpu::StepResult Cpu::step()
     StepResult r;
     r.pc = pc_;
     maybe_log_camera_candidates();
+    ++token_seq_;
 
     // Arm exception trace when B(0x4B) StartPAD is called (right before the critical exception)
     if (!exc_trace_armed_ && pc_ == 0xB0u && (gpr_[9] & 0xFFu) == 0x4Bu)
@@ -2863,6 +2866,30 @@ Cpu::StepResult Cpu::step()
         }
         return 1;
     };
+    auto remember_callctx_face = [&](uint32_t tok)
+    {
+        if (tok == kNoFaceToken || tok == 0u)
+            return;
+        CallCtxFaceState st{};
+        st.token = tok;
+        st.seq = token_seq_;
+        call_ctx_face_tokens_[call_ctx_hash_] = st;
+    };
+    auto infer_callctx_face = [&]() -> uint32_t
+    {
+        static constexpr uint64_t kCtxTtlSeq = 4096u;
+        auto it = call_ctx_face_tokens_.find(call_ctx_hash_);
+        if (it == call_ctx_face_tokens_.end())
+            return kNoFaceToken;
+        const CallCtxFaceState& st = it->second;
+        if (st.token == kNoFaceToken || st.token == 0u)
+            return kNoFaceToken;
+        if (token_seq_ < st.seq)
+            return kNoFaceToken;
+        if ((token_seq_ - st.seq) > kCtxTtlSeq)
+            return kNoFaceToken;
+        return st.token;
+    };
     auto store_u8 = [&](uint32_t vaddr, uint8_t v, uint32_t face_token = kNoFaceToken) -> int
     {
         Bus::MemFault f{};
@@ -2877,7 +2904,10 @@ Cpu::StepResult Cpu::step()
             return 0;
         }
         if (face_token != kNoFaceToken)
+        {
             bus_.set_ram_face_token(paddr, face_token);
+            remember_callctx_face(face_token);
+        }
         // For partial writes with unknown provenance, preserve existing word token.
         return 1;
     };
@@ -2895,7 +2925,10 @@ Cpu::StepResult Cpu::step()
             return 0;
         }
         if (face_token != kNoFaceToken)
+        {
             bus_.set_ram_face_token(paddr, face_token);
+            remember_callctx_face(face_token);
+        }
         // For partial writes with unknown provenance, preserve existing word token.
         return 1;
     };
@@ -2913,6 +2946,7 @@ Cpu::StepResult Cpu::step()
             return 0;
         }
         bus_.set_ram_face_token(paddr, face_token);
+        remember_callctx_face(face_token);
         return 1;
     };
     auto infer_store_token_from_reg = [&](uint32_t reg_idx, uint32_t face_token) -> uint32_t
@@ -2921,10 +2955,83 @@ Cpu::StepResult Cpu::step()
         if (face_token != kNoFaceToken)
             return face_token;
         if (!reg_last_mem_valid_[r])
-            return kNoFaceToken;
+            return infer_callctx_face();
         const uint32_t src_paddr = reg_last_mem_addr_[r];
         const uint32_t src_tok = bus_.ram_face_token(src_paddr);
-        return src_tok;
+        if (src_tok != kNoFaceToken && src_tok != 0u)
+            return src_tok;
+        return infer_callctx_face();
+    };
+    auto hotspot_slot = [](uint32_t pc) -> int
+    {
+        switch (pc)
+        {
+            case 0x80026544u: return 0;
+            case 0x80026530u: return 1;
+            case 0x8002651Cu: return 2;
+            case 0x8002650Cu: return 3;
+            case 0x80025EA8u: return 4;
+            case 0x80025E90u: return 5;
+            default: return -1;
+        }
+    };
+    auto trace_hotspot_store = [&](const char* op, uint32_t pc, uint32_t vaddr, uint32_t reg_idx, uint32_t final_tok)
+    {
+        static uint32_t seen[6] = {0, 0, 0, 0, 0, 0};
+        static uint32_t miss[6] = {0, 0, 0, 0, 0, 0};
+        static uint32_t logs[6] = {0, 0, 0, 0, 0, 0};
+        const int s = hotspot_slot(pc);
+        if (s < 0)
+            return;
+
+        ++seen[s];
+        if (final_tok == kNoFaceToken)
+            ++miss[s];
+
+        const bool should_log =
+            (logs[s] < 24u) ||
+            ((final_tok == kNoFaceToken) && ((seen[s] % 2048u) == 0u));
+        if (!should_log)
+            return;
+        ++logs[s];
+
+        const uint32_t r = reg_idx & 31u;
+        const uint32_t gtok = gpr_face_token_[r];
+        const uint32_t src_paddr = reg_last_mem_addr_[r];
+        const uint32_t src_mtok = reg_last_mem_valid_[r] ? bus_.ram_face_token(src_paddr) : kNoFaceToken;
+        const uint32_t ctx_tok = infer_callctx_face();
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D_BP",
+            "pc=0x%08X op=%s seen=%u miss=%u vaddr=0x%08X reg=r%u gtok=0x%08X mem_valid=%u mem_addr=0x%08X mem_tok=0x%08X ctx_tok=0x%08X final_tok=0x%08X callctx=0x%08X",
+            pc,
+            op ? op : "?",
+            seen[s],
+            miss[s],
+            vaddr,
+            r,
+            gtok,
+            (uint32_t)reg_last_mem_valid_[r],
+            src_paddr,
+            src_mtok,
+            ctx_tok,
+            final_tok,
+            call_ctx_hash_);
+
+        if (logs[s] <= 8u)
+        {
+            for (uint32_t back = 1; back <= 6; ++back)
+            {
+                const uint32_t pos = (recent_pos_ - back) & 255u;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "PSX3D_BP",
+                    "  hist[-%u] pc=0x%08X instr=0x%08X",
+                    back,
+                    recent_pc_[pos],
+                    recent_instr_[pos]);
+            }
+        }
     };
     auto decode_face_token_from_tagged_sxy = [&](uint32_t sxy) -> uint32_t
     {
@@ -3719,7 +3826,9 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u32(addr, gpr_[t], infer_store_token_from_reg(t, gpr_face_token_[t & 31u])))
+                const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
+                trace_hotspot_store("SW", r.pc, addr, t, store_tok);
+                if (!store_u32(addr, gpr_[t], store_tok))
                 {
                     // Exception déjà déclenchée (ADES). On sort.
                     break;
@@ -4030,7 +4139,9 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu), infer_store_token_from_reg(t, gpr_face_token_[t & 31u])))
+                const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
+                trace_hotspot_store("SB", r.pc, addr, t, store_tok);
+                if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu), store_tok))
                     break;
                 mem_valid = 1;
                 mem_op = "SB";
@@ -4044,7 +4155,9 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
-                if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu), infer_store_token_from_reg(t, gpr_face_token_[t & 31u])))
+                const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
+                trace_hotspot_store("SH", r.pc, addr, t, store_tok);
+                if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu), store_tok))
                     break;
                 mem_valid = 1;
                 mem_op = "SH";
@@ -4165,7 +4278,9 @@ Cpu::StepResult Cpu::step()
                         w = v;
                         break;
                 }
-                store_u32(base, w, infer_store_token_from_reg(t, gpr_face_token_[t & 31u]));
+                const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
+                trace_hotspot_store("SWL", r.pc, base, t, store_tok);
+                store_u32(base, w, store_tok);
                 break;
             }
         case 0x2E:
@@ -4195,7 +4310,9 @@ Cpu::StepResult Cpu::step()
                         w = (w & 0x00FFFFFFu) | (v << 24);
                         break;
                 }
-                store_u32(base, w, infer_store_token_from_reg(t, gpr_face_token_[t & 31u]));
+                const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
+                trace_hotspot_store("SWR", r.pc, base, t, store_tok);
+                store_u32(base, w, store_tok);
                 break;
             }
         case 0x10:

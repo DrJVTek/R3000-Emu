@@ -26,17 +26,21 @@ CpuProvenanceAnalyzer::Rule CpuProvenanceAnalyzer::analyze_instruction(uint32_t 
                 break;
             case 0x20u: // ADD rd, rs, rt
             case 0x21u: // ADDU rd, rs, rt
-                r.kind = RuleKind::merge_rs_rt;
+                r.kind = RuleKind::prefer_rs_then_rt;
                 break;
             case 0x22u: // SUB rd, rs, rt
             case 0x23u: // SUBU rd, rs, rt
-                r.kind = RuleKind::copy_rs_if_rt_none;
+                r.kind = RuleKind::prefer_rs_then_rt;
                 break;
             case 0x24u: // AND rd, rs, rt
             case 0x25u: // OR rd, rs, rt
             case 0x26u: // XOR rd, rs, rt
             case 0x27u: // NOR rd, rs, rt
-                r.kind = RuleKind::merge_rs_rt;
+                r.kind = RuleKind::prefer_rs_then_rt;
+                break;
+            case 0x2Au: // SLT rd, rs, rt
+            case 0x2Bu: // SLTU rd, rs, rt
+                r.kind = RuleKind::prefer_rs_then_rt;
                 break;
             default:
                 break;
@@ -61,21 +65,42 @@ CpuProvenanceAnalyzer::Rule CpuProvenanceAnalyzer::analyze_instruction(uint32_t 
     if (opcode == 0x0Cu) // ANDI rt, rs, imm
     {
         if ((rt(instr) & 31u) != 0u)
-            r.kind = RuleKind::copy_rs;
+            r.kind = RuleKind::prefer_rs_then_rt;
         return r;
     }
 
     if (opcode == 0x0Du) // ORI rt, rs, imm
     {
         if ((rt(instr) & 31u) != 0u)
-            r.kind = RuleKind::copy_rs;
+            r.kind = RuleKind::prefer_rs_then_rt;
         return r;
     }
 
     if (opcode == 0x0Eu) // XORI rt, rs, imm
     {
         if ((rt(instr) & 31u) != 0u)
-            r.kind = RuleKind::copy_rs;
+            r.kind = RuleKind::prefer_rs_then_rt;
+        return r;
+    }
+
+    if (opcode == 0x0Au) // SLTI rt, rs, imm
+    {
+        if ((rt(instr) & 31u) != 0u)
+            r.kind = RuleKind::prefer_rs_then_rt;
+        return r;
+    }
+
+    if (opcode == 0x0Bu) // SLTIU rt, rs, imm
+    {
+        if ((rt(instr) & 31u) != 0u)
+            r.kind = RuleKind::prefer_rs_then_rt;
+        return r;
+    }
+
+    if (opcode == 0x0Fu) // LUI rt, imm
+    {
+        // Pure immediate materialization: no source register provenance.
+        r.kind = RuleKind::none;
         return r;
     }
 
@@ -102,6 +127,10 @@ uint32_t CpuProvenanceAnalyzer::apply_rule(const Rule& r, uint32_t instr, const 
             return kNoToken;
         case RuleKind::copy_rs_if_rt_none:
             return (tok_rt == kNoToken) ? tok_rs : kNoToken;
+        case RuleKind::prefer_rs_then_rt:
+            if (tok_rs != kNoToken)
+                return tok_rs;
+            return tok_rt;
         default:
             return kNoToken;
     }
