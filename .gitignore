@@ -39,6 +39,9 @@ bios/*.rom
 # temp debug files
 nul
 *.wav
+psx3d.profil
+tmp_*.log
+unreal_mcp_advanced.log
 
 # UE5 plugin generated artifacts (R3000Emu <-> PSXVR)
 integrations/ue5/R3000Emu/Binaries/
