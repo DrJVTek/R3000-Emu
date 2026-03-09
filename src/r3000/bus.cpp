@@ -1369,7 +1369,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                         ++dma2_nohint_words_;
                                         ++dma2_nohint_pc_hist_[ram_face_writer_pc(ma)];
                                     }
-                                    if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, tok);
+                                    if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, tok, ram_face_writer_pc(ma));
                                     ma = (ma + 4) & 0x1FFFFF;
                                 }
                             }
@@ -1420,7 +1420,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                             ++dma2_nohint_words_;
                                             ++dma2_nohint_pc_hist_[ram_face_writer_pc(off2)];
                                         }
-                                        if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, tok);
+                                        if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, tok, ram_face_writer_pc(off2));
                                     }
                                     if ((header & 0x00FFFFFF) == 0x00FFFFFF)
                                         break;
@@ -1610,7 +1610,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         if (gpu_3d_)
         {
             if (phys == kGpuBase)
-                gpu_3d_->gp0_with_face_hint(v, kNoFaceToken);
+                gpu_3d_->gp0_with_face_hint(v, kNoFaceToken, 0);
             else
                 gpu_3d_->gp1(v);
         }

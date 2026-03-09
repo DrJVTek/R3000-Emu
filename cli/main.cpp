@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -17,6 +18,7 @@
 
 #include "emu/core.h"
 #include "emu/hooks.h"
+#include "emu/mcp_server.h"
 #include "gpu/gpu.h"
 #include "gpu/gpu_3d.h"
 #include "loader/loader.h"
@@ -46,6 +48,263 @@ static int has_flag(int argc, char** argv, const char* flag)
     }
     return 0;
 }
+
+class CliMcpBackend final : public emu::IMcpBackend
+{
+public:
+    explicit CliMcpBackend(emu::Core& core) : core_(core) {}
+
+    emu::McpFrontendKind frontend_kind() const override
+    {
+        return emu::McpFrontendKind::cli;
+    }
+
+    bool get_status(emu::McpStatus& out) const override
+    {
+        out = {};
+        out.has_core = true;
+        out.has_cpu = (core_.cpu() != nullptr);
+        out.analysis_enabled = core_.psx3d_analysis_enabled();
+        out.analysis_mode = core_.psx3d_mode() == emu::Psx3dRunMode::analysis;
+        out.profile_override = core_.psx3d_profile_override();
+        out.profile_path = core_.psx3d_profile_path();
+        out.profile_game_id = core_.psx3d_profile_game_id();
+        if (core_.gpu_3d())
+        {
+            out.frame_count = core_.gpu_3d()->frame_count();
+            out.tri_3d = core_.gpu_3d()->dbg_last_3d_;
+            out.tri_2d = core_.gpu_3d()->dbg_last_2d_;
+        }
+        return true;
+    }
+
+    bool get_cpu_state(emu::McpCpuState& out) const override
+    {
+        const r3000::Cpu* cpu = core_.cpu();
+        if (!cpu)
+            return false;
+        out = {};
+        out.pc = cpu->pc();
+        out.hi = cpu->hi();
+        out.lo = cpu->lo();
+        for (uint32_t i = 0; i < 32; ++i)
+            out.gpr[i] = cpu->gpr(i);
+        return true;
+    }
+
+    bool step(uint32_t count, std::string& err) override
+    {
+        if (!core_.cpu())
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const auto res = core_.step();
+            if (res.kind != r3000::Cpu::StepResult::Kind::ok)
+            {
+                char msg[128];
+                std::snprintf(msg, sizeof(msg), "step stopped kind=%d pc=0x%08X", (int)res.kind, res.pc);
+                err = msg;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool read_ram_u32(uint32_t phys_addr, uint32_t& out, std::string& err) const override
+    {
+        const uint8_t* ram = core_.ram();
+        if (!ram)
+        {
+            err = "ram not allocated";
+            return false;
+        }
+        if ((uint64_t)phys_addr + 4u > core_.ram_size())
+        {
+            err = "phys_addr out of range";
+            return false;
+        }
+        out = (uint32_t)ram[phys_addr]
+            | ((uint32_t)ram[phys_addr + 1] << 8)
+            | ((uint32_t)ram[phys_addr + 2] << 16)
+            | ((uint32_t)ram[phys_addr + 3] << 24);
+        return true;
+    }
+
+    bool set_psx3d_mode(const char* mode, std::string& err) override
+    {
+        if (!mode || !*mode)
+        {
+            err = "missing mode";
+            return false;
+        }
+        if (std::strcmp(mode, "analysis") == 0)
+        {
+            core_.set_psx3d_mode(emu::Psx3dRunMode::analysis);
+            return true;
+        }
+        if (std::strcmp(mode, "game") == 0)
+        {
+            core_.set_psx3d_mode(emu::Psx3dRunMode::game);
+            return true;
+        }
+        err = "unknown mode";
+        return false;
+    }
+
+    bool request_psx3d_refresh(const char* reason, const char* scope, uint32_t& id, std::string& err) override
+    {
+        if (!reason || !*reason)
+        {
+            err = "missing reason";
+            return false;
+        }
+        id = core_.request_psx3d_analysis_refresh(reason, (scope && *scope) ? scope : "global");
+        return true;
+    }
+
+    bool set_gte_trace_window(uint32_t pc_start, uint32_t pc_end, uint32_t start_frame, uint32_t end_frame, bool enabled, std::string& err) override
+    {
+        auto* cpu = core_.cpu();
+        if (!cpu)
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+        cpu->set_gte_trace(pc_start, pc_end);
+        cpu->set_gte_trace_frames(start_frame, end_frame);
+        cpu->set_gte_trace_enabled(enabled ? 1 : 0);
+        return true;
+    }
+
+    bool list_breakpoints(std::string& out_json, std::string& err) const override
+    {
+        (void)err;
+        out_json = "{\"breakpoints\":[";
+        for (size_t i = 0; i < breakpoints_.size(); ++i)
+        {
+            const auto& bp = breakpoints_[i];
+            if (i)
+                out_json += ",";
+            out_json += std::string("{\"pc\":") + std::to_string(bp.pc) +
+                ",\"enabled\":" + (bp.enabled ? "true" : "false") +
+                ",\"hit_count\":" + std::to_string(bp.hit_count) + "}";
+        }
+        out_json += "]}";
+        return true;
+    }
+
+    bool set_breakpoint_pc(uint32_t pc, std::string& err) override
+    {
+        if (!core_.cpu())
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+        for (auto& bp : breakpoints_)
+        {
+            if (bp.pc == pc)
+            {
+                bp.enabled = true;
+                return true;
+            }
+        }
+        emu::McpBreakpoint bp{};
+        bp.pc = pc;
+        bp.enabled = true;
+        breakpoints_.push_back(bp);
+        return true;
+    }
+
+    bool clear_breakpoint_pc(uint32_t pc, bool& removed, std::string& err) override
+    {
+        (void)err;
+        removed = false;
+        for (size_t i = 0; i < breakpoints_.size(); ++i)
+        {
+            if (breakpoints_[i].pc == pc)
+            {
+                breakpoints_.erase(breakpoints_.begin() + (ptrdiff_t)i);
+                removed = true;
+                return true;
+            }
+        }
+        return true;
+    }
+
+    bool clear_all_breakpoints(uint32_t& removed_count, std::string& err) override
+    {
+        (void)err;
+        removed_count = (uint32_t)breakpoints_.size();
+        breakpoints_.clear();
+        return true;
+    }
+
+    bool run_until_breakpoint(uint32_t max_steps, uint32_t& hit_pc, uint32_t& steps_done, bool& hit, std::string& err) override
+    {
+        if (!core_.cpu())
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+        hit_pc = 0;
+        steps_done = 0;
+        hit = false;
+        if (breakpoints_.empty())
+        {
+            err = "no breakpoints set";
+            return false;
+        }
+
+        auto* cpu = core_.cpu();
+        for (uint32_t i = 0; i < max_steps; ++i)
+        {
+            const uint32_t pc_before = cpu->pc();
+            for (auto& bp : breakpoints_)
+            {
+                if (bp.enabled && bp.pc == pc_before)
+                {
+                    bp.hit_count++;
+                    hit_pc = pc_before;
+                    steps_done = i;
+                    hit = true;
+                    return true;
+                }
+            }
+
+            const auto res = core_.step();
+            if (res.kind != r3000::Cpu::StepResult::Kind::ok)
+            {
+                char msg[160];
+                std::snprintf(msg, sizeof(msg), "step stopped kind=%d pc=0x%08X", (int)res.kind, res.pc);
+                err = msg;
+                steps_done = i;
+                return false;
+            }
+            steps_done = i + 1;
+        }
+
+        const uint32_t pc_after = cpu->pc();
+        for (auto& bp : breakpoints_)
+        {
+            if (bp.enabled && bp.pc == pc_after)
+            {
+                bp.hit_count++;
+                hit_pc = pc_after;
+                hit = true;
+                return true;
+            }
+        }
+
+        return true;
+    }
+
+private:
+    emu::Core& core_;
+    std::vector<emu::McpBreakpoint> breakpoints_{};
+};
 
 // --- Hook: RAM address watch (logs value each VBlank when it changes) ---
 struct AddrWatchCtx
@@ -495,6 +754,10 @@ static void print_usage(void)
         "  --3d-diag             Log 3D reconstruction stats each VBlank to logs/3d_diag.log\n"
         "  --reg-trace=START:END[:WATCH]  Trace registers in PC range, optionally watch for value\n"
         "                        Example: --reg-trace=0x8004AB00:0x8004AC00:0x35096\n"
+        "  --gte-trace=START:END Log GTE commands executed in a CPU PC range\n"
+        "                        Example: --gte-trace=0x80046000:0x80047000\n"
+        "  --gte-trace-start-frame=N  Delay GTE trace until VBlank/frame N\n"
+        "  --gte-trace-end-frame=N    Stop GTE trace after VBlank/frame N\n"
     );
 }
 
@@ -604,8 +867,9 @@ static flog::Level parse_flog_level_or(const char* s, flog::Level fallback)
 
 int main(int argc, char** argv)
 {
+    const int mcp_stdio = has_flag(argc, argv, "--mcp-stdio");
     rlog::Logger logger{};
-    rlog::logger_init(&logger, stdout);
+    rlog::logger_init(&logger, mcp_stdio ? stderr : stdout);
 
     const char* lvl = arg_value(argc, argv, "--log-level=");
     if (lvl)
@@ -693,6 +957,27 @@ int main(int argc, char** argv)
         }
         emu::logf(emu::LogLevel::info, "MAIN", "Register trace: PC=0x%08X-0x%08X watch=0x%08X",
             reg_trace_start, reg_trace_end, reg_trace_watch);
+    }
+
+    // Parse --gte-trace=START:END
+    uint32_t gte_trace_start = 0, gte_trace_end = 0;
+    uint32_t gte_trace_start_frame = 0, gte_trace_end_frame = 0;
+    const char* gte_trace_s = arg_value(argc, argv, "--gte-trace=");
+    if (gte_trace_s)
+    {
+        char* endp = nullptr;
+        gte_trace_start = (uint32_t)std::strtoul(gte_trace_s, &endp, 0);
+        if (endp && *endp == ':')
+            gte_trace_end = (uint32_t)std::strtoul(endp + 1, &endp, 0);
+        emu::logf(emu::LogLevel::info, "MAIN", "GTE trace: PC=0x%08X-0x%08X",
+            gte_trace_start, gte_trace_end);
+    }
+    gte_trace_start_frame = (uint32_t)parse_u64_or_zero(arg_value(argc, argv, "--gte-trace-start-frame="));
+    gte_trace_end_frame = (uint32_t)parse_u64_or_zero(arg_value(argc, argv, "--gte-trace-end-frame="));
+    if (gte_trace_start_frame != 0 || gte_trace_end_frame != 0)
+    {
+        emu::logf(emu::LogLevel::info, "MAIN", "GTE trace frame gate: start=%u end=%u",
+            gte_trace_start_frame, gte_trace_end_frame);
     }
 
     const uint32_t kRamSize = 2u * 1024u * 1024u;
@@ -890,6 +1175,15 @@ int main(int argc, char** argv)
             emu::logf(emu::LogLevel::info, "MAIN", "Register trace enabled");
         }
     }
+    if (gte_trace_start != 0 || gte_trace_end != 0)
+    {
+        if (core.cpu())
+        {
+            core.cpu()->set_gte_trace(gte_trace_start, gte_trace_end);
+            core.cpu()->set_gte_trace_frames(gte_trace_start_frame, gte_trace_end_frame);
+            emu::logf(emu::LogLevel::info, "MAIN", "GTE trace enabled");
+        }
+    }
 
     // Enable WAV audio output if requested
     if (wav_output && core.bus())
@@ -987,6 +1281,30 @@ int main(int argc, char** argv)
     const int auto_input_count = (int)(sizeof(auto_inputs) / sizeof(auto_inputs[0]));
     const int use_auto_input = has_flag(argc, argv, "--auto-input");
     uint32_t last_auto_vblank = 0;
+
+    if (mcp_stdio)
+    {
+        emu::logf(emu::LogLevel::warn, "MCP", "Starting CLI MCP stdio server");
+        CliMcpBackend backend(core);
+        emu::McpServer server(backend);
+        const int rc = server.run_stdio(stdin, stdout);
+
+        if (diag3d_log_f)
+            std::fclose(diag3d_log_f);
+        if (watch_log_f)
+            std::fclose(watch_log_f);
+        if (outtext)
+            std::fclose(outtext);
+        if (cdlog_f)
+            std::fclose(cdlog_f);
+        if (gpulog_f)
+            std::fclose(gpulog_f);
+        if (syslog_f)
+            std::fclose(syslog_f);
+        if (iolog_f)
+            std::fclose(iolog_f);
+        return rc;
+    }
 
     emu::logf(emu::LogLevel::info, "MAIN", "Run start PC=0x%08X%s", core.pc(),
         use_auto_input ? " (auto-input enabled)" : "");

@@ -26,6 +26,7 @@ set(CORE_SOURCES
   src/audio/wav_writer.cpp
   src/cdrom/cdrom.cpp
   src/emu/core.cpp
+  src/emu/mcp_server.cpp
   src/emu/provenance_hotspot_profiler.cpp
   src/emu/psx3d_profile_store.cpp
   src/emu/psx3d_mode_manager.cpp

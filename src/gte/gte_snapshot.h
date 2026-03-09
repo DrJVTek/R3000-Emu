@@ -27,6 +27,7 @@ struct GteSnapshot
     int16_t  sx[3], sy[3];   // Output 2D screen coords (SXY0, SXY1, SXY2)
     uint16_t sz[3];           // Output depth values       (SZ1, SZ2, SZ3)
     GteTransform transform;   // RT + TR at projection time
+    uint32_t source_pc;       // CPU PC of the GTE command that produced this snapshot
     uint8_t vertex_count;     // 1 (RTPS) or 3 (RTPT)
     uint8_t valid;            // 1 after RTPS/RTPT completes
     uint32_t sequence_id;     // Monotonic counter for ordering
@@ -38,6 +39,7 @@ struct GteCacheVertex
     int32_t vx, vy, vz;     // Input 3D vertex (model space)
     int16_t nx, ny, nz;     // Normal vector (from last NCS/NCT/NCDS/NCDT)
     GteTransform transform;  // RT + TR at projection time
+    uint32_t source_pc;      // CPU PC of the source GTE command
     int16_t sx, sy;          // 2D screen output (for verification)
     uint16_t sz;             // Depth value
 };
@@ -48,6 +50,7 @@ struct GteCacheFace
     int32_t vx[3], vy[3], vz[3];
     int16_t nx[3], ny[3], nz[3];
     GteTransform transform;
+    uint32_t source_pc;
     int16_t sx[3], sy[3];
     uint16_t sz[3];
 };
@@ -58,8 +61,10 @@ struct GteCacheQuad
     int32_t vx[4], vy[4], vz[4];
     int16_t nx[4], ny[4], nz[4];
     GteTransform transform;
+    uint32_t source_pc;
     int16_t sx[4], sy[4];
     uint16_t sz[4];
+    uint8_t valid{0};
 };
 
 } // namespace gte

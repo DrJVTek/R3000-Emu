@@ -100,6 +100,7 @@ class Core
     r3000::Cpu::StepResult step();
 
     uint32_t pc() const;
+    uint64_t steps() const;
     void set_gpr(uint32_t idx, uint32_t v);
     void set_pc(uint32_t v);
 
@@ -131,6 +132,9 @@ class Core
     uint32_t request_psx3d_analysis_refresh(const char* reason, const char* scope);
     void set_psx3d_profile_path_override(const char* path);
     Psx3dModeManager& psx3d_mode_manager() { return psx3d_mode_mgr_; }
+    const std::string& psx3d_profile_path() const { return psx3d_profile_path_; }
+    const std::string& psx3d_profile_game_id() const { return psx3d_profile_game_id_; }
+    bool psx3d_profile_override() const { return psx3d_profile_override_; }
     // Internal hook dispatchers (registered in Core::init_from_image).
     void on_psx3d_vblank(uint32_t vblank_count);
     void on_psx3d_step_pc(uint32_t pc);
@@ -151,7 +155,9 @@ class Core
     BootMilestones& milestones() { return milestones_; }
 
   private:
+    void clear_psx3d_profile_identity();
     void set_err(char* err, size_t err_cap, const char* msg) const;
+    void set_psx3d_profile_identity_from_game_id(const char* game_id);
     void set_psx3d_profile_identity_from_path(const char* path);
     void try_load_psx3d_profile();
     void try_save_psx3d_profile();
@@ -201,6 +207,7 @@ class Core
     uint32_t last_gpu3d_refresh_frame_{0};
     std::string psx3d_profile_game_id_{};
     std::string psx3d_profile_path_{};
+    std::string psx3d_profile_root_dir_{};
     bool psx3d_profile_loaded_{false};
     bool psx3d_profile_dirty_{false};
     bool psx3d_profile_override_{false};

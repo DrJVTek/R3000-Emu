@@ -9,6 +9,83 @@
 namespace emu
 {
 
+static Psx3dProfileData::ModeKind parse_mode_kind(const char* s)
+{
+    if (!s)
+        return Psx3dProfileData::ModeKind::unknown;
+    if (std::strcmp(s, "paired_edge_rtpt_gt4") == 0)
+        return Psx3dProfileData::ModeKind::paired_edge_rtpt_gt4;
+    if (std::strcmp(s, "subdivided_ft4_intpl_rtpt") == 0)
+        return Psx3dProfileData::ModeKind::subdivided_ft4_intpl_rtpt;
+    return Psx3dProfileData::ModeKind::unknown;
+}
+
+static const char* format_mode_kind(Psx3dProfileData::ModeKind mode)
+{
+    switch (mode)
+    {
+    case Psx3dProfileData::ModeKind::paired_edge_rtpt_gt4:
+        return "paired_edge_rtpt_gt4";
+    case Psx3dProfileData::ModeKind::subdivided_ft4_intpl_rtpt:
+        return "subdivided_ft4_intpl_rtpt";
+    default:
+        return "unknown";
+    }
+}
+
+static Psx3dProfileData::LinkRule parse_link_rule(const char* s)
+{
+    if (!s)
+        return Psx3dProfileData::LinkRule::unknown;
+    if (std::strcmp(s, "packet_edge_pairs") == 0)
+        return Psx3dProfileData::LinkRule::packet_edge_pairs;
+    if (std::strcmp(s, "packet_segments") == 0)
+        return Psx3dProfileData::LinkRule::packet_edge_pairs;
+    return Psx3dProfileData::LinkRule::unknown;
+}
+
+static const char* format_link_rule(Psx3dProfileData::LinkRule rule)
+{
+    switch (rule)
+    {
+    case Psx3dProfileData::LinkRule::packet_edge_pairs:
+        return "packet_edge_pairs";
+    default:
+        return "unknown";
+    }
+}
+
+static bool parse_pc_range_token(const char* token, Psx3dProfileData::PcRange& out)
+{
+    if (!token || !*token)
+        return false;
+    unsigned int start = 0;
+    unsigned int end = 0;
+    if (std::sscanf(token, "0x%X-0x%X", &start, &end) == 2)
+    {
+        out.start = start;
+        out.end = end;
+        return true;
+    }
+    if (std::sscanf(token, "0x%X", &start) == 1)
+    {
+        out.start = start;
+        out.end = start;
+        return true;
+    }
+    return false;
+}
+
+static std::string format_pc_range(const Psx3dProfileData::PcRange& r)
+{
+    char buf[64];
+    if (r.start == r.end)
+        std::snprintf(buf, sizeof(buf), "0x%08X", r.start);
+    else
+        std::snprintf(buf, sizeof(buf), "0x%08X-0x%08X", r.start, r.end);
+    return std::string(buf);
+}
+
 static std::string sanitize_id(const std::string& in)
 {
     if (in.empty())
@@ -39,6 +116,15 @@ std::string Psx3dProfileStore::default_profile_path(const std::string& game_id)
     return p.string();
 }
 
+std::string Psx3dProfileStore::default_profile_path(const std::string& root_dir, const std::string& game_id)
+{
+    const std::string id = sanitize_id(game_id);
+    std::filesystem::path p = root_dir.empty() ? (std::filesystem::path("profiles") / "psx3d")
+                                               : std::filesystem::path(root_dir);
+    p /= (id + ".psx3dprof");
+    return p.string();
+}
+
 bool Psx3dProfileStore::load(const std::string& path, Psx3dProfileData& out)
 {
     out = {};
@@ -55,7 +141,8 @@ bool Psx3dProfileStore::load(const std::string& path, Psx3dProfileData& out)
     {
         if (!header_ok)
         {
-            if (std::strncmp(line, "PSX3D_PROFILE_V1", 16) == 0)
+            if (std::strncmp(line, "PSX3D_PROFILE_V1", 16) == 0 ||
+                std::strncmp(line, "PSX3D_PROFILE_V2", 16) == 0)
             {
                 header_ok = true;
                 continue;
@@ -70,6 +157,58 @@ bool Psx3dProfileStore::load(const std::string& path, Psx3dProfileData& out)
             out.game_id = gid;
             continue;
         }
+
+        char mode_name[128]{};
+        char link_rule[128]{};
+        unsigned int priority = 0;
+        if (std::sscanf(line, "MODE %127s %127s %u", mode_name, link_rule, &priority) == 3)
+        {
+            Psx3dProfileData::ModeRule rule{};
+            rule.mode = parse_mode_kind(mode_name);
+            rule.link_rule = parse_link_rule(link_rule);
+            rule.priority = priority;
+            out.mode_rules.push_back(rule);
+            continue;
+        }
+
+        auto parse_mode_range_line =
+            [&](const char* prefix, std::vector<Psx3dProfileData::PcRange> Psx3dProfileData::ModeRule::*member) -> bool
+        {
+            if (out.mode_rules.empty())
+                return false;
+            const size_t prefix_len = std::strlen(prefix);
+            if (std::strncmp(line, prefix, prefix_len) != 0)
+                return false;
+            char* p = line + prefix_len;
+            while (*p == ' ' || *p == '\t')
+                ++p;
+            while (*p)
+            {
+                while (*p == ' ' || *p == '\t')
+                    ++p;
+                if (*p == '\0' || *p == '\r' || *p == '\n')
+                    break;
+                char token[64]{};
+                size_t ti = 0;
+                while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' &&
+                       ti + 1 < sizeof(token))
+                {
+                    token[ti++] = *p++;
+                }
+                token[ti] = '\0';
+                Psx3dProfileData::PcRange range{};
+                if (parse_pc_range_token(token, range))
+                    (out.mode_rules.back().*member).push_back(range);
+            }
+            return true;
+        };
+
+        if (parse_mode_range_line("MODE_PRODUCER_RANGES", &Psx3dProfileData::ModeRule::producer_pc_ranges))
+            continue;
+        if (parse_mode_range_line("MODE_GTE_RANGES", &Psx3dProfileData::ModeRule::gte_pc_ranges))
+            continue;
+        if (parse_mode_range_line("MODE_OT_RANGES", &Psx3dProfileData::ModeRule::ot_fill_pc_ranges))
+            continue;
 
         ProvenanceHotspotProfiler::PcSnapshot s{};
         unsigned int pc = 0;
@@ -146,58 +285,34 @@ bool Psx3dProfileStore::save(const std::string& path, const Psx3dProfileData& da
     if (!f)
         return false;
 
-    std::fprintf(f, "PSX3D_PROFILE_V1\n");
+    std::fprintf(f, "PSX3D_PROFILE_V2\n");
     std::fprintf(f, "GAME %s\n", sanitize_id(data.game_id).c_str());
-    std::vector<ProvenanceHotspotProfiler::PcSnapshot> sorted = data.hotspots;
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
-        if (a.total_words != b.total_words)
-            return a.total_words > b.total_words;
-        return a.pc < b.pc;
-    });
-    for (const auto& s : sorted)
+    for (const auto& rule : data.mode_rules)
     {
-        if (s.pc == 0 || s.total_words == 0)
+        if (rule.mode == Psx3dProfileData::ModeKind::unknown)
             continue;
         std::fprintf(
             f,
-            "PC 0x%08X %" PRIu64 " %u %u\n",
-            s.pc,
-            s.total_words,
-            s.last_seen_vblank,
-            s.last_refresh_vblank);
+            "MODE %s %s %u\n",
+            format_mode_kind(rule.mode),
+            format_link_rule(rule.link_rule),
+            rule.priority);
+        auto write_ranges = [&](const char* prefix, const std::vector<Psx3dProfileData::PcRange>& ranges)
+        {
+            if (ranges.empty())
+                return;
+            std::fprintf(f, "%s", prefix);
+            for (const auto& range : ranges)
+                std::fprintf(f, " %s", format_pc_range(range).c_str());
+            std::fprintf(f, "\n");
+        };
+        write_ranges("MODE_PRODUCER_RANGES", rule.producer_pc_ranges);
+        write_ranges("MODE_GTE_RANGES", rule.gte_pc_ranges);
+        write_ranges("MODE_OT_RANGES", rule.ot_fill_pc_ranges);
     }
-    std::vector<uint32_t> analyzed = data.analyzed_pcs;
-    std::sort(analyzed.begin(), analyzed.end());
-    analyzed.erase(std::unique(analyzed.begin(), analyzed.end()), analyzed.end());
-    for (uint32_t pc : analyzed)
-    {
-        if (pc == 0)
-            continue;
-        std::fprintf(f, "ANALYZED_PC 0x%08X\n", pc);
-    }
-    std::vector<Psx3dProfileData::CameraCandidate> cams = data.camera_candidates;
-    std::sort(cams.begin(), cams.end(), [](const auto& a, const auto& b) {
-        if (a.frame_hits != b.frame_hits)
-            return a.frame_hits > b.frame_hits;
-        if (a.hits != b.hits)
-            return a.hits > b.hits;
-        return a.addr < b.addr;
-    });
-    for (const auto& c : cams)
-    {
-        if (c.addr == 0 || c.hits == 0)
-            continue;
-        std::fprintf(
-            f,
-            "CAM 0x%08X %u %u %u %u 0x%08X 0x%08X\n",
-            c.addr,
-            c.hits,
-            c.frame_hits,
-            c.first_vblank,
-            c.last_vblank,
-            c.last_pc,
-            c.gte_reg_mask);
-    }
+    // V2 runtime profiles stay lean: only game identity and validated mode rules.
+    // Legacy hotspot / analyzed-PC / camera snapshots are still accepted by the
+    // reader for backward compatibility, but are no longer emitted here.
     std::fflush(f);
     std::fclose(f);
 

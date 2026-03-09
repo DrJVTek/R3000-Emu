@@ -84,6 +84,50 @@ static std::string psx3d_sanitize_game_id(std::string s)
     return s.empty() ? "unknown" : s;
 }
 
+static std::string psx3d_normalize_boot_game_id(const char* boot_name)
+{
+    if (!boot_name || !*boot_name)
+        return {};
+
+    std::string s(boot_name);
+    for (char& c : s)
+    {
+        if (c >= 'a' && c <= 'z')
+            c = static_cast<char>(c - 'a' + 'A');
+    }
+
+    const size_t slash = s.find_last_of("\\/");
+    std::string stem = (slash == std::string::npos) ? s : s.substr(slash + 1);
+    const size_t semi = stem.find(';');
+    if (semi != std::string::npos)
+        stem.resize(semi);
+    while (!stem.empty() && (stem.back() == '.' || stem.back() == ' '))
+        stem.pop_back();
+
+    // Canonical PSX executable codes are typically of the form:
+    //   SCUS_943.00  -> SCUS-943.00
+    //   SLUS_000.00  -> SLUS-000.00
+    //   SCES_123.45  -> SCES-123.45
+    if (stem.size() >= 11 &&
+        ((stem[0] >= 'A' && stem[0] <= 'Z') &&
+         (stem[1] >= 'A' && stem[1] <= 'Z') &&
+         (stem[2] >= 'A' && stem[2] <= 'Z') &&
+         (stem[3] >= 'A' && stem[3] <= 'Z')) &&
+        stem[4] == '_' &&
+        (stem[5] >= '0' && stem[5] <= '9') &&
+        (stem[6] >= '0' && stem[6] <= '9') &&
+        (stem[7] >= '0' && stem[7] <= '9') &&
+        stem[8] == '.' &&
+        (stem[9] >= '0' && stem[9] <= '9') &&
+        (stem[10] >= '0' && stem[10] <= '9'))
+    {
+        stem[4] = '-';
+        return psx3d_sanitize_game_id(stem);
+    }
+
+    return psx3d_sanitize_game_id(stem);
+}
+
 Core::~Core()
 {
     try_save_psx3d_profile();
@@ -184,8 +228,36 @@ bool Core::insert_disc(const char* path, char* err, size_t err_cap)
     emu::logf(emu::LogLevel::info, "CORE", "insert_disc result: %d", ok);
     if (ok)
     {
-        set_psx3d_profile_identity_from_path(path);
-        try_load_psx3d_profile();
+        clear_psx3d_profile_identity();
+        char boot_file[128]{};
+        uint32_t cnf_lba = 0, cnf_size = 0;
+        uint8_t cnf_buf[2048]{};
+        if (cdrom_.iso9660_find_file("\\SYSTEM.CNF;1", &cnf_lba, &cnf_size) &&
+            cnf_lba != 0 &&
+            cdrom_.read_sector_2048(cnf_lba, cnf_buf))
+        {
+            const char* cnf = reinterpret_cast<const char*>(cnf_buf);
+            const char* p = std::strstr(cnf, "BOOT");
+            if (p)
+            {
+                p += 4;
+                while (*p == ' ' || *p == '\t' || *p == '=') ++p;
+                if (std::strncmp(p, "cdrom:", 6) == 0)
+                    p += 6;
+                while (*p == '\\')
+                    ++p;
+
+                size_t i = 0;
+                while (*p && *p != '\r' && *p != '\n' && *p != ';' && i < sizeof(boot_file) - 1)
+                    boot_file[i++] = *p++;
+                boot_file[i] = '\0';
+            }
+        }
+        if (boot_file[0])
+        {
+            set_psx3d_profile_identity_from_game_id(boot_file);
+            try_load_psx3d_profile();
+        }
     }
     return ok;
 }
@@ -263,6 +335,7 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
 
     // Shadow GTE/GPU for 3D tag-based reconstruction.
     gpu_3d_.bind_gte_3d(&gte_3d_);
+    gpu_3d_.bind_bus(bus_.get());
     bus_->set_gpu_3d(&gpu_3d_);
     bus_->set_gte_3d(&gte_3d_);
     cpu_->set_gte_shadow(&gte_3d_);
@@ -513,6 +586,11 @@ r3000::Cpu::StepResult Core::step()
 uint32_t Core::pc() const
 {
     return cpu_ ? cpu_->pc() : 0;
+}
+
+uint64_t Core::steps() const
+{
+    return g_step_count;
 }
 
 void Core::set_gpr(uint32_t idx, uint32_t v)
@@ -794,6 +872,29 @@ void Core::set_psx3d_profile_path_override(const char* path)
     if (!path || !*path)
         return;
     std::filesystem::path p(path);
+    const std::string ext = p.extension().string();
+    if (ext.empty())
+    {
+        psx3d_profile_root_dir_ = p.string();
+        psx3d_profile_override_ = false;
+        psx3d_profile_path_.clear();
+        psx3d_profile_loaded_ = false;
+        gpu_3d_.clear_runtime_mode_rules();
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D",
+            "profile root override dir=%s",
+            psx3d_profile_root_dir_.c_str());
+        if (!psx3d_profile_game_id_.empty())
+        {
+            psx3d_profile_path_ =
+                Psx3dProfileStore::default_profile_path(psx3d_profile_root_dir_, psx3d_profile_game_id_);
+            try_load_psx3d_profile();
+        }
+        return;
+    }
+
+    psx3d_profile_root_dir_.clear();
     psx3d_profile_path_ = p.string();
     psx3d_profile_game_id_ = psx3d_sanitize_game_id(p.stem().string());
     if (psx3d_profile_game_id_.empty())
@@ -809,6 +910,34 @@ void Core::set_psx3d_profile_path_override(const char* path)
     try_load_psx3d_profile();
 }
 
+void Core::clear_psx3d_profile_identity()
+{
+    if (psx3d_profile_override_)
+        return;
+    psx3d_profile_game_id_.clear();
+    psx3d_profile_path_.clear();
+    psx3d_profile_loaded_ = false;
+    gpu_3d_.clear_runtime_mode_rules();
+}
+
+void Core::set_psx3d_profile_identity_from_game_id(const char* game_id)
+{
+    if (psx3d_profile_override_)
+        return;
+    const std::string id = psx3d_normalize_boot_game_id(game_id);
+    psx3d_profile_game_id_ = id.empty() ? "unknown" : id;
+    psx3d_profile_path_ = psx3d_profile_root_dir_.empty()
+        ? Psx3dProfileStore::default_profile_path(psx3d_profile_game_id_)
+        : Psx3dProfileStore::default_profile_path(psx3d_profile_root_dir_, psx3d_profile_game_id_);
+    psx3d_profile_loaded_ = false;
+    emu::logf(
+        emu::LogLevel::warn,
+        "PSX3D",
+        "profile identity game=%s path=%s",
+        psx3d_profile_game_id_.c_str(),
+        psx3d_profile_path_.c_str());
+}
+
 void Core::set_psx3d_profile_identity_from_path(const char* path)
 {
     if (psx3d_profile_override_)
@@ -816,11 +945,13 @@ void Core::set_psx3d_profile_identity_from_path(const char* path)
     if (!path || !*path)
         return;
     std::filesystem::path p(path);
-    std::string stem = psx3d_sanitize_game_id(p.stem().string());
+    std::string stem = psx3d_normalize_boot_game_id(p.filename().string().c_str());
     if (stem.empty())
         stem = "unknown";
     psx3d_profile_game_id_ = stem;
-    psx3d_profile_path_ = Psx3dProfileStore::default_profile_path(stem);
+    psx3d_profile_path_ = psx3d_profile_root_dir_.empty()
+        ? Psx3dProfileStore::default_profile_path(stem)
+        : Psx3dProfileStore::default_profile_path(psx3d_profile_root_dir_, stem);
     psx3d_profile_loaded_ = false;
     emu::logf(
         emu::LogLevel::warn,
@@ -840,6 +971,7 @@ void Core::try_load_psx3d_profile()
     Psx3dProfileData data{};
     if (!Psx3dProfileStore::load(psx3d_profile_path_, data))
     {
+        gpu_3d_.clear_runtime_mode_rules();
         psx3d_profile_loaded_ = true;
         emu::logf(
             emu::LogLevel::warn,
@@ -850,6 +982,57 @@ void Core::try_load_psx3d_profile()
     }
 
     provenance_profiler_.restore(data.hotspots);
+    {
+        std::vector<gpu::Gpu3D::RuntimeModeRule> runtime_rules;
+        runtime_rules.reserve(data.mode_rules.size());
+        for (const auto& rule : data.mode_rules)
+        {
+            gpu::Gpu3D::RuntimeModeRule rr{};
+            switch (rule.mode)
+            {
+            case Psx3dProfileData::ModeKind::paired_edge_rtpt_gt4:
+                rr.mode = gpu::Gpu3D::RuntimeModeKind::paired_edge_rtpt_gt4;
+                break;
+            case Psx3dProfileData::ModeKind::subdivided_ft4_intpl_rtpt:
+                rr.mode = gpu::Gpu3D::RuntimeModeKind::subdivided_ft4_intpl_rtpt;
+                break;
+            default:
+                rr.mode = gpu::Gpu3D::RuntimeModeKind::unknown;
+                break;
+            }
+            switch (rule.link_rule)
+            {
+            case Psx3dProfileData::LinkRule::packet_edge_pairs:
+                rr.link_rule = gpu::Gpu3D::RuntimeLinkRule::packet_edge_pairs;
+                break;
+            default:
+                rr.link_rule = gpu::Gpu3D::RuntimeLinkRule::unknown;
+                break;
+            }
+            rr.priority = rule.priority;
+            rr.producer_pc_ranges.reserve(rule.producer_pc_ranges.size());
+            for (const auto& r : rule.producer_pc_ranges)
+                rr.producer_pc_ranges.push_back({r.start, r.end});
+            rr.gte_pc_ranges.reserve(rule.gte_pc_ranges.size());
+            for (const auto& r : rule.gte_pc_ranges)
+                rr.gte_pc_ranges.push_back({r.start, r.end});
+            rr.ot_fill_pc_ranges.reserve(rule.ot_fill_pc_ranges.size());
+            for (const auto& r : rule.ot_fill_pc_ranges)
+                rr.ot_fill_pc_ranges.push_back({r.start, r.end});
+            runtime_rules.push_back(std::move(rr));
+        }
+        gpu_3d_.set_runtime_mode_rules(runtime_rules);
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D",
+            "profile loaded path=%s game=%s modes=%u hotspots=%u analyzed=%u cam=%u",
+            psx3d_profile_path_.c_str(),
+            data.game_id.c_str(),
+            (unsigned)runtime_rules.size(),
+            (unsigned)data.hotspots.size(),
+            (unsigned)data.analyzed_pcs.size(),
+            (unsigned)data.camera_candidates.size());
+    }
     psx3d_analyzed_pcs_.clear();
     for (uint32_t pc : data.analyzed_pcs)
     {
@@ -896,6 +1079,10 @@ void Core::try_save_psx3d_profile()
         return;
 
     Psx3dProfileData data{};
+    // Preserve static per-game mode rules already authored in the profile.
+    // Runtime saves should refresh learned hotspots/analyzed PCs/camera data,
+    // not erase the mode configuration.
+    Psx3dProfileStore::load(psx3d_profile_path_, data);
     data.game_id = psx3d_profile_game_id_.empty() ? "unknown" : psx3d_profile_game_id_;
     data.hotspots = provenance_profiler_.snapshot();
     data.analyzed_pcs.reserve(psx3d_analyzed_pcs_.size());
@@ -1001,6 +1188,9 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
         set_err(err, err_cap, "empty BOOT filename in SYSTEM.CNF");
         return false;
     }
+
+    set_psx3d_profile_identity_from_game_id(boot_file);
+    try_load_psx3d_profile();
 
     emu::logf(emu::LogLevel::info, "CORE", "Fast boot: loading %s from CD", boot_file);
 

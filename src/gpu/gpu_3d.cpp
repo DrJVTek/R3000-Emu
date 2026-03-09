@@ -1,5 +1,6 @@
 #include "gpu_3d.h"
 #include "../gte/gte_3d.h"
+#include "../r3000/bus.h"
 #include "../log/emu_log.h"
 
 #include <algorithm>
@@ -23,8 +24,10 @@ static bool in_dead_zone(uint16_t v);
 #define R3000_GPU3D_PACKET_TOKEN_CARRY 1
 #endif
 
-// Debug-only fallback: rebuild 3D using SXY->vertex table when face token is missing.
-// Keep disabled by default to avoid hiding real correlation issues.
+// TEMP DEBUG ONLY.
+// Rebuild 3D using SXY->vertex lookup when the normal GTE->GPU correlation path
+// did not produce a usable face/quad mode. This must stay disabled for normal
+// runs because it hides producer-side bugs instead of fixing them.
 #ifndef R3000_GPU3D_VTX_LOOKUP_FALLBACK
 #define R3000_GPU3D_VTX_LOOKUP_FALLBACK 0
 #endif
@@ -100,6 +103,54 @@ Gpu3D::Gpu3D()
     emu::logf(emu::LogLevel::info, "GPU3D", "Gpu3D shadow GPU v1 (full parser)");
 }
 
+void Gpu3D::clear_runtime_mode_rules()
+{
+    runtime_mode_rules_.clear();
+}
+
+void Gpu3D::set_runtime_mode_rules(const std::vector<RuntimeModeRule>& rules)
+{
+    runtime_mode_rules_ = rules;
+}
+
+bool Gpu3D::pc_in_ranges(uint32_t pc, const std::vector<PcRange>& ranges)
+{
+    for (const auto& r : ranges)
+    {
+        if (pc >= r.start && pc <= r.end)
+            return true;
+    }
+    return false;
+}
+
+bool Gpu3D::rule_matches_writer_pc(const RuntimeModeRule& rule, uint32_t producer_pc)
+{
+    if (producer_pc == 0)
+        return false;
+    if (pc_in_ranges(producer_pc, rule.producer_pc_ranges))
+        return true;
+    // The DMA2 writer PC we observe at packet build time is often the OT fill/builder
+    // PC, so OT ranges are also valid selectors for the active mode.
+    if (pc_in_ranges(producer_pc, rule.ot_fill_pc_ranges))
+        return true;
+    return false;
+}
+
+const Gpu3D::RuntimeModeRule* Gpu3D::find_runtime_mode_rule(uint32_t producer_pc) const
+{
+    if (producer_pc == 0)
+        return nullptr;
+    const RuntimeModeRule* best = nullptr;
+    for (const auto& rule : runtime_mode_rules_)
+    {
+        if (!rule_matches_writer_pc(rule, producer_pc))
+            continue;
+        if (!best || rule.priority > best->priority)
+            best = &rule;
+    }
+    return best;
+}
+
 // ---------------------------------------------------------------------------
 // Reset
 // ---------------------------------------------------------------------------
@@ -126,10 +177,10 @@ void Gpu3D::reset()
 // ---------------------------------------------------------------------------
 void Gpu3D::gp0(uint32_t word)
 {
-    gp0_with_face_hint(word, kNoFaceHint);
+    gp0_with_face_hint(word, kNoFaceHint, 0);
 }
 
-void Gpu3D::gp0_with_face_hint(uint32_t word, uint32_t face_hint)
+void Gpu3D::gp0_with_face_hint(uint32_t word, uint32_t face_hint, uint32_t writer_pc)
 {
     ++gp0_words_accum_;
 
@@ -172,7 +223,7 @@ void Gpu3D::gp0_with_face_hint(uint32_t word, uint32_t face_hint)
             if (term_c && !term_a && !term_b)
             {
                 ++gp0_cmds_accum_;
-                gp0_start_command(word, kNoFaceHint);
+                gp0_start_command(word, kNoFaceHint, 0);
             }
         }
         return;
@@ -185,6 +236,7 @@ void Gpu3D::gp0_with_face_hint(uint32_t word, uint32_t face_hint)
         {
             cmd_buf_[cmd_buf_pos_++] = word;
             cmd_face_hint_[cmd_buf_pos_ - 1] = face_hint;
+            cmd_writer_pc_[cmd_buf_pos_ - 1] = writer_pc;
         }
 
         if (cmd_buf_pos_ >= cmd_words_needed_)
@@ -198,19 +250,20 @@ void Gpu3D::gp0_with_face_hint(uint32_t word, uint32_t face_hint)
 
     // Idle: new command
     ++gp0_cmds_accum_;
-    gp0_start_command(word, face_hint);
+    gp0_start_command(word, face_hint, writer_pc);
 }
 
 // ---------------------------------------------------------------------------
 // GP0 start command
 // ---------------------------------------------------------------------------
-void Gpu3D::gp0_start_command(uint32_t cmd_word, uint32_t face_hint)
+void Gpu3D::gp0_start_command(uint32_t cmd_word, uint32_t face_hint, uint32_t writer_pc)
 {
     const uint8_t cmd = (uint8_t)(cmd_word >> 24);
     const int params = gp0_param_count(cmd);
 
     cmd_buf_[0] = cmd_word;
     cmd_face_hint_[0] = face_hint;
+    cmd_writer_pc_[0] = writer_pc;
     cmd_buf_pos_ = 1;
 
     if (params == 0)
@@ -326,6 +379,7 @@ void Gpu3D::gp0_polygon()
 
     uint16_t raw_x[4], raw_y[4];
     uint32_t face_hints[4] = {kNoFaceHint, kNoFaceHint, kNoFaceHint, kNoFaceHint};
+    uint32_t coord_writer_pc[4] = {0, 0, 0, 0};
     uint8_t cr[4], cg[4], cb[4];
     uint8_t tu[4] = {}, tv[4] = {};
     uint16_t clut = 0, texpage_attr = 0;
@@ -352,6 +406,7 @@ void Gpu3D::gp0_polygon()
         raw_x[i] = (uint16_t)(cmd_buf_[idx] & 0xFFFFu);
         raw_y[i] = (uint16_t)(cmd_buf_[idx] >> 16);
         face_hints[i] = cmd_face_hint_[idx];
+        coord_writer_pc[i] = cmd_writer_pc_[idx];
         idx++;
 
         if (textured)
@@ -374,6 +429,24 @@ void Gpu3D::gp0_polygon()
 
     if (textured)
         draw_env_.texpage_raw = (draw_env_.texpage_raw & ~0x7FFu) | (texpage_attr & 0x7FFu);
+
+    uint32_t producer_pc = 0;
+    int producer_count = 0;
+    for (int i = 0; i < nverts; ++i)
+    {
+        const uint32_t pc = coord_writer_pc[i];
+        if (pc == 0)
+            continue;
+        int c = 0;
+        for (int j = 0; j < nverts; ++j)
+            if (coord_writer_pc[j] == pc)
+                ++c;
+        if (c > producer_count)
+        {
+            producer_count = c;
+            producer_pc = pc;
+        }
+    }
 
 #if R3000_GPU3D_PACKET_TOKEN_CARRY
     // Recover missing coord hints from any valid hint in the same command packet.
@@ -401,9 +474,12 @@ void Gpu3D::gp0_polygon()
     // Token-first path. If no token is available, optional miss-only decode fallback.
     // Select a hint that is both frequent and present in face cache.
     uint32_t face_idx = 0xFFFFFFFFu;
+    uint32_t face_idx_secondary = kNoFaceHint;
     {
         uint32_t best_cached = kNoFaceHint;
         int best_cached_count = 0;
+        uint32_t second_cached = kNoFaceHint;
+        int second_cached_count = 0;
         uint32_t best_any = kNoFaceHint;
         int best_any_count = 0;
 
@@ -427,8 +503,15 @@ void Gpu3D::gp0_polygon()
             const bool in_cache = (gte_3d_ && gte_3d_->face_by_index(h) != nullptr);
             if (in_cache && c > best_cached_count)
             {
+                second_cached_count = best_cached_count;
+                second_cached = best_cached;
                 best_cached_count = c;
                 best_cached = h;
+            }
+            else if (in_cache && h != best_cached && c > second_cached_count)
+            {
+                second_cached_count = c;
+                second_cached = h;
             }
         }
 
@@ -447,6 +530,7 @@ void Gpu3D::gp0_polygon()
 
         // Prefer cache-valid token to avoid dropping to 2D when majority token is stale.
         face_idx = (best_cached != kNoFaceHint) ? best_cached : best_any;
+        face_idx_secondary = second_cached;
     }
 
 #if R3000_GPU3D_MISS_ONLY_DECODE_FALLBACK
@@ -501,7 +585,7 @@ void Gpu3D::gp0_polygon()
             raw_x[1], raw_y[1], cr[1], cg[1], cb[1], tu[1], tv[1],
             raw_x[2], raw_y[2], cr[2], cg[2], cb[2], tu[2], tv[2],
             raw_x[3], raw_y[3], cr[3], cg[3], cb[3], tu[3], tv[3],
-            clut, tp, flags, semi_mode, tex_depth, PrimOrigin::origin_2d_hud, face_idx, face_hints[3]);
+            clut, tp, flags, semi_mode, tex_depth, PrimOrigin::origin_2d_hud, face_idx, face_idx_secondary, producer_pc);
     }
     else
     {
@@ -810,6 +894,25 @@ static int32_t decode_axis(uint16_t carrier, uint16_t ref)
     return val;
 }
 
+// Decode a face index directly from an absolute tagged carrier coordinate.
+// This is the correct path for builders that emit carrier pairs without any
+// in-packet reference vertex, such as Ridge Racer's flag GT4 builder.
+static uint32_t decode_face_absolute_xy(uint16_t x, uint16_t y)
+{
+    if (!in_dead_zone(x) || !in_dead_zone(y))
+        return 0xFFFFFFFFu;
+
+    constexpr uint16_t RB = gte::Gte3D::REF_BASE;
+    constexpr int sp = gte::Gte3D::SPACING;
+    const int dx = (int)x - (int)RB;
+    const int dy = (int)y - (int)RB;
+    const int lo = (dx >= 0) ? (dx + sp / 2) / sp : -((-dx + sp / 2) / sp);
+    const int hi = (dy >= 0) ? (dy + sp / 2) / sp : -((-dy + sp / 2) / sp);
+    if (lo < 0 || hi < 0 || lo > 255 || hi > 255)
+        return 0xFFFFFFFFu;
+    return (uint32_t)((hi << 8) | lo);
+}
+
 // Decode face_idx from N vertices using differential scheme.
 // Supports per-axis partial decode: X and Y are decoded independently.
 // For each reference candidate R: gather lo from X-axis and hi from Y-axis
@@ -981,11 +1084,10 @@ static uint32_t decode_face_nv(const uint16_t* xs, const uint16_t* ys,
             return ((uint32_t)best_hi << 8) | (uint32_t)best_lo;
     }
 
-    // --- Absolute REF_BASE fallback ---
-    // When no reference vertex exists in the GP0 packet (game reads only SXY2
-    // carriers from each RTPT, never SXY1 reference), or when per-axis
-    // differential fails, decode each axis against the known REF_BASE.
-    // This is the primary path for "carrier-only" quad patterns.
+    // LEGACY TEMPORARY decode path.
+    // This absolute decode keeps older tagged-coordinate experiments working
+    // while the explicit per-mode GTE/GPU reconstruction is being cleaned up.
+    // Do not treat this as a final reconstruction mode.
 absolute_fallback:
     {
         constexpr uint16_t RB = gte::Gte3D::REF_BASE;
@@ -1317,7 +1419,7 @@ void Gpu3D::push_quad(
     uint16_t x2, uint16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
     uint16_t x3, uint16_t y3, uint8_t r3, uint8_t g3, uint8_t b3, uint8_t u3, uint8_t v3,
     uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
-    PrimOrigin origin, uint32_t face_idx, uint32_t face_idx_v3_hint)
+    PrimOrigin origin, uint32_t face_idx, uint32_t face_idx_secondary_hint, uint32_t producer_pc)
 {
     // Face/quad cache lookup — done once for both triangles
     bool is_3d = false;
@@ -1339,7 +1441,7 @@ void Gpu3D::push_quad(
     else
         face_idx = 0xFFFFFFFFu; // no gte_3d_ or no tag decoded
 
-    // Fallback: direct per-vertex SXY lookup (no face token required).
+    // TEMP DEBUG ONLY: direct per-vertex SXY lookup (no face token required).
     const gte::GteCacheVertex* vtx[4] = {nullptr, nullptr, nullptr, nullptr};
     uint32_t vtx_idx[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     bool vtx_lookup_3d = false;
@@ -1373,6 +1475,17 @@ void Gpu3D::push_quad(
         }
     }
 
+    enum class QuadBuildMode : uint8_t
+    {
+        none = 0,
+        cache,
+        paired_edge_rtpt_gt4,
+        edge_strip,
+        face_pair,
+        debug_vtx_lookup,
+        face_partial,
+    };
+
     // Shared 2D coord processing params
     const bool is_2d = !is_3d;
     const int16_t ox = is_2d ? draw_env_.offset_x : 0;
@@ -1392,16 +1505,123 @@ void Gpu3D::push_quad(
                                      face->vy[1] == face->vy[2] &&
                                      face->vz[1] == face->vz[2]);
 
+    auto is_edge_face = [](const gte::GteCacheFace* f) -> bool
+    {
+        return f && (f->vx[1] == f->vx[2] &&
+                     f->vy[1] == f->vy[2] &&
+                     f->vz[1] == f->vz[2]);
+    };
+
+    const RuntimeModeRule* active_mode_rule = find_runtime_mode_rule(producer_pc);
+    if (!active_mode_rule)
+    {
+        auto rule_matches_gte_source = [&](const RuntimeModeRule& rule) -> bool
+        {
+            if (rule.gte_pc_ranges.empty())
+                return false;
+            if (qc && qc->valid && pc_in_ranges(qc->source_pc, rule.gte_pc_ranges))
+                return true;
+            if (face && pc_in_ranges(face->source_pc, rule.gte_pc_ranges))
+                return true;
+            return false;
+        };
+        for (const auto& rule : runtime_mode_rules_)
+        {
+            if (!rule_matches_gte_source(rule))
+                continue;
+            if (!active_mode_rule || rule.priority > active_mode_rule->priority)
+                active_mode_rule = &rule;
+        }
+    }
+
+    const bool rule_packet_edge_pairs =
+        active_mode_rule && active_mode_rule->link_rule == RuntimeLinkRule::packet_edge_pairs;
+    const bool rule_paired_edge =
+        active_mode_rule && active_mode_rule->mode == RuntimeModeKind::paired_edge_rtpt_gt4;
+    const bool rule_subdivided_ft4 =
+        active_mode_rule && active_mode_rule->mode == RuntimeModeKind::subdivided_ft4_intpl_rtpt;
+
+    // Explicit paired-edge mode:
+    // some builders (e.g. Ridge Racer DrawFlag) produce a GT4 packet from two
+    // RTPT-projected edge faces. The packet carries two visible screen-space
+    // edge segments; recover each edge directly from the packet, then rebuild
+    // the logical quad from the two projected edges.
+    const gte::GteCacheFace* packet_edge_face_a = nullptr;
+    const gte::GteCacheFace* packet_edge_face_b = nullptr;
+    int packet_edge_draw_idx[4] = {0, 1, 2, 3};
+    const char* packet_edge_layout = "none";
+    if (is_3d && gte_3d_ && rule_packet_edge_pairs && (rule_paired_edge || rule_subdivided_ft4))
+    {
+        struct PacketEdgeCandidate
+        {
+            int idx[4];
+            const char* label;
+        };
+        static const PacketEdgeCandidate kCandidates[] = {
+            {{0, 1, 2, 3}, "01_23"},
+            {{0, 2, 1, 3}, "02_13"},
+            {{0, 3, 1, 2}, "03_12"},
+        };
+
+        int best_score = -1;
+        for (const auto& cand : kCandidates)
+        {
+            const int a0 = cand.idx[0], a1 = cand.idx[1];
+            const int b0 = cand.idx[2], b1 = cand.idx[3];
+            const uint16_t px[4] = {x0, x1, x2, x3};
+            const uint16_t py[4] = {y0, y1, y2, y3};
+            const uint32_t fi_a = gte_3d_->lookup_edge_face_by_segment(
+                static_cast<int16_t>(px[a0]), static_cast<int16_t>(py[a0]),
+                static_cast<int16_t>(px[a1]), static_cast<int16_t>(py[a1]));
+            const uint32_t fi_b = gte_3d_->lookup_edge_face_by_segment(
+                static_cast<int16_t>(px[b0]), static_cast<int16_t>(py[b0]),
+                static_cast<int16_t>(px[b1]), static_cast<int16_t>(py[b1]));
+            if (fi_a == 0xFFFFFFFFu || fi_b == 0xFFFFFFFFu ||
+                fi_a == 0u || fi_b == 0u || fi_a == fi_b)
+                continue;
+
+            const gte::GteCacheFace* fa = gte_3d_->face_by_index(fi_a);
+            const gte::GteCacheFace* fb = gte_3d_->face_by_index(fi_b);
+            if (!is_edge_face(fa) || !is_edge_face(fb))
+                continue;
+
+            int score = 0;
+            if (fi_a == face_idx || fi_b == face_idx)
+                score += 8;
+            if (face_idx_secondary_hint != kNoFaceHint &&
+                (fi_a == face_idx_secondary_hint || fi_b == face_idx_secondary_hint))
+                score += 4;
+            if (fa->source_pc != 0 && fb->source_pc != 0 && fa->source_pc == fb->source_pc)
+                score += 2;
+
+            if (score > best_score)
+            {
+                best_score = score;
+                packet_edge_face_a = fa;
+                packet_edge_face_b = fb;
+                packet_edge_draw_idx[0] = a0;
+                packet_edge_draw_idx[1] = a1;
+                packet_edge_draw_idx[2] = b0;
+                packet_edge_draw_idx[3] = b1;
+                packet_edge_layout = cand.label;
+            }
+        }
+    }
+
     // For edge strips, try to find face_B from V3's tagged coords
     const gte::GteCacheFace* face_b = nullptr;
+    const char* face_b_source = "none";
     if (is_3d && edge_strip)
     {
         // Preferred in token-flow mode: explicit hint from V3 coord word.
-        if (face_idx_v3_hint != kNoFaceHint && face_idx_v3_hint != 0 && face_idx_v3_hint != face_idx)
+        if (face_idx_secondary_hint != kNoFaceHint && face_idx_secondary_hint != 0 && face_idx_secondary_hint != face_idx)
         {
-            face_b = gte_3d_->face_by_index(face_idx_v3_hint);
+            face_b = gte_3d_->face_by_index(face_idx_secondary_hint);
             if (face_b)
+            {
+                face_b_source = "secondary_hint";
                 ++quad_v3_hint_used_;
+            }
         }
 
         if (face_b)
@@ -1409,6 +1629,40 @@ void Gpu3D::push_quad(
             // Already resolved via token hint; skip legacy tagged-coordinate decode.
         }
         else
+        {
+        const auto matches_segment = [](const gte::GteCacheFace* f, uint16_t ax, uint16_t ay, uint16_t bx, uint16_t by) -> bool
+        {
+            const uint16_t f0x = static_cast<uint16_t>(f->sx[0]);
+            const uint16_t f0y = static_cast<uint16_t>(f->sy[0]);
+            const uint16_t f1x = static_cast<uint16_t>(f->sx[1]);
+            const uint16_t f1y = static_cast<uint16_t>(f->sy[1]);
+            return ((f0x == ax && f0y == ay && f1x == bx && f1y == by) ||
+                    (f0x == bx && f0y == by && f1x == ax && f1y == ay));
+        };
+
+        // Explicit paired-edge mode: some GT4 builders only preserve one face token
+        // even though the packet clearly contains two edge segments from two RTPT calls.
+        // When the dominant face matches one packet segment, resolve the other segment
+        // through the edge-face segment table built by Gte3D.
+        if (gte_3d_)
+        {
+            uint32_t other_face_idx = 0xFFFFFFFFu;
+            if (matches_segment(face, x0, y0, x1, y1))
+                other_face_idx = gte_3d_->lookup_edge_face_by_segment(static_cast<int16_t>(x2), static_cast<int16_t>(y2),
+                                                                      static_cast<int16_t>(x3), static_cast<int16_t>(y3));
+            else if (matches_segment(face, x2, y2, x3, y3))
+                other_face_idx = gte_3d_->lookup_edge_face_by_segment(static_cast<int16_t>(x0), static_cast<int16_t>(y0),
+                                                                      static_cast<int16_t>(x1), static_cast<int16_t>(y1));
+
+            if (other_face_idx != 0xFFFFFFFFu && other_face_idx != 0u && other_face_idx != face_idx)
+            {
+                face_b = gte_3d_->face_by_index(other_face_idx);
+                if (face_b)
+                    face_b_source = "segment_link";
+            }
+        }
+
+        if (!face_b)
         {
         const uint16_t v3x = x3;
         const uint16_t v3y = y3;
@@ -1423,27 +1677,350 @@ void Gpu3D::push_quad(
             {
                 const uint32_t fi_b = (uint32_t)((hi << 8) | lo);
                 face_b = gte_3d_->face_by_index(fi_b);
+                if (face_b)
+                    face_b_source = "v3_carrier";
             }
         }
         else if (in_dead_zone(v3x) && in_dead_zone(v3y))
         {
             // V3 is a reference: try face_idx ± 1
             if (face_idx + 1 < 0xFFFFu)
+            {
                 face_b = gte_3d_->face_by_index(face_idx + 1);
+                if (face_b)
+                    face_b_source = "v3_ref_plus1";
+            }
             if (!face_b && face_idx > 1)
+            {
                 face_b = gte_3d_->face_by_index(face_idx - 1);
+                if (face_b)
+                    face_b_source = "v3_ref_minus1";
+            }
+        }
         }
         }
     }
 
+    struct EdgeQuadCorner
+    {
+        int32_t vx, vy, vz;
+        int16_t nx, ny, nz;
+        uint16_t sz;
+        int16_t sx, sy;
+    };
+
+    auto make_corner = [](const gte::GteCacheFace* f, int idx) -> EdgeQuadCorner
+    {
+        return EdgeQuadCorner{
+            f->vx[idx], f->vy[idx], f->vz[idx],
+            f->nx[idx], f->ny[idx], f->nz[idx],
+            f->sz[idx],
+            f->sx[idx], f->sy[idx]
+        };
+    };
+
+    auto dist2_2d = [](const EdgeQuadCorner& a, const EdgeQuadCorner& b) -> double
+    {
+        const double dx = static_cast<double>(a.sx) - static_cast<double>(b.sx);
+        const double dy = static_cast<double>(a.sy) - static_cast<double>(b.sy);
+        return dx * dx + dy * dy;
+    };
+
+    auto tri_normal = [](const EdgeQuadCorner& a, const EdgeQuadCorner& b,
+                         const EdgeQuadCorner& c, double (&out)[3]) -> double
+    {
+        const double abx = static_cast<double>(b.vx) - static_cast<double>(a.vx);
+        const double aby = static_cast<double>(b.vy) - static_cast<double>(a.vy);
+        const double abz = static_cast<double>(b.vz) - static_cast<double>(a.vz);
+        const double acx = static_cast<double>(c.vx) - static_cast<double>(a.vx);
+        const double acy = static_cast<double>(c.vy) - static_cast<double>(a.vy);
+        const double acz = static_cast<double>(c.vz) - static_cast<double>(a.vz);
+        out[0] = aby * acz - abz * acy;
+        out[1] = abz * acx - abx * acz;
+        out[2] = abx * acy - aby * acx;
+        return std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+    };
+
+    auto diag_score = [&](const EdgeQuadCorner (&corners)[4], bool use_alt_diag) -> double
+    {
+        const int t0[3] = {0, 1, use_alt_diag ? 3 : 2};
+        const int t1[3] = {use_alt_diag ? 0 : 1, 3, 2};
+        double n0[3] = {};
+        double n1[3] = {};
+        const double a0 = tri_normal(corners[t0[0]], corners[t0[1]], corners[t0[2]], n0);
+        const double a1 = tri_normal(corners[t1[0]], corners[t1[1]], corners[t1[2]], n1);
+        if (a0 < 1e-6 || a1 < 1e-6)
+            return -1e30;
+        const double dot = (n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]) / (a0 * a1);
+        const double align = std::fabs(dot);
+        const double balance = (a0 < a1) ? (a0 / a1) : (a1 / a0);
+        return align * 4.0 + balance * 2.0;
+    };
+
+    EdgeQuadCorner edge_quad[4] = {};
+    int edge_draw_idx[4] = {0, 1, 2, 3};
+    int edge_tri0[3] = {0, 1, 2};
+    int edge_tri1[3] = {1, 3, 2};
+    const char* edge_pairing = "fixed";
+    const char* edge_diag = "12";
+
     // Edge strip with face_B found: reconstruct real quad from 4 unique vertices.
-    // face_A gives edge (V0_A, V1_A), face_B gives edge (V0_B, V1_B).
-    // Quad layout: face_A.V0, face_A.V1, face_B.V0, face_B.V1
+    // The old fixed ordering A0,A1,B0,B1 can twist valid grids. Choose:
+    // 1) the best endpoint pairing in screen space
+    // 2) the least twisted diagonal in 3D
+    const bool paired_edge_packet_ok =
+        rule_packet_edge_pairs && (rule_paired_edge || rule_subdivided_ft4) &&
+        packet_edge_face_a && packet_edge_face_b;
+    const gte::GteTransform* edge_transform = nullptr;
+    if (paired_edge_packet_ok)
+        edge_transform = &packet_edge_face_a->transform;
+    else if (face)
+        edge_transform = &face->transform;
     const bool edge_strip_ok = edge_strip && face_b;
     // Also detect if face_B is edge-strip too (V1==V2)
     const bool face_b_edge = face_b && (face_b->vx[1] == face_b->vx[2] &&
                                          face_b->vy[1] == face_b->vy[2] &&
                                          face_b->vz[1] == face_b->vz[2]);
+
+    if (paired_edge_packet_ok)
+    {
+        edge_draw_idx[0] = packet_edge_draw_idx[0];
+        edge_draw_idx[1] = packet_edge_draw_idx[1];
+        edge_draw_idx[2] = packet_edge_draw_idx[2];
+        edge_draw_idx[3] = packet_edge_draw_idx[3];
+
+        const EdgeQuadCorner a0 = make_corner(packet_edge_face_a, 0);
+        const EdgeQuadCorner a1 = make_corner(packet_edge_face_a, 1);
+        const EdgeQuadCorner b0 = make_corner(packet_edge_face_b, 0);
+        const EdgeQuadCorner b1 = make_corner(packet_edge_face_b, 1);
+
+        EdgeQuadCorner pairing_direct[4] = {a0, a1, b0, b1};
+        EdgeQuadCorner pairing_swapped[4] = {a0, a1, b1, b0};
+
+        const double direct_span = dist2_2d(a0, b0) + dist2_2d(a1, b1);
+        const double swapped_span = dist2_2d(a0, b1) + dist2_2d(a1, b0);
+
+        const EdgeQuadCorner* chosen_pairing = pairing_direct;
+        if (swapped_span + 1e-6 < direct_span)
+        {
+            chosen_pairing = pairing_swapped;
+            edge_pairing = "packet_swapped";
+            edge_draw_idx[2] = 3;
+            edge_draw_idx[3] = 2;
+        }
+        else
+        {
+            edge_pairing = "packet_direct";
+        }
+
+        for (int i = 0; i < 4; ++i)
+            edge_quad[i] = chosen_pairing[i];
+
+        const double diag12_score = diag_score(edge_quad, false);
+        const double diag03_score = diag_score(edge_quad, true);
+        if (diag03_score > diag12_score)
+        {
+            edge_tri0[0] = 0; edge_tri0[1] = 1; edge_tri0[2] = 3;
+            edge_tri1[0] = 0; edge_tri1[1] = 3; edge_tri1[2] = 2;
+            edge_diag = "03";
+        }
+        else
+        {
+            edge_diag = "12";
+        }
+
+        static uint32_t paired_edge_diag_logs = 0;
+        if (paired_edge_diag_logs < 96)
+        {
+            emu::logf(
+                emu::LogLevel::warn, "GPU3D_PAIRED_EDGE",
+                "face=0x%X layout=%s pair=%s diag=%s "
+                "A=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
+                "B=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
+                "packet=((%d,%d),(%d,%d),(%d,%d),(%d,%d))",
+                face_idx, packet_edge_layout, edge_pairing, edge_diag,
+                packet_edge_face_a->vx[0], packet_edge_face_a->vy[0], packet_edge_face_a->vz[0],
+                packet_edge_face_a->vx[1], packet_edge_face_a->vy[1], packet_edge_face_a->vz[1],
+                packet_edge_face_a->vx[2], packet_edge_face_a->vy[2], packet_edge_face_a->vz[2],
+                packet_edge_face_b->vx[0], packet_edge_face_b->vy[0], packet_edge_face_b->vz[0],
+                packet_edge_face_b->vx[1], packet_edge_face_b->vy[1], packet_edge_face_b->vz[1],
+                packet_edge_face_b->vx[2], packet_edge_face_b->vy[2], packet_edge_face_b->vz[2],
+                (int)x0, (int)y0, (int)x1, (int)y1, (int)x2, (int)y2, (int)x3, (int)y3);
+            ++paired_edge_diag_logs;
+        }
+    }
+    else if (edge_strip_ok)
+    {
+        const EdgeQuadCorner a0 = make_corner(face, 0);
+        const EdgeQuadCorner a1 = make_corner(face, 1);
+        const EdgeQuadCorner b0 = make_corner(face_b, 0);
+        const EdgeQuadCorner b1 = make_corner(face_b, face_b_edge ? 1 : 0);
+
+        EdgeQuadCorner pairing_direct[4] = {a0, a1, b0, b1};
+        EdgeQuadCorner pairing_swapped[4] = {a0, a1, b1, b0};
+
+        const double direct_span = dist2_2d(a0, b0) + dist2_2d(a1, b1);
+        const double swapped_span = dist2_2d(a0, b1) + dist2_2d(a1, b0);
+
+        const EdgeQuadCorner* chosen_pairing = pairing_direct;
+        if (face_b_edge && swapped_span + 1e-6 < direct_span)
+        {
+            chosen_pairing = pairing_swapped;
+            edge_pairing = "swapped";
+            edge_draw_idx[2] = 3;
+            edge_draw_idx[3] = 2;
+        }
+        else
+        {
+            edge_pairing = "direct";
+        }
+
+        for (int i = 0; i < 4; ++i)
+            edge_quad[i] = chosen_pairing[i];
+
+        const double diag12_score = diag_score(edge_quad, false);
+        const double diag03_score = diag_score(edge_quad, true);
+        if (diag03_score > diag12_score)
+        {
+            edge_tri0[0] = 0; edge_tri0[1] = 1; edge_tri0[2] = 3;
+            edge_tri1[0] = 0; edge_tri1[1] = 3; edge_tri1[2] = 2;
+            edge_diag = "03";
+        }
+        else
+        {
+            edge_diag = "12";
+        }
+
+        static uint32_t edge_strip_diag_logs = 0;
+        if (edge_strip_diag_logs < 96)
+        {
+            emu::logf(
+                emu::LogLevel::warn, "GPU3D_EDGE",
+                "face=0x%X face_b_src=%s secondary_hint=0x%X pair=%s diag=%s "
+                "A=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
+                "B=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
+                "tri0=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
+                "tri1=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
+                "trA=(%d,%d,%d) trB=(%d,%d,%d) face_b_edge=%d",
+                face_idx, face_b_source, face_idx_secondary_hint, edge_pairing, edge_diag,
+                face->vx[0], face->vy[0], face->vz[0],
+                face->vx[1], face->vy[1], face->vz[1],
+                face->vx[2], face->vy[2], face->vz[2],
+                face_b->vx[0], face_b->vy[0], face_b->vz[0],
+                face_b->vx[1], face_b->vy[1], face_b->vz[1],
+                face_b->vx[2], face_b->vy[2], face_b->vz[2],
+                edge_quad[edge_tri0[0]].vx, edge_quad[edge_tri0[0]].vy, edge_quad[edge_tri0[0]].vz,
+                edge_quad[edge_tri0[1]].vx, edge_quad[edge_tri0[1]].vy, edge_quad[edge_tri0[1]].vz,
+                edge_quad[edge_tri0[2]].vx, edge_quad[edge_tri0[2]].vy, edge_quad[edge_tri0[2]].vz,
+                edge_quad[edge_tri1[0]].vx, edge_quad[edge_tri1[0]].vy, edge_quad[edge_tri1[0]].vz,
+                edge_quad[edge_tri1[1]].vx, edge_quad[edge_tri1[1]].vy, edge_quad[edge_tri1[1]].vz,
+                edge_quad[edge_tri1[2]].vx, edge_quad[edge_tri1[2]].vy, edge_quad[edge_tri1[2]].vz,
+                face->transform.tr[0], face->transform.tr[1], face->transform.tr[2],
+                face_b->transform.tr[0], face_b->transform.tr[1], face_b->transform.tr[2],
+                face_b_edge ? 1 : 0);
+            ++edge_strip_diag_logs;
+        }
+    }
+
+    // Explicit non-edge quad mode: use a second tagged face as V3 source.
+    const gte::GteCacheFace* face_pair_b = nullptr;
+    int face_pair_v3_vert_idx = 0;
+    if (is_3d && !vtx_lookup_3d && !qc && !edge_strip_ok)
+    {
+        // Preferred in token-flow mode: explicit hint from V3 coord word.
+        if (face_idx_secondary_hint != kNoFaceHint && face_idx_secondary_hint != 0 && face_idx_secondary_hint != face_idx)
+        {
+            face_pair_b = gte_3d_->face_by_index(face_idx_secondary_hint);
+            face_pair_v3_vert_idx = 0;
+            if (face_pair_b)
+                ++quad_v3_hint_used_;
+        }
+
+        const uint16_t v3x = x3;
+        const uint16_t v3y = y3;
+        if (!face_pair_b && in_dead_zone(v3x) && in_dead_zone(v3y) &&
+            v3x != gte::Gte3D::REF_BASE && v3y != gte::Gte3D::REF_BASE)
+        {
+            const int lo = (int)std::round((double)(v3x - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
+            const int hi = (int)std::round((double)(v3y - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
+            if (lo >= 0 && lo <= 255 && hi >= 0 && hi <= 255)
+            {
+                const uint32_t fi_b = (uint32_t)((hi << 8) | lo);
+                face_pair_b = gte_3d_->face_by_index(fi_b);
+                face_pair_v3_vert_idx = 0;
+            }
+        }
+        else if (!face_pair_b && in_dead_zone(v3x) && in_dead_zone(v3y))
+        {
+            face_pair_v3_vert_idx = 1;
+            if (face_idx + 1 < 0xFFFFu)
+                face_pair_b = gte_3d_->face_by_index(face_idx + 1);
+            if (!face_pair_b && face_idx > 1)
+                face_pair_b = gte_3d_->face_by_index(face_idx - 1);
+        }
+    }
+
+    QuadBuildMode quad_mode = QuadBuildMode::none;
+    if (is_3d)
+    {
+        if (vtx_lookup_3d)
+            quad_mode = QuadBuildMode::debug_vtx_lookup;
+        else if (paired_edge_packet_ok && rule_paired_edge)
+            // Packet-derived paired-edge mode when no explicit quad cache exists.
+            quad_mode = QuadBuildMode::paired_edge_rtpt_gt4;
+        else if (qc)
+            quad_mode = QuadBuildMode::cache;
+        else if (paired_edge_packet_ok)
+            quad_mode = QuadBuildMode::paired_edge_rtpt_gt4;
+        else if (edge_strip_ok)
+            quad_mode = QuadBuildMode::edge_strip;
+        else if (face_pair_b)
+            quad_mode = QuadBuildMode::face_pair;
+        else
+            quad_mode = QuadBuildMode::face_partial;
+    }
+
+    switch (quad_mode)
+    {
+    case QuadBuildMode::cache: ++quad_mode_cache_hits_; break;
+    case QuadBuildMode::paired_edge_rtpt_gt4:
+        ++quad_mode_paired_edge_hits_;
+        if (producer_pc != 0)
+            ++quad_paired_edge_pc_hist_[producer_pc];
+        break;
+    case QuadBuildMode::edge_strip:
+        ++quad_mode_edge_strip_hits_;
+        if (producer_pc != 0)
+            ++quad_edge_pc_hist_[producer_pc];
+        break;
+    case QuadBuildMode::face_pair: ++quad_mode_face_pair_hits_; break;
+    case QuadBuildMode::debug_vtx_lookup: ++quad_mode_debug_vtx_hits_; break;
+    case QuadBuildMode::face_partial:
+        ++quad_mode_face_partial_hits_;
+        if (producer_pc != 0)
+            ++quad_partial_pc_hist_[producer_pc];
+        break;
+    default: break;
+    }
+
+    static uint32_t quad_partial_diag_logs = 0;
+    if (quad_mode == QuadBuildMode::face_partial &&
+        producer_pc == 0x800264B0u &&
+        face &&
+        quad_partial_diag_logs < 64)
+    {
+        emu::logf(
+            emu::LogLevel::warn, "GPU3D_PARTIAL",
+            "face=0x%X secondary_hint=0x%X edge_strip=%d "
+            "A=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
+            "screen=((%d,%d),(%d,%d),(%d,%d),(%d,%d))",
+            face_idx, face_idx_secondary_hint, edge_strip ? 1 : 0,
+            face->vx[0], face->vy[0], face->vz[0],
+            face->vx[1], face->vy[1], face->vz[1],
+            face->vx[2], face->vy[2], face->vz[2],
+            (int)x0, (int)y0, (int)x1, (int)y1, (int)x2, (int)y2, (int)x3, (int)y3);
+        ++quad_partial_diag_logs;
+    }
 
     // --- Triangle 1: V0, V1, V2 (quad_half=0) ---
     {
@@ -1456,7 +2033,7 @@ void Gpu3D::push_quad(
 
         if (is_3d)
         {
-            if (vtx_lookup_3d)
+            if (quad_mode == QuadBuildMode::debug_vtx_lookup)
             {
                 cmd3d.verts_3d[0] = {vtx[0]->vx, vtx[0]->vy, vtx[0]->vz};
                 cmd3d.verts_3d[1] = {vtx[1]->vx, vtx[1]->vy, vtx[1]->vz};
@@ -1466,29 +2043,40 @@ void Gpu3D::push_quad(
                 cmd3d.nx[2] = vtx[2]->nx; cmd3d.ny[2] = vtx[2]->ny; cmd3d.nz[2] = vtx[2]->nz; cmd3d.sz[2] = vtx[2]->sz;
                 cmd3d.transform = vtx[0]->transform;
             }
-            else if (edge_strip_ok)
+            else if (quad_mode == QuadBuildMode::cache)
             {
-                // Tri 1 of quad: face_A.V0, face_A.V1, face_B.V0
-                cmd3d.verts_3d[0] = {face->vx[0], face->vy[0], face->vz[0]};
-                cmd3d.nx[0] = face->nx[0]; cmd3d.ny[0] = face->ny[0]; cmd3d.nz[0] = face->nz[0];
-                cmd3d.sz[0] = face->sz[0];
-
-                cmd3d.verts_3d[1] = {face->vx[1], face->vy[1], face->vz[1]};
-                cmd3d.nx[1] = face->nx[1]; cmd3d.ny[1] = face->ny[1]; cmd3d.nz[1] = face->nz[1];
-                cmd3d.sz[1] = face->sz[1];
-
-                cmd3d.verts_3d[2] = {face_b->vx[0], face_b->vy[0], face_b->vz[0]};
-                cmd3d.nx[2] = face_b->nx[0]; cmd3d.ny[2] = face_b->ny[0]; cmd3d.nz[2] = face_b->nz[0];
-                cmd3d.sz[2] = face_b->sz[0];
-
-                cmd3d.transform = face->transform;
+                fill_cmd3d_from_quad(cmd3d, qc, 0, 1, 2);
+            }
+            else if (quad_mode == QuadBuildMode::paired_edge_rtpt_gt4 ||
+                     quad_mode == QuadBuildMode::edge_strip)
+            {
+                for (int k = 0; k < 3; ++k)
+                {
+                    const EdgeQuadCorner& c = edge_quad[edge_tri0[k]];
+                    cmd3d.verts_3d[k] = {c.vx, c.vy, c.vz};
+                    cmd3d.nx[k] = c.nx; cmd3d.ny[k] = c.ny; cmd3d.nz[k] = c.nz;
+                    cmd3d.sz[k] = c.sz;
+                }
+                if (edge_transform)
+                    cmd3d.transform = *edge_transform;
             }
             else
                 fill_cmd3d_from_face(cmd3d, face, 0, 1, 2);
         }
 
         DrawCmd cmd{};
-        cmd.v[0] = dv0; cmd.v[1] = dv1; cmd.v[2] = dv2;
+        if (quad_mode == QuadBuildMode::paired_edge_rtpt_gt4 ||
+            quad_mode == QuadBuildMode::edge_strip)
+        {
+            const DrawVertex edge_dv[4] = {dv0, dv1, dv2, dv3};
+            cmd.v[0] = edge_dv[edge_draw_idx[edge_tri0[0]]];
+            cmd.v[1] = edge_dv[edge_draw_idx[edge_tri0[1]]];
+            cmd.v[2] = edge_dv[edge_draw_idx[edge_tri0[2]]];
+        }
+        else
+        {
+            cmd.v[0] = dv0; cmd.v[1] = dv1; cmd.v[2] = dv2;
+        }
         cmd.clut = clut; cmd.texpage = texpage;
         cmd.flags = flags; cmd.semi_mode = semi_mode; cmd.tex_depth = tex_depth;
 
@@ -1507,7 +2095,7 @@ void Gpu3D::push_quad(
 
         if (is_3d)
         {
-            if (vtx_lookup_3d)
+            if (quad_mode == QuadBuildMode::debug_vtx_lookup)
             {
                 cmd3d.verts_3d[0] = {vtx[1]->vx, vtx[1]->vy, vtx[1]->vz};
                 cmd3d.verts_3d[1] = {vtx[3]->vx, vtx[3]->vy, vtx[3]->vz};
@@ -1517,89 +2105,55 @@ void Gpu3D::push_quad(
                 cmd3d.nx[2] = vtx[2]->nx; cmd3d.ny[2] = vtx[2]->ny; cmd3d.nz[2] = vtx[2]->nz; cmd3d.sz[2] = vtx[2]->sz;
                 cmd3d.transform = vtx[0]->transform;
             }
-            else if (edge_strip_ok)
-            {
-                // Tri 2 of quad: face_A.V1, face_B.V1 (or V0 if not edge), face_B.V0
-                cmd3d.verts_3d[0] = {face->vx[1], face->vy[1], face->vz[1]};
-                cmd3d.nx[0] = face->nx[1]; cmd3d.ny[0] = face->ny[1]; cmd3d.nz[0] = face->nz[1];
-                cmd3d.sz[0] = face->sz[1];
-
-                const int bi = face_b_edge ? 1 : 0; // V1 if edge-strip, V0 if normal
-                cmd3d.verts_3d[1] = {face_b->vx[bi], face_b->vy[bi], face_b->vz[bi]};
-                cmd3d.nx[1] = face_b->nx[bi]; cmd3d.ny[1] = face_b->ny[bi]; cmd3d.nz[1] = face_b->nz[bi];
-                cmd3d.sz[1] = face_b->sz[bi];
-
-                cmd3d.verts_3d[2] = {face_b->vx[0], face_b->vy[0], face_b->vz[0]};
-                cmd3d.nx[2] = face_b->nx[0]; cmd3d.ny[2] = face_b->ny[0]; cmd3d.nz[2] = face_b->nz[0];
-                cmd3d.sz[2] = face_b->sz[0];
-
-                cmd3d.transform = face->transform;
-                ++quad_cache_hits_;
-            }
-            else if (qc)
+            else if (quad_mode == QuadBuildMode::cache)
             {
                 fill_cmd3d_from_quad(cmd3d, qc, 1, 3, 2);
-                ++quad_cache_hits_;
+            }
+            else if (quad_mode == QuadBuildMode::paired_edge_rtpt_gt4 ||
+                     quad_mode == QuadBuildMode::edge_strip)
+            {
+                for (int k = 0; k < 3; ++k)
+                {
+                    const EdgeQuadCorner& c = edge_quad[edge_tri1[k]];
+                    cmd3d.verts_3d[k] = {c.vx, c.vy, c.vz};
+                    cmd3d.nx[k] = c.nx; cmd3d.ny[k] = c.ny; cmd3d.nz[k] = c.nz;
+                    cmd3d.sz[k] = c.sz;
+                }
+                if (edge_transform)
+                    cmd3d.transform = *edge_transform;
+            }
+            else if (quad_mode == QuadBuildMode::face_pair)
+            {
+                cmd3d.verts_3d[0] = {face->vx[1], face->vy[1], face->vz[1]};
+                cmd3d.nx[0] = face->nx[1]; cmd3d.ny[0] = face->ny[1]; cmd3d.nz[0] = face->nz[1];
+                cmd3d.verts_3d[1] = {face_pair_b->vx[face_pair_v3_vert_idx], face_pair_b->vy[face_pair_v3_vert_idx], face_pair_b->vz[face_pair_v3_vert_idx]};
+                cmd3d.nx[1] = face_pair_b->nx[face_pair_v3_vert_idx]; cmd3d.ny[1] = face_pair_b->ny[face_pair_v3_vert_idx]; cmd3d.nz[1] = face_pair_b->nz[face_pair_v3_vert_idx];
+                cmd3d.verts_3d[2] = {face->vx[2], face->vy[2], face->vz[2]};
+                cmd3d.nx[2] = face->nx[2]; cmd3d.ny[2] = face->ny[2]; cmd3d.nz[2] = face->nz[2];
+                cmd3d.transform = face->transform;
             }
             else
             {
-                // Non-edge-strip fallback: try V3 carrier/reference decode
-                const uint16_t v3x = x3;
-                const uint16_t v3y = y3;
-                const gte::GteCacheFace* fb = nullptr;
-                int v3_vert_idx = 0;
-
-                // Preferred in token-flow mode: explicit hint from V3 coord word.
-                if (face_idx_v3_hint != kNoFaceHint && face_idx_v3_hint != 0 && face_idx_v3_hint != face_idx)
-                {
-                    fb = gte_3d_->face_by_index(face_idx_v3_hint);
-                    v3_vert_idx = 0;
-                    if (fb)
-                        ++quad_v3_hint_used_;
-                }
-
-                if (!fb && in_dead_zone(v3x) && in_dead_zone(v3y) &&
-                    v3x != gte::Gte3D::REF_BASE && v3y != gte::Gte3D::REF_BASE)
-                {
-                    const int lo = (int)std::round((double)(v3x - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
-                    const int hi = (int)std::round((double)(v3y - gte::Gte3D::REF_BASE) / gte::Gte3D::SPACING);
-                    if (lo >= 0 && lo <= 255 && hi >= 0 && hi <= 255)
-                    {
-                        const uint32_t fi_b = (uint32_t)((hi << 8) | lo);
-                        fb = gte_3d_->face_by_index(fi_b);
-                        v3_vert_idx = 0;
-                    }
-                }
-                else if (!fb && in_dead_zone(v3x) && in_dead_zone(v3y))
-                {
-                    v3_vert_idx = 1;
-                    if (face_idx + 1 < 0xFFFFu)
-                        fb = gte_3d_->face_by_index(face_idx + 1);
-                    if (!fb && face_idx > 1)
-                        fb = gte_3d_->face_by_index(face_idx - 1);
-                }
-
-                if (fb)
-                {
-                    cmd3d.verts_3d[0] = {face->vx[1], face->vy[1], face->vz[1]};
-                    cmd3d.nx[0] = face->nx[1]; cmd3d.ny[0] = face->ny[1]; cmd3d.nz[0] = face->nz[1];
-                    cmd3d.verts_3d[1] = {fb->vx[v3_vert_idx], fb->vy[v3_vert_idx], fb->vz[v3_vert_idx]};
-                    cmd3d.nx[1] = fb->nx[v3_vert_idx]; cmd3d.ny[1] = fb->ny[v3_vert_idx]; cmd3d.nz[1] = fb->nz[v3_vert_idx];
-                    cmd3d.verts_3d[2] = {face->vx[2], face->vy[2], face->vz[2]};
-                    cmd3d.nx[2] = face->nx[2]; cmd3d.ny[2] = face->ny[2]; cmd3d.nz[2] = face->nz[2];
-                    cmd3d.transform = face->transform;
-                    ++quad_cache_hits_;
-                }
-                else
-                {
-                    fill_cmd3d_from_face(cmd3d, face, 1, 1, 2);
-                    ++quad_cache_misses_;
-                }
+                // Partial-face mode.
+                // This is intentionally explicit in the stats because it means the
+                // producer did not provide a complete quad mode for a GP0 GT4 packet.
+                fill_cmd3d_from_face(cmd3d, face, 1, 1, 2);
             }
         }
 
         DrawCmd cmd{};
-        cmd.v[0] = dv1; cmd.v[1] = dv3; cmd.v[2] = dv2;
+        if (quad_mode == QuadBuildMode::paired_edge_rtpt_gt4 ||
+            quad_mode == QuadBuildMode::edge_strip)
+        {
+            const DrawVertex edge_dv[4] = {dv0, dv1, dv2, dv3};
+            cmd.v[0] = edge_dv[edge_draw_idx[edge_tri1[0]]];
+            cmd.v[1] = edge_dv[edge_draw_idx[edge_tri1[1]]];
+            cmd.v[2] = edge_dv[edge_draw_idx[edge_tri1[2]]];
+        }
+        else
+        {
+            cmd.v[0] = dv1; cmd.v[1] = dv3; cmd.v[2] = dv2;
+        }
         cmd.clut = clut; cmd.texpage = texpage;
         cmd.flags = flags; cmd.semi_mode = semi_mode; cmd.tex_depth = tex_depth;
 
@@ -1644,19 +2198,50 @@ void Gpu3D::on_vblank()
     // 60 keeps logs readable while still capturing transient issues (e.g. flag/menu).
     if (frame_count_ < 10 || (frame_count_ % 60) == 0)
     {
+        const uint32_t cpu_pc = bus_ ? bus_->cpu_pc() : 0;
+        const uint32_t vblank = bus_ ? bus_->vblank_count() : 0;
         emu::logf(emu::LogLevel::warn, "GPU3D_VBLANK",
-            "frame=%u words=%u cmds=%u vram_skips=%u tris=%zu 3d=%u 2d=%u state=%d quad_hit=%u quad_miss=%u tok_hint=%u tok_miss=%u tok_cached=%u v3_hint=%u vtx_hit=%u vtx_miss=%u miss_no_hint=%u miss_hint_stale=%u miss_decode_fail=%u",
-            frame_count_, gp0_words_accum_, gp0_cmds_accum_, gp0_vram_skips_accum_,
+            "frame=%u vblank=%u pc=0x%08X words=%u cmds=%u vram_skips=%u tris=%zu 3d=%u 2d=%u state=%d quad_cache=%u quad_paired_edge=%u quad_edge=%u quad_facepair=%u quad_debug_vtx=%u quad_partial=%u tok_hint=%u tok_miss=%u tok_cached=%u v3_hint=%u vtx_hit=%u vtx_miss=%u miss_no_hint=%u miss_hint_stale=%u miss_decode_fail=%u",
+            frame_count_, vblank, cpu_pc, gp0_words_accum_, gp0_cmds_accum_, gp0_vram_skips_accum_,
             dl.cmds_3d.size(), n3d, n2d, (int)gp0_state_,
-            quad_cache_hits_, quad_cache_misses_,
+            quad_mode_cache_hits_, quad_mode_paired_edge_hits_, quad_mode_edge_strip_hits_, quad_mode_face_pair_hits_,
+            quad_mode_debug_vtx_hits_, quad_mode_face_partial_hits_,
             token_poly_hinted_, token_poly_missing_, token_poly_cached_, quad_v3_hint_used_,
             vtx_lookup_hits_, vtx_lookup_misses_,
             tok_miss_no_hint_, tok_miss_hint_not_cached_, tok_miss_decode_fail_);
+
+        auto log_top_hist = [](const char* tag, uint32_t frame, const std::unordered_map<uint32_t, uint32_t>& hist)
+        {
+            if (hist.empty())
+                return;
+            std::vector<std::pair<uint32_t, uint32_t>> items(hist.begin(), hist.end());
+            std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+                if (a.second != b.second) return a.second > b.second;
+                return a.first < b.first;
+            });
+            const size_t topn = std::min<size_t>(items.size(), 4);
+            for (size_t i = 0; i < topn; ++i)
+            {
+                emu::logf(emu::LogLevel::warn, tag,
+                    "frame=%u top[%zu] pc=0x%08X count=%u",
+                    frame, i, items[i].first, items[i].second);
+            }
+        };
+        log_top_hist("GPU3D_PAIRED_EDGE_PC", frame_count_, quad_paired_edge_pc_hist_);
+        log_top_hist("GPU3D_EDGE_PC", frame_count_, quad_edge_pc_hist_);
+        log_top_hist("GPU3D_PARTIAL_PC", frame_count_, quad_partial_pc_hist_);
     }
 
-    // Reset quad stats
-    quad_cache_hits_ = 0;
-    quad_cache_misses_ = 0;
+    // Reset quad mode stats
+    quad_mode_cache_hits_ = 0;
+    quad_mode_paired_edge_hits_ = 0;
+    quad_mode_edge_strip_hits_ = 0;
+    quad_mode_face_pair_hits_ = 0;
+    quad_mode_debug_vtx_hits_ = 0;
+    quad_mode_face_partial_hits_ = 0;
+    quad_paired_edge_pc_hist_.clear();
+    quad_edge_pc_hist_.clear();
+    quad_partial_pc_hist_.clear();
     token_poly_hinted_ = 0;
     token_poly_missing_ = 0;
     token_poly_cached_ = 0;

@@ -258,6 +258,97 @@ Donc:
 - identite canonique humaine = nom du fichier
 - validation technique = hashes internes
 
+---
+
+## Regles de mode
+
+Le profil doit pouvoir declarer des **modes explicites** relies a des zones de
+code.
+
+Objectif:
+
+- ne pas "deviner" la reconstruction a chaque packet
+- activer un mode stable quand on entre dans une zone productrice connue
+
+### Structure logique
+
+Chaque regle de mode doit pouvoir decrire:
+
+- `name`
+  - ex: `paired_edge_rtpt_gt4`
+  - ex: `rtpt_rtps_gt4`
+  - ex: `face_pair_v3_hint`
+
+- `producer_pc_ranges`
+  - plages CPU des routines qui remplissent les packets GPU/OT
+
+- `gte_pc_ranges`
+  - plages CPU qui executent les helpers GTE associes
+
+- `ot_fill_pc_ranges`
+  - plages CPU des helpers type `addPrim()` / insertion OT
+
+- `packet_kind`
+  - ex: `gt4`, `gt3`, `line`, etc.
+
+- `link_rule`
+  - ex: `dominant_face + secondary_hint`
+  - ex: `dominant_face + projected_segment`
+  - ex: `face_pair_from_v3`
+
+- `priority`
+  - pour arbitrer si plusieurs regles matchent
+
+- `confidence`
+  - niveau de validation de la regle
+
+### Mode actif runtime
+
+Le runtime peut maintenir un `active_mode` global courant:
+
+- en mono-thread, c'est simple et deterministic
+- l'activation se fait quand le `producer_pc` courant matche une regle
+- le mode reste actif tant qu'on reste dans la zone/famille de builders
+- hors de la zone, le runtime re-evalue la regle suivante
+
+But:
+
+- moins de logique implicite dans `push_quad()`
+- plus de comportements explicites et profiles
+
+### Exemple Ridge Racer
+
+```txt
+mode_rule {
+  name = "paired_edge_rtpt_gt4"
+  producer_pc_ranges = [0x80026110-0x800265CF]
+  gte_pc_ranges = [0x800477A4-0x800477FF]
+  ot_fill_pc_ranges = [0x80043F38-0x80043FFF]
+  packet_kind = "gt4"
+  link_rule = "dominant_face + projected_segment"
+  priority = 100
+  confidence = "validated"
+}
+```
+
+Cette information ne remplace pas le code generique.
+
+Elle sert a:
+
+- selectionner le bon mode generique
+- fournir les bonnes zones de PC
+- eviter les heuristiques opaques ou les fallbacks
+
+Profil Ridge Racer actuel:
+
+- fichier: `profiles/psx3d/SCUS-943.00.psx3dprof`
+- format: `PSX3D_PROFILE_V2`
+- premier mode seed:
+  - `paired_edge_rtpt_gt4`
+  - `producer_pc_ranges = [0x80026110-0x800265CF]`
+  - `gte_pc_ranges = [0x800477A4-0x800477FF]`
+  - `ot_fill_pc_ranges = [0x80043F38-0x80043FFF]`
+
 ## Organisation logique du profil
 
 Le contenu du profil doit tendre vers 3 couches:

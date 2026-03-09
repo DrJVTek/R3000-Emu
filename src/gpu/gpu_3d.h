@@ -2,11 +2,15 @@
 
 #include <cstdint>
 #include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "igpu.h"
 #include "gpu.h" // DrawCmd, DrawCmd3D, DrawEnv, FrameDrawList
 
 namespace gte { class Gte3D; }
+namespace r3000 { class Bus; }
 
 namespace gpu
 {
@@ -24,24 +28,56 @@ class Gpu3D : public IGpu
   public:
     static constexpr uint32_t kNoFaceHint = 0xFFFFFFFFu;
 
+    enum class RuntimeModeKind : uint8_t
+    {
+        unknown = 0,
+        paired_edge_rtpt_gt4,
+        subdivided_ft4_intpl_rtpt,
+    };
+
+    enum class RuntimeLinkRule : uint8_t
+    {
+        unknown = 0,
+        packet_edge_pairs,
+    };
+
+    struct PcRange
+    {
+        uint32_t start{0};
+        uint32_t end{0};
+    };
+
+    struct RuntimeModeRule
+    {
+        RuntimeModeKind mode{RuntimeModeKind::unknown};
+        RuntimeLinkRule link_rule{RuntimeLinkRule::unknown};
+        uint32_t priority{0};
+        std::vector<PcRange> producer_pc_ranges{};
+        std::vector<PcRange> gte_pc_ranges{};
+        std::vector<PcRange> ot_fill_pc_ranges{};
+    };
+
     Gpu3D();
 
     // Bind to shadow GTE for SXY→vertex lookup
     void bind_gte_3d(gte::Gte3D* g) { gte_3d_ = g; }
+    void bind_bus(r3000::Bus* b) { bus_ = b; }
 
     // IGpu interface
     void reset() override;
     void gp0(uint32_t word) override;
-    void gp0_with_face_hint(uint32_t word, uint32_t face_hint);
+    void gp0_with_face_hint(uint32_t word, uint32_t face_hint, uint32_t writer_pc = 0);
     void gp1(uint32_t word) override;
     void on_vblank() override;
     void set_ot_z(uint32_t z) override { current_ot_z_ = z; }
     void copy_ready_draw_list(FrameDrawList& out) const override;
     uint32_t frame_count() const override { return frame_count_; }
+    void clear_runtime_mode_rules();
+    void set_runtime_mode_rules(const std::vector<RuntimeModeRule>& rules);
 
   private:
     // GP0 command processing
-    void gp0_start_command(uint32_t cmd_word, uint32_t face_hint);
+    void gp0_start_command(uint32_t cmd_word, uint32_t face_hint, uint32_t writer_pc);
     void gp0_execute();
     void gp0_polygon();
     void gp0_fill_rect();
@@ -49,6 +85,9 @@ class Gpu3D : public IGpu
     void gp0_rect();
     void gp0_env_command();
     static int gp0_param_count(uint8_t cmd);
+    const RuntimeModeRule* find_runtime_mode_rule(uint32_t producer_pc) const;
+    static bool pc_in_ranges(uint32_t pc, const std::vector<PcRange>& ranges);
+    static bool rule_matches_writer_pc(const RuntimeModeRule& rule, uint32_t producer_pc);
 
     // Push a single triangle to the active draw list
     void push_triangle(
@@ -65,7 +104,8 @@ class Gpu3D : public IGpu
         uint16_t x2, uint16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
         uint16_t x3, uint16_t y3, uint8_t r3, uint8_t g3, uint8_t b3, uint8_t u3, uint8_t v3,
         uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
-        PrimOrigin origin, uint32_t face_idx, uint32_t face_idx_v3_hint = kNoFaceHint);
+        PrimOrigin origin, uint32_t face_idx, uint32_t face_idx_secondary_hint = kNoFaceHint,
+        uint32_t producer_pc = 0);
 
     // GP0 state machine
     enum class Gp0State : uint8_t
@@ -78,6 +118,7 @@ class Gpu3D : public IGpu
     Gp0State gp0_state_{Gp0State::idle};
     uint32_t cmd_buf_[16]{};
     uint32_t cmd_face_hint_[16]{};
+    uint32_t cmd_writer_pc_[16]{};
     int cmd_buf_pos_{0};
     int cmd_words_needed_{0};
 
@@ -103,6 +144,7 @@ class Gpu3D : public IGpu
 
     // Shadow GTE reference for SXY lookup
     gte::Gte3D* gte_3d_{nullptr};
+    r3000::Bus* bus_{nullptr};
 
     // Debug counters (public for CLI diagnostic — saved at VBlank before reset)
   public:
@@ -121,8 +163,12 @@ class Gpu3D : public IGpu
     uint32_t gp0_words_accum_{0};
     uint32_t gp0_cmds_accum_{0};
     uint32_t gp0_vram_skips_accum_{0};
-    uint32_t quad_cache_hits_{0};
-    uint32_t quad_cache_misses_{0};
+    uint32_t quad_mode_cache_hits_{0};
+    uint32_t quad_mode_paired_edge_hits_{0};
+    uint32_t quad_mode_edge_strip_hits_{0};
+    uint32_t quad_mode_face_pair_hits_{0};
+    uint32_t quad_mode_debug_vtx_hits_{0};
+    uint32_t quad_mode_face_partial_hits_{0};
     uint32_t token_poly_hinted_{0};
     uint32_t token_poly_missing_{0};
     uint32_t token_poly_cached_{0};
@@ -132,6 +178,10 @@ class Gpu3D : public IGpu
     uint32_t tok_miss_no_hint_{0};
     uint32_t tok_miss_hint_not_cached_{0};
     uint32_t tok_miss_decode_fail_{0};
+    std::vector<RuntimeModeRule> runtime_mode_rules_{};
+    std::unordered_map<uint32_t, uint32_t> quad_paired_edge_pc_hist_{};
+    std::unordered_map<uint32_t, uint32_t> quad_edge_pc_hist_{};
+    std::unordered_map<uint32_t, uint32_t> quad_partial_pc_hist_{};
 };
 
 } // namespace gpu

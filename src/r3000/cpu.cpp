@@ -7,11 +7,86 @@
 #include <vector>
 
 #include "../cdrom/cdrom.h"
+#include "../gpu/igpu.h"
+#include "../gpu/gpu_3d.h"
 #include "../gpu/gte_correlation.h"
 #include "../log/emu_log.h"
 
 namespace r3000
 {
+
+static const char* gte_func_name(uint32_t funct)
+{
+    switch (funct & 0x3Fu)
+    {
+    case 0x01: return "RTPS";
+    case 0x06: return "NCLIP";
+    case 0x0C: return "OP";
+    case 0x10: return "DPCS";
+    case 0x11: return "INTPL";
+    case 0x12: return "MVMVA";
+    case 0x13: return "NCDS";
+    case 0x14: return "CDP";
+    case 0x16: return "NCDT";
+    case 0x1B: return "NCCS";
+    case 0x1C: return "CC";
+    case 0x1E: return "NCS";
+    case 0x20: return "NCT";
+    case 0x28: return "SQR";
+    case 0x29: return "DCPL";
+    case 0x2A: return "DPCT";
+    case 0x2D: return "AVSZ3";
+    case 0x2E: return "AVSZ4";
+    case 0x30: return "RTPT";
+    case 0x3D: return "GPF";
+    case 0x3E: return "GPL";
+    case 0x3F: return "NCCT";
+    default:   return "UNKNOWN";
+    }
+}
+
+static int gte_func_is_structural(uint32_t funct)
+{
+    switch (funct & 0x3Fu)
+    {
+    case 0x01: // RTPS
+    case 0x06: // NCLIP
+    case 0x1E: // NCS
+    case 0x20: // NCT
+    case 0x2E: // AVSZ4
+    case 0x30: // RTPT
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+template<typename K>
+static void gte_trace_dump_top(const char* tag, uint32_t frame, const std::unordered_map<K, uint32_t>& hist,
+    const char* (*name_fn)(uint32_t) = nullptr)
+{
+    if (hist.empty())
+        return;
+    std::vector<std::pair<K, uint32_t>> items(hist.begin(), hist.end());
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+    });
+    const size_t topn = std::min<size_t>(items.size(), 8);
+    for (size_t i = 0; i < topn; ++i)
+    {
+        if (name_fn)
+        {
+            emu::logf(emu::LogLevel::warn, tag, "frame=%u top[%zu] op=%s(0x%02X) count=%u",
+                frame, i, name_fn((uint32_t)items[i].first), (uint32_t)items[i].first, items[i].second);
+        }
+        else
+        {
+            emu::logf(emu::LogLevel::warn, tag, "frame=%u top[%zu] pc=0x%08X count=%u",
+                frame, i, (uint32_t)items[i].first, items[i].second);
+        }
+    }
+}
 
 static int is_camera_track_addr(uint32_t paddr, uint32_t ram_size)
 {
@@ -4448,8 +4523,43 @@ Cpu::StepResult Cpu::step()
                     // Bit 25 of the instruction (= bit 4 of rs_field) marks a COP2 CO
                     // command.  Bits 24-21 carry sf/lm flags and are NOT always zero,
                     // so we must test the bit, not compare rs_field == 0x10.
+                    if (gte_trace_.enabled)
+                    {
+                        const uint32_t trace_pc = r.pc;
+                        const int in_range = (gte_trace_.pc_start == 0 && gte_trace_.pc_end == 0) ||
+                                             (trace_pc >= gte_trace_.pc_start && trace_pc <= gte_trace_.pc_end);
+                        const gpu::Gpu3D* trace_gpu3d = bus_.gpu_3d();
+                        const uint32_t trace_frame = trace_gpu3d ? trace_gpu3d->frame_count() : bus_.vblank_count();
+                        const uint32_t trace_vblank = bus_.vblank_count();
+                        const int frame_ok =
+                            ((gte_trace_.start_frame == 0 || trace_frame >= gte_trace_.start_frame) &&
+                             (gte_trace_.end_frame == 0 || trace_frame <= gte_trace_.end_frame));
+                        const uint32_t gte_func = instr & 0x3Fu;
+                        if (in_range && frame_ok && gte_func_is_structural(gte_func))
+                        {
+                            ++gte_trace_pc_hist_[trace_pc];
+                            ++gte_trace_op_hist_[gte_func];
+                        }
+                        if (gte_trace_.end_frame != 0 &&
+                            trace_frame > gte_trace_.end_frame &&
+                            !gte_trace_.summary_dumped)
+                        {
+                            emu::logf(emu::LogLevel::warn, "GTE_TRACE",
+                                "window frame=%u..%u closed at frame=%u vblank=%u pcs=%zu ops=%zu",
+                                gte_trace_.start_frame, gte_trace_.end_frame,
+                                trace_frame, trace_vblank,
+                                gte_trace_pc_hist_.size(), gte_trace_op_hist_.size());
+                            gte_trace_dump_top("GTE_TRACE_PC", trace_frame, gte_trace_pc_hist_);
+                            gte_trace_dump_top("GTE_TRACE_OP", trace_frame, gte_trace_op_hist_, gte_func_name);
+                            gte_trace_.summary_dumped = 1;
+                        }
+                    }
                     const int gte_cycles = gte_.execute(instr);
-                    if (gte_shadow_) gte_shadow_->execute(instr);
+                    if (gte_shadow_)
+                    {
+                        gte_shadow_->set_source_pc(r.pc);
+                        gte_shadow_->execute(instr);
+                    }
                     if (gte_cycles == 0)
                     {
                         raise_exception(EXC_RI, 0, r.pc);
@@ -4896,10 +5006,10 @@ Cpu::StepResult Cpu::step()
 
             // Log instruction with key registers
             emu::logf(emu::LogLevel::info, "REGTRACE",
-                "PC=%08X I=%08X v0=%08X v1=%08X a0=%08X a1=%08X a2=%08X a3=%08X t0=%08X t1=%08X sp=%08X ra=%08X",
+                "PC=%08X I=%08X v0=%08X v1=%08X a0=%08X a1=%08X a2=%08X a3=%08X t0=%08X t1=%08X t2=%08X t3=%08X sp=%08X ra=%08X",
                 trace_pc, instr,
                 gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7],
-                gpr_[8], gpr_[9], gpr_[29], gpr_[31]);
+                gpr_[8], gpr_[9], gpr_[10], gpr_[11], gpr_[29], gpr_[31]);
 
             // If watch value hit, log extra detail
             if (watch_hit)

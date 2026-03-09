@@ -125,6 +125,31 @@ Le pipeline d'authoring visé est hybride:
 - `GhidraMCP` pour l'analyse statique et la compréhension du code jeu
 - `LLM` pour synthétiser traces + reverse et produire de meilleurs `.psx3dprof`
 
+Un premier serveur MCP côté émulateur CLI existe maintenant:
+
+- flag CLI: `--mcp-stdio`
+- serveur réutilisable dans `src/emu/mcp_server.*`
+- conçu pour être réemployé plus tard avec un backend UE5
+- outils de breakpoint CPU déjà exposés:
+  - `emu.list_breakpoints`
+  - `emu.set_breakpoint_pc`
+  - `emu.clear_breakpoint_pc`
+  - `emu.clear_all_breakpoints`
+  - `emu.run_until_breakpoint`
+- outil de fenêtre de trace GTE exposé:
+  - `emu.set_gte_trace_window`
+
+Capture GTE différée côté CLI:
+
+```powershell
+.\lib\Debug\r3000_emu.exe --bios=bios/ps1_bios.bin --cd="E:\Projects\PSX\roms\Ridge Racer (U).cue" --max-time=180 --gte-trace=0:0 --gte-trace-start-frame=520 --gte-trace-end-frame=680
+```
+
+Cette capture:
+- n’active le trace GTE que sur la fenêtre utile,
+- évite d’analyser tout le boot,
+- et sert à recoller les vrais PCs GTE actifs avec Ghidra.
+
 Important:
 
 - `GhidraMCP` / `LLM` / outils lourds = pipeline **offline**

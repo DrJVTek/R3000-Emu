@@ -16,6 +16,21 @@ using gte::internal::shift_rgb_pipeline;
 namespace gte
 {
 
+static uint32_t pack_sxy16(int16_t sx, int16_t sy)
+{
+    return (static_cast<uint32_t>(static_cast<uint16_t>(sy)) << 16) |
+           static_cast<uint16_t>(sx);
+}
+
+static uint64_t make_edge_segment_key(int16_t sx0, int16_t sy0, int16_t sx1, int16_t sy1)
+{
+    const uint32_t a = pack_sxy16(sx0, sy0);
+    const uint32_t b = pack_sxy16(sx1, sy1);
+    if (a <= b)
+        return (static_cast<uint64_t>(a) << 32) | b;
+    return (static_cast<uint64_t>(b) << 32) | a;
+}
+
 // Unclamped perspective divide for 3D reconstruction.
 // Same Newton-Raphson math as hardware but:
 //   - NO overflow early-return (sz3*2 <= h doesn't saturate to 0x1FFFF)
@@ -46,6 +61,8 @@ Gte3D::Gte3D()
     read_face_cache_.reserve(2048);
     write_sxy_table_.reserve(4096);
     read_sxy_table_.reserve(4096);
+    write_edge_face_table_.reserve(2048);
+    read_edge_face_table_.reserve(2048);
     reset();
 }
 
@@ -65,6 +82,8 @@ void Gte3D::reset()
     read_face_cache_.clear();
     write_sxy_table_.clear();
     read_sxy_table_.clear();
+    write_edge_face_table_.clear();
+    read_edge_face_table_.clear();
 }
 
 uint32_t Gte3D::read_data(uint32_t idx) const
@@ -558,6 +577,7 @@ void Gte3D::capture_snapshot(const int32_t (*verts)[3], int count)
     snap.transform.tr[1] = (int32_t)ctrl_[C_TRY];
     snap.transform.tr[2] = (int32_t)ctrl_[C_TRZ];
 
+    snap.source_pc = current_source_pc_;
     snap.sequence_id = ++snapshot_seq_;
     snap.valid = 1;
 }
@@ -1377,6 +1397,7 @@ uint32_t Gte3D::store_vertex(const GteSnapshot& snap, int vert_idx)
     entry.ny = last_normal_[1];
     entry.nz = last_normal_[2];
     entry.transform = snap.transform;
+    entry.source_pc = snap.source_pc;
     entry.sx = snap.sx[vert_idx];
     entry.sy = snap.sy[vert_idx];
     entry.sz = snap.sz[vert_idx];
@@ -1408,6 +1429,16 @@ uint32_t Gte3D::store_face(const GteSnapshot& snap)
         face.sz[i] = snap.sz[i];
     }
     face.transform = snap.transform;
+    face.source_pc = snap.source_pc;
+
+    const bool edge_strip = (snap.vertices[1].vx == snap.vertices[2].vx &&
+                             snap.vertices[1].vy == snap.vertices[2].vy &&
+                             snap.vertices[1].vz == snap.vertices[2].vz);
+    if (edge_strip)
+    {
+        const uint64_t key = make_edge_segment_key(snap.sx[0], snap.sy[0], snap.sx[1], snap.sy[1]);
+        write_edge_face_table_[key] = fi;
+    }
 
     ++face_index_;
     return fi;
@@ -1420,7 +1451,9 @@ void Gte3D::store_quad(const GteSnapshot& rtps_snap, uint32_t face_idx)
 
     GteCacheQuad& quad = write_quad_cache_[face_idx];
 
-    // First 3 vertices from saved RTPT snapshot
+    // RTPT+RTPS GT4 path: the game writes the first 3 packet vertices through
+    // gte_stsxy3_gt3, then appends V3 through gte_stSXY2. Keep the natural
+    // RTPT order here so GteCacheQuad mirrors the actual GT4 packet order.
     for (int i = 0; i < 3; ++i)
     {
         quad.vx[i] = last_rtpt_snapshot_.vertices[i].vx;
@@ -1446,7 +1479,20 @@ void Gte3D::store_quad(const GteSnapshot& rtps_snap, uint32_t face_idx)
     quad.sz[3] = rtps_snap.sz[2];
 
     quad.transform = last_rtpt_snapshot_.transform;
+    quad.source_pc = last_rtpt_snapshot_.source_pc;
+    quad.valid = 1;
     ++quad_count_;
+}
+
+static void write_quad_alias(
+    std::vector<GteCacheQuad>& cache,
+    uint32_t face_idx,
+    const GteCacheQuad& quad)
+{
+    if (face_idx >= cache.size())
+        cache.resize(face_idx + 1);
+    cache[face_idx] = quad;
+    cache[face_idx].valid = 1;
 }
 
 void Gte3D::after_rtps()
@@ -1518,6 +1564,68 @@ void Gte3D::after_rtpt()
     if (prev_was_rtpt && prev_face_idx != 0xFFFFFFFFu &&
         prev_face_idx < write_face_cache_.size())
     {
+        const bool prev_edge_strip =
+            (last_rtpt_snapshot_.vertices[1].vx == last_rtpt_snapshot_.vertices[2].vx &&
+             last_rtpt_snapshot_.vertices[1].vy == last_rtpt_snapshot_.vertices[2].vy &&
+             last_rtpt_snapshot_.vertices[1].vz == last_rtpt_snapshot_.vertices[2].vz);
+        const bool curr_edge_strip =
+            (last_snapshot_.vertices[1].vx == last_snapshot_.vertices[2].vx &&
+             last_snapshot_.vertices[1].vy == last_snapshot_.vertices[2].vy &&
+             last_snapshot_.vertices[1].vz == last_snapshot_.vertices[2].vz);
+
+        // Explicit paired-edge RTPT mode:
+        // some builders emit a logical GT4 from two consecutive edge RTPTs.
+        // Each RTPT contributes one projected edge. The logical GT4 order must
+        // be interleaved across the two edges:
+        //   [prev0, cur0, prev1, cur1]
+        // not grouped by edge:
+        //   [prev0, prev1, cur0, cur1]
+        //
+        // Grouping by edge produces a complete quad cache, but with the wrong
+        // GT4 corner order. Ridge Racer's DrawFlag then appears rotated/folded
+        // even though quad_cache hits are perfect.
+        if (prev_edge_strip && curr_edge_strip &&
+            last_rtpt_snapshot_.source_pc != 0 &&
+            last_rtpt_snapshot_.source_pc == last_snapshot_.source_pc)
+        {
+            GteCacheQuad quad{};
+            const int prev_idx[2] = {0, 1};
+            const int curr_idx[2] = {0, 1};
+            for (int i = 0; i < 2; ++i)
+            {
+                const int prev_p = prev_idx[i];
+                const int curr_p = curr_idx[i];
+                const int base = i * 2;
+
+                quad.vx[base + 0] = last_rtpt_snapshot_.vertices[prev_p].vx;
+                quad.vy[base + 0] = last_rtpt_snapshot_.vertices[prev_p].vy;
+                quad.vz[base + 0] = last_rtpt_snapshot_.vertices[prev_p].vz;
+                quad.nx[base + 0] = last_normal_[0];
+                quad.ny[base + 0] = last_normal_[1];
+                quad.nz[base + 0] = last_normal_[2];
+                quad.sx[base + 0] = last_rtpt_snapshot_.sx[prev_p];
+                quad.sy[base + 0] = last_rtpt_snapshot_.sy[prev_p];
+                quad.sz[base + 0] = last_rtpt_snapshot_.sz[prev_p];
+
+                quad.vx[base + 1] = last_snapshot_.vertices[curr_p].vx;
+                quad.vy[base + 1] = last_snapshot_.vertices[curr_p].vy;
+                quad.vz[base + 1] = last_snapshot_.vertices[curr_p].vz;
+                quad.nx[base + 1] = last_normal_[0];
+                quad.ny[base + 1] = last_normal_[1];
+                quad.nz[base + 1] = last_normal_[2];
+                quad.sx[base + 1] = last_snapshot_.sx[curr_p];
+                quad.sy[base + 1] = last_snapshot_.sy[curr_p];
+                quad.sz[base + 1] = last_snapshot_.sz[curr_p];
+            }
+            quad.transform = last_rtpt_snapshot_.transform;
+            quad.source_pc = last_rtpt_snapshot_.source_pc;
+            quad.valid = 1;
+
+            write_quad_alias(write_quad_cache_, prev_face_idx, quad);
+            write_quad_alias(write_quad_cache_, fi, quad);
+            ++quad_count_;
+        }
+
         // Find the unique vertex in current RTPT (not present in previous RTPT).
         // Compare 3D positions (vx, vy, vz) since screen coords are tagged.
         int unique_curr = -1;
@@ -1543,11 +1651,15 @@ void Gte3D::after_rtpt()
         // Exactly 2 shared + 1 unique → these two RTPTs form a quad
         if (shared_count == 2 && unique_curr >= 0)
         {
-            // Build quad: V0-V2 from previous RTPT, V3 = unique vertex from current RTPT
-            if (prev_face_idx >= write_quad_cache_.size())
-                write_quad_cache_.resize(prev_face_idx + 1);
-
-            GteCacheQuad& quad = write_quad_cache_[prev_face_idx];
+            // Consecutive RTPT grid mode:
+            //   RTPT(A,B,C) followed by RTPT(B,C,D) builds one logical GT4.
+            //
+            // The final GPU packet may later be identified by either the first
+            // or the second RTPT face token, depending on which tagged
+            // coordinates dominate the packet words. Make the logical quad
+            // available under both face identities so the consumer can resolve
+            // this mode deterministically without falling back to edge/partial.
+            GteCacheQuad quad{};
             for (int i = 0; i < 3; ++i)
             {
                 quad.vx[i] = last_rtpt_snapshot_.vertices[i].vx;
@@ -1571,6 +1683,10 @@ void Gte3D::after_rtpt()
             quad.sy[3] = last_snapshot_.sy[u];
             quad.sz[3] = last_snapshot_.sz[u];
             quad.transform = last_rtpt_snapshot_.transform;
+            quad.valid = 1;
+
+            write_quad_alias(write_quad_cache_, prev_face_idx, quad);
+            write_quad_alias(write_quad_cache_, fi, quad);
             ++quad_count_;
         }
     }
@@ -1588,6 +1704,18 @@ uint32_t Gte3D::lookup_by_sxy(uint32_t sxy_packed) const
         return it->second;
     it = write_sxy_table_.find(sxy_packed);
     if (it != write_sxy_table_.end())
+        return it->second;
+    return 0xFFFFFFFFu;
+}
+
+uint32_t Gte3D::lookup_edge_face_by_segment(int16_t sx0, int16_t sy0, int16_t sx1, int16_t sy1) const
+{
+    const uint64_t key = make_edge_segment_key(sx0, sy0, sx1, sy1);
+    auto it = read_edge_face_table_.find(key);
+    if (it != read_edge_face_table_.end())
+        return it->second;
+    it = write_edge_face_table_.find(key);
+    if (it != write_edge_face_table_.end())
         return it->second;
     return 0xFFFFFFFFu;
 }
@@ -1612,9 +1740,9 @@ const GteCacheFace* Gte3D::face_by_index(uint32_t index) const
 
 const GteCacheQuad* Gte3D::quad_by_index(uint32_t index) const
 {
-    if (index < read_quad_cache_.size())
+    if (index < read_quad_cache_.size() && read_quad_cache_[index].valid)
         return &read_quad_cache_[index];
-    if (index < write_quad_cache_.size())
+    if (index < write_quad_cache_.size() && write_quad_cache_[index].valid)
         return &write_quad_cache_[index];
     return nullptr;
 }
@@ -1644,6 +1772,7 @@ void Gte3D::swap_frame()
         read_cache_ = std::move(write_cache_);
         read_face_cache_ = std::move(write_face_cache_);
         read_quad_cache_ = std::move(write_quad_cache_);
+        read_edge_face_table_ = std::move(write_edge_face_table_);
     }
 
     write_cache_.clear();
@@ -1652,6 +1781,8 @@ void Gte3D::swap_frame()
     write_face_cache_.reserve(2048);
     write_quad_cache_.clear();
     write_quad_cache_.reserve(1024);
+    write_edge_face_table_.clear();
+    write_edge_face_table_.reserve(2048);
 
     read_sxy_table_ = std::move(write_sxy_table_);
     write_sxy_table_.clear();

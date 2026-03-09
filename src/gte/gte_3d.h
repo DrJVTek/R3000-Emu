@@ -135,6 +135,8 @@ class Gte3D : public IGte
     // SXY lookup: given a packed SXY value (lo16=SX, hi16=SY), return vertex index.
     // Returns 0xFFFFFFFF if not found.
     uint32_t lookup_by_sxy(uint32_t sxy_packed) const;
+    uint32_t lookup_edge_face_by_segment(int16_t sx0, int16_t sy0, int16_t sx1, int16_t sy1) const;
+    void set_source_pc(uint32_t pc) { current_source_pc_ = pc; }
 
     // Frame management: swap buffers and reset index counter
     void swap_frame();
@@ -208,6 +210,7 @@ class Gte3D : public IGte
     // Core GTE state
     GteSnapshot last_snapshot_{};
     uint32_t snapshot_seq_{0};
+    uint32_t current_source_pc_{0};
     GteVertex3D rtps_vert_fifo_[3]{};
     uint32_t flag_{0};
     uint32_t data_[32]{};
@@ -220,6 +223,8 @@ class Gte3D : public IGte
     std::vector<GteCacheVertex> read_cache_;
     std::unordered_map<uint32_t, uint32_t> write_sxy_table_;
     std::unordered_map<uint32_t, uint32_t> read_sxy_table_;
+    std::unordered_map<uint64_t, uint32_t> write_edge_face_table_;
+    std::unordered_map<uint64_t, uint32_t> read_edge_face_table_;
 
     // Face cache (face-index system): RTPT stores all 3 vertices as one face.
     // Differential encoding: face_idx in differences between carrier/reference vertices.

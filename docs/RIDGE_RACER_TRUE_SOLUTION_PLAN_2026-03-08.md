@@ -1,0 +1,286 @@
+# Ridge Racer True Solution Plan
+
+Date: 2026-03-08
+
+## Goal
+
+Fix the Ridge Racer intro/menu flag with a real solution:
+
+- no hidden fallback as final behavior,
+- no late geometry rescue in the renderer,
+- explicit generic modes,
+- per-game profile data only for validated selections and signatures.
+
+The same work must reduce later issues in the demo/gameplay scenes where polygons are still missing or partially reconstructed.
+
+## Current problem
+
+The menu flag is still wrong:
+
+- orientation is wrong,
+- the mesh is cut,
+- the surface looks partially reconstructed.
+
+What we know already:
+
+- the visible issue is not a simple UE5 rendering limit,
+- the problem is upstream in the CPU/GTE/GPU reconstruction path,
+- the current code still mixes several reconstruction modes in `Gpu3D::push_quad()`,
+- the current counters were historically too aggregated and caused bad conclusions.
+
+## Constraints
+
+The project rule for this area is now explicit:
+
+- no fallback as a final solution,
+- temporary debug fallback is tolerated only if clearly marked temporary,
+- explicit generic modes are preferred over opaque recovery logic,
+- game profiles select validated modes and store validated structural information.
+
+## Why the previous approach drifted
+
+The debugging drift happened because several things were mixed together:
+
+1. static reverse assumptions,
+2. runtime paths not yet re-proven from execution,
+3. a single consumer function trying to handle too many quad patterns,
+4. aggregated counters being read as structural truth.
+
+The result was predictable:
+
+- the wrong function may be treated as the active one,
+- a good hint path can still route into the wrong quad mode,
+- a real producer bug can be hidden by late consumer heuristics.
+
+## Correct architecture
+
+The correct architecture for this class of issue is:
+
+1. identify the real runtime code path,
+2. identify the exact geometric production mode,
+3. implement that mode explicitly in the producer/consumer pipeline,
+4. only then store per-game validated selection info in the profile.
+
+This means:
+
+- hooks and traces first,
+- then mode isolation,
+- then structural fix,
+- then profile knowledge.
+
+## Real solution plan
+
+### 1. Re-prove the runtime path
+
+Do not trust a guessed function until runtime confirms it.
+
+Required signal:
+
+- CPU `PC`
+- GTE command type
+- minimal register context
+
+Target commands:
+
+- `RTPT`
+- `RTPS`
+- `NCLIP`
+- `NCT`
+- `NCS`
+- `AVSZ4`
+
+Target output:
+
+- the real PCs active while the menu flag is built,
+- the actual order of GTE commands,
+- the caller/callee relationships to recover in Ghidra.
+
+This is the first step because if a breakpoint never hits, either:
+
+- the wrong function was chosen,
+- or the wrong execution path was tested.
+
+### 2. Use hooks, not global guesswork
+
+The project already has a hook system.
+
+That is the right mechanism for this work:
+
+- targeted,
+- explicit,
+- cheap when disabled,
+- reusable from CLI and later from MCP/UE5.
+
+The hook layer should be used to:
+
+- log targeted PCs,
+- log targeted GTE activity,
+- dump small RAM structures around known pointers,
+- trigger controlled analysis refreshes.
+
+### 3. Introduce explicit quad modes
+
+`Gpu3D::push_quad()` must stop behaving like a mixed salvage function.
+
+The correct direction is explicit modes such as:
+
+- `gt4_rtpt_rtps`
+- `rtpt_pair_shared2`
+- `edge_strip_tagged`
+
+Each mode must have:
+
+- a clear producer,
+- a clear consumer,
+- dedicated counters,
+- clear invariants.
+
+No mode should silently degrade into an implicit fallback without the logs making it obvious.
+
+### 4. Fix the producer first
+
+The menu flag problem must be fixed in the producer side if the producer is wrong.
+
+Relevant producer path:
+
+- `Gte3D::after_rtpt()`
+- `Gte3D::after_rtps()`
+- `Gte3D::store_quad()`
+
+Questions to answer:
+
+- is the expected quad being produced every time,
+- is the quad entry valid,
+- is the face/quad index stable,
+- is the vertex order correct for the real packet path,
+- is the consumer routing to the correct mode.
+
+### 5. Fix the consumer only after the producer is proven
+
+Once the producer is proven, the consumer side becomes straightforward:
+
+- route packet to the correct mode,
+- consume the exact structure,
+- avoid rescue logic.
+
+If the producer is not proven, consumer changes are too easy to misread as progress.
+
+### 6. Store only validated per-game information
+
+Per-game profiles are still useful, but only for validated information.
+
+Examples of valid profile data:
+
+- a specific function or PC range uses mode `gt4_rtpt_rtps`,
+- a specific memory structure layout is confirmed,
+- a specific OT builder or packet builder signature is confirmed.
+
+Examples of invalid profile data:
+
+- “if reconstruction fails, try this other heuristic”
+- opaque late rescue behavior
+- assumptions not re-proven from runtime
+
+## Ridge Racer-specific working hypothesis
+
+The current working hypothesis is:
+
+- the menu flag is generated by a real quad-producing path,
+- part of that path is not yet being materialized or routed as a complete quad mode,
+- the partial result explains the cut/twisted shape.
+
+This hypothesis must now be confirmed from real runtime traces, not from static similarity alone.
+
+## Immediate implementation tasks
+
+### Task 1. Add targeted GTE tracing
+
+Add a CLI-visible trace mode that logs:
+
+- CPU `PC`
+- GTE function name and opcode
+- minimal register context
+
+This is used only to recover the real runtime path for the flag.
+
+### Task 2. Add/complete MCP breakpoint workflow
+
+Expose breakpoints cleanly so the CLI can be driven by MCP:
+
+- set breakpoint
+- clear breakpoint
+- list breakpoints
+- run until breakpoint
+
+This is needed to inspect:
+
+- active descriptor pointers,
+- loop counts,
+- packet builders,
+- mode transitions.
+
+### Task 3. Rebuild the active function map in Ghidra
+
+For every runtime-confirmed PC:
+
+- rename function if still generic,
+- add comments,
+- annotate role,
+- record whether it belongs to:
+  - projection,
+  - packet assembly,
+  - OT insertion,
+  - lighting,
+  - descriptor iteration.
+
+### Task 4. Split quad mode statistics
+
+All future analysis must distinguish at least:
+
+- true quad cache hits,
+- edge-strip mode,
+- face-pair mode,
+- partial-face mode,
+- temporary debug-only paths.
+
+Without that separation, logs are misleading.
+
+## Success criteria
+
+The menu flag is considered structurally fixed only when:
+
+1. the active runtime path has been re-proven from hooks/traces,
+2. the quad production mode is explicit and stable,
+3. the menu flag is:
+   - complete,
+   - correctly oriented,
+   - not twisted,
+   - not cut,
+4. no hidden fallback is required for the fix,
+5. the selected mode can be stored cleanly in the per-game profile.
+
+## Broader impact
+
+This work is not only about the intro flag.
+
+If done correctly, it gives:
+
+- better understanding of separated vertex/face production paths,
+- fewer missing polygons in later scenes,
+- a better base for per-game profile knowledge,
+- and a more defensible architecture for future compatible games.
+
+## Practical conclusion
+
+The true solution is:
+
+- runtime proof,
+- explicit mode,
+- producer-first fix,
+- validated profile knowledge.
+
+Not:
+
+- late rescue,
+- opaque fallback,
+- or renderer-side compensation.

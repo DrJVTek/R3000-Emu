@@ -54,6 +54,107 @@ Conclusion cas drapeau:
 - Cause principale: nohint structurel sur routines OT pack (meme probleme que la course).
 - Cause aggravante: regression locale du filtre clear-rect dans `Gpu3DComponent` apres changement de convention des coords 2D.
 
+## Mise a jour 2026-03-08 - erreur d'analyse precedente et cause la plus probable
+
+Le cas du drapeau a ete reanalyse avec:
+- logs UE5 plus recents,
+- relecture C++ du pipeline `Gpu3D::push_quad()`,
+- relecture ASM Ghidra de la boucle menu.
+
+### 1. Le compteur `quad_hit` etait trompeur
+
+Le compteur historique `quad_hit` ne mesurait pas uniquement les vrais quads produits par `GteCacheQuad`.
+
+Dans `src/gpu/gpu_3d.cpp`, il etait incremente pour plusieurs chemins differents:
+- vrai quad cache `qc`,
+- reconstruction `edge_strip`,
+- pairage `face_b` sur le 2e triangle.
+
+Conclusion:
+- `quad_hit=312` ne voulait pas dire "312 vrais GT4 corrects",
+- donc une partie du raisonnement precedent etait fausse.
+
+### 2. Le vrai symptome est un mode `face_partial`
+
+Le screenshot UE5 du 2026-03-08 montre:
+- un grand panneau partiellement correct,
+- coupe diagonalement,
+- avec un triangle/plan parasite,
+- et un drapeau couche.
+
+La relecture de `Gpu3D::push_quad()` a mis en evidence un point critique:
+- quand un packet GP0 est un GT4 3D,
+- si `qc` manque,
+- et si on ne trouve ni mode `edge_strip` ni `face_pair`,
+- le 2e triangle etait rempli par:
+
+```cpp
+fill_cmd3d_from_face(cmd3d, face, 1, 1, 2);
+```
+
+Donc:
+- le triangle 2 est degenerate ou partiel,
+- on n'a plus un vrai quad,
+- le rendu ressemble exactement a un quad coupe / vrille.
+
+Ce chemin n'est pas une solution acceptable: il doit etre traite comme un **mode partiel explicite**, pas comme un vrai succes de reconstruction.
+
+### 3. L'ASM Ghidra confirme que le drapeau menu est un vrai mode `RTPT + RTPS -> GT4`
+
+Fonction annotee dans Ghidra:
+- `0x80046B18`
+- nommee `RR_MenuFlagQuadDrawLoop`
+
+Schema observe:
+- chargement de 3 sommets,
+- `RTPT`,
+- `gte_stsxy3_gt3`,
+- chargement du 4e sommet,
+- `RTPS`,
+- `gte_stSXY2`,
+- puis `AVSZ4`, `NCT/NCS`, insertion OT.
+
+Conclusion:
+- le bon mode de travail pour ce cas est explicite:
+  - `rtpt_rtps_gt4`
+- ce n'est pas un edge strip,
+- ce n'est pas un cas a "rattraper" tard dans `push_quad()`.
+
+### 4. Ce qui est maintenant considere comme probable
+
+Le probleme central n'est pas un cap UE5, ni un simple probleme d'axes.
+
+Le probleme probable est:
+- le producteur `Gte3D` ne materialise pas un `GteCacheQuad` pour une partie des GT4 du menu,
+- puis `Gpu3D::push_quad()` tombe sur un mode incomplet (`face_partial`),
+- ce qui produit les quads coupes et la nappe couchee.
+
+Attention:
+- les compteurs `GPU3D_VBLANK` restent des compteurs **agreges par frame**,
+- ils ne prouvent pas a eux seuls que tous les quads `partial` de la frame appartiennent au drapeau,
+- mais ils prouvent qu'une partie des GT4 de la frame tombe encore sur un mode incomplet.
+
+### 5. Refactor de diagnostic effectue
+
+Le code a ete modifie pour compter les quads par **mode reel** au lieu du couple trompeur `quad_hit/quad_miss`:
+- `quad_cache`
+- `quad_edge`
+- `quad_facepair`
+- `quad_debug_vtx`
+- `quad_partial`
+
+But:
+- distinguer clairement les vrais quads complets des quads partiels,
+- verifier si la phase menu Ridge Racer tombe majoritairement en `quad_partial`.
+
+### 6. Regle de travail retenue
+
+Pour la suite:
+- pas de fallback comme solution finale,
+- les chemins legacy/debug doivent etre notes explicitement comme temporaires,
+- les comportements doivent etre modelises comme des **modes explicites** selectionnables,
+- le profil par jeu doit choisir un mode valide, pas declencher des heuristiques opaques.
+
 ### Preuves runtime (CLI) ajoutees
 
 Run de reference:
@@ -180,3 +281,33 @@ Definition "ca marche":
 
 Cette analyse est volontairement orientee "post-mortem + plan d'action".
 Elle doit servir de reference pour toute suite de dev (Claude/Codex) afin d'eviter d'ajouter de la complexite sans gain sur les misses critiques.
+## 2026-03-08 - Correct Runtime Target
+
+Previous analysis over-weighted the `pc=` field printed in `GPU3D_VBLANK`.
+That field is only the current CPU PC at VBlank and can point to IRQ/VBlank
+code (`0x8004E9A0`) instead of the geometry producer.
+
+The useful runtime producer signal is now:
+
+- `GPU3D_EDGE_PC`
+- `GPU3D_PARTIAL_PC`
+
+For the faulty intro flag window:
+
+- producer PC is overwhelmingly `0x800264B0`
+- this address is not a function entry
+- it is an internal packet-coordinate write inside `FUN_80026110`
+
+Decompiled meaning of `FUN_80026110`:
+
+- builds a waving rectangular GT4 grid
+- uses repeated GTE RTPT projection through `FUN_800477A4`
+- writes packet coordinates/colors into RAM
+- links them into the OT through `FUN_80043F38` (`addPrim`)
+
+Implication:
+
+- the flag bug is not caused by a random VBlank-time state
+- it comes from how our shadow pipeline interprets this specific packet builder
+- the correct fix point is the mode mapping / quad production for the packet
+  stream generated by `FUN_80026110`

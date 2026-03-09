@@ -255,6 +255,64 @@ but not timing.
 
 ---
 
+## 8. Menu Flag GT4 Loop (Update 2026-03-08)
+
+Une nouvelle lecture Ghidra/ASM a isole la boucle du drapeau menu:
+
+- **Adresse**: `0x80046B18`
+- **Nom Ghidra**: `RR_MenuFlagQuadDrawLoop`
+
+### Pattern observe
+
+La boucle ne correspond pas a un edge-strip reconstruit a posteriori.
+Elle suit un vrai schema `GT4`:
+
+1. charger 3 sommets
+2. `RTPT`
+3. `gte_stsxy3_gt3`
+4. charger le 4e sommet
+5. `RTPS`
+6. `gte_stSXY2`
+7. `AVSZ4`
+8. lighting (`NCT/NCS`)
+9. insertion dans l'ordering table
+
+### Consequence directe pour le code C++
+
+Le drapeau menu doit etre traite comme un mode explicite:
+
+- `rtpt_rtps_gt4`
+
+et non comme:
+- `edge_strip`,
+- ou un fallback tardif dans `Gpu3D::push_quad()`.
+
+### Point critique retrouve dans le pipeline
+
+Quand `Gpu3D::push_quad()` ne trouve pas de `GteCacheQuad` pour un GT4,
+le code peut encore tomber sur un mode partiel pour le 2e triangle:
+
+```cpp
+fill_cmd3d_from_face(cmd3d, face, 1, 1, 2);
+```
+
+Ce mode partiel explique visuellement:
+- le drapeau coupe en deux,
+- la surface vrillee,
+- et le rendu "couche" au lieu d'un vrai panneau face camera.
+
+### Conclusion
+
+Le probleme principal restant n'est pas dans UE5.
+Il est dans le pipeline de reconstruction:
+
+- soit le producteur `Gte3D` ne construit pas tous les `GteCacheQuad`
+  attendus pour ce mode `RTPT+RTPS`,
+- soit le consommateur `Gpu3D` route encore une partie de ces GT4 vers un
+  mode incomplet.
+
+---
+
 ## 7. GTE Bugs Found (Separate from Speed Bug)
 
 From comparison with DuckStation's `gte.cpp`:
@@ -291,3 +349,233 @@ GET  /decompile_function?address=0x<addr> → decompile by address
 GET  /disassemble_function?address=0x<addr> → disassembly
 GET  /data?offset=N&limit=N             → labelled data items
 ```
+## 2026-03-08 - Runtime Producer Identified
+
+The bad intro/menu flag phase is now tied to a real runtime producer, not the
+CPU PC sampled at VBlank.
+
+Observed during the faulty window (`frame=540/600/660/720`):
+
+- `quad_cache=0`
+- `quad_edge=312`
+- `quad_partial=249`
+- `GPU3D_EDGE_PC top[0] pc=0x800264B0 count=312`
+- `GPU3D_PARTIAL_PC top[0] pc=0x800264B0 count=248`
+- `GPU3D_PARTIAL_PC top[1] pc=0x80019214 count=1`
+
+Important:
+
+- `0x8004E9A0` seen in `GPU3D_VBLANK` is only the CPU PC at VBlank time.
+- It is not the geometry-building loop.
+- The real hot producer is `0x800264B0`, which lies inside `FUN_80026110`.
+
+Ghidra decompilation shows:
+
+- `FUN_80026110` builds and submits a waving GT4 grid packet sequence.
+- `0x800264B0` is one of the packet coordinate stores (`swr`) into the GPU packet.
+- The helper at `0x800477A4` is a true GTE projection wrapper:
+  - `gte_ldv3`
+  - `gte_rtpt_b`
+  - `gte_stsxy3`
+  - `gte_stSZ3`
+- The helper at `0x80043F38` is `addPrim()`.
+
+Loop structure inside `FUN_80026110`:
+
+- outer loop: `0x14` iterations (`local_68 = 1 .. 0x14`) -> 20 rows
+- inner loop: `0x1c` iterations (`s6 = 1 .. 0x1c`) -> 28 quads per row
+- total expected grid quads: `20 * 28 = 560`
+
+This lines up with runtime counts:
+
+- `312 edge + 249 partial = 561`
+
+So the current shadow pipeline is effectively reconstructing about one full
+quad-grid worth of packets, but almost all of it is going through the wrong
+mode (`edge` + `partial`) instead of a true quad-cache mode.
+
+The marginal `0x80019214` source belongs to a separate packet builder
+(`FUN_80019064`) and only contributes one isolated partial packet in this
+window.
+
+## 2026-03-08 - Intro Flag Mode Identified
+
+The visible intro flag bug is not primarily a `RTPT + RTPS -> GT4` case.
+
+The active builder for the bad window is:
+
+- `DrawFlag` (`0x80026110`)
+- hot packet store inside it: `0x800264B0`
+- GTE helper: `GTE_Calc_Flag` (`0x800477A4`)
+- OT helper: `AddOT` (`0x80043F38`)
+
+### Builder Pattern
+
+`DrawFlag` builds a regular waving flag grid:
+
+- outer loop: `20`
+- inner loop: `28`
+- expected quads: `560`
+
+For each cell, it:
+
+1. calls `GTE_Calc_Flag`
+2. updates the next edge of the grid
+3. calls `GTE_Calc_Flag` again
+4. writes a GT4 packet in RAM
+5. submits through `AddOT`
+
+So the practical mode is:
+
+- `paired_edge_rtpt_gt4`
+
+### Runtime Symptoms
+
+During the faulty intro window:
+
+- `quad_cache=0`
+- `quad_edge=312`
+- `quad_partial=249`
+
+After adding the first explicit segment-based link rule:
+
+- a subset now resolves through `face_b_src=segment_link`
+- but the counts only improve slightly:
+  - `quad_edge=313`
+  - `quad_partial=248`
+
+Conclusion:
+
+- the mode is real
+- the first implementation of the mode is incomplete
+- most failing packets still do not recover the second edge correctly
+
+### Working Hypothesis
+
+The remaining failures are likely due to packet segment orientation/order.
+
+Current `segment_link` assumes the packet exposes the two edge segments as:
+
+- `(x0,y0)-(x1,y1)`
+- `(x2,y2)-(x3,y3)`
+
+But `DrawFlag` packet writes likely use more than one effective segment layout.
+
+So the next correction should target:
+
+- exact packet coordinate order in `DrawFlag`
+- exact mapping from packet segment to dominant/secondary edge face
+
+not:
+
+- UE5 rendering
+- VBlank-time CPU PC
+- arbitrary fallback logic
+
+## 2026-03-08 - Title / Flag Init Chain
+
+Current title/menu chain recovered from Ghidra:
+
+- `FUN_8003ebbc`
+  - reset/title setup
+  - calls `FUN_800260c0`
+- `FUN_800260c0`
+  - initializes the two flag data sets
+  - calls `FUN_80025fe4(0)`
+  - calls `FUN_80025fe4(1)`
+  - calls `FUN_80025df0(&DAT_80131c84)`
+  - calls `FUN_80025df0(&DAT_80154878)`
+- `DrawFlag` (`0x80026110`)
+  - true flag packet builder
+  - hot packet store at `0x800264B0`
+- `GTE_Calc_Flag` (`0x800477A4`)
+  - projection helper used twice per flag cell
+- `AddOT` (`0x80043F38`)
+  - OT insertion helper
+
+This gives the validated method for future cases:
+
+1. identify the real packet producer PC at runtime
+2. map it to the containing builder function in Ghidra
+3. recover the GTE helper(s) used by that builder
+4. recover the OT insertion helper
+5. encode the resulting builder pattern as a mode rule in the per-game profile
+
+For the intro flag, the packet order written by `DrawFlag` is:
+
+- `packet[0] = prev RTPT edge point 0`
+- `packet[1] = prev RTPT edge point 1`
+- `packet[2] = current RTPT edge point 0`
+- `packet[3] = current RTPT edge point 1`
+
+In other words, this builder writes two real projected edge segments into one GT4 packet. The runtime mode must therefore recover two packet edges, not carrier duplicates.
+
+## 2026-03-08 - Demo / Gameplay Builder Candidate
+
+Validated gameplay-side hot path:
+
+- `DivPloyFT4` (`0x80047E38`)
+- hot packet stores:
+  - `0x800482A8`
+  - `0x800482AC`
+
+This builder is structurally different from `DrawFlag`.
+
+What it does:
+
+- takes one source FT4-like primitive description
+- performs repeated color/vertex interpolation with `INTPL`
+- runs nested subdivision loops
+- projects intermediate vertices with `RTPT`
+- clips to screen bounds
+- writes multiple child GT4 packets
+- inserts them into the OT
+
+So the gameplay/demo case is not:
+
+- `rtpt_rtps_gt4`
+- `paired_edge_rtpt_gt4`
+
+It is a different generic mode, closer to:
+
+- `subdivided_ft4_intpl_rtpt`
+
+Key evidence from `DivPloyFT4`:
+
+- outer and inner nested loops controlled by `param_3` and `param_4`
+- repeated `gte_intpl_b()`
+- repeated `gte_rtpt_b()`
+- packet writes at:
+  - `0x80048114`
+  - `0x80048164`
+  - `0x800481A8`
+  - `0x800482A8`
+  - `0x800482AC`
+
+Implication for the method:
+
+1. the runtime hot `writer_pc` is enough to find the real builder function
+2. the builder function tells us which mode family we are in
+3. the per-game profile should bind those producer ranges to a mode rule
+
+Best next step for the gameplay loop:
+
+- recover callers/xrefs to `DivPloyFT4`
+- identify the main race/demo producer that feeds it
+- define a second explicit mode rule for this builder family
+
+Current Ridge Racer profile now carries this second rule as:
+
+- `subdivided_ft4_intpl_rtpt`
+- producer range: `0x80047E38-0x800482F4`
+- GTE range: `0x80047FFC-0x800482AC`
+- OT write range: `0x80048288-0x800482B0`
+
+2026-03-08 update:
+- SCUS-943.00.psx3dprof is now the canonical Ridge Racer USA profile.
+- Runtime profile saves preserve authored MODE rules instead of overwriting them.
+- paired_edge_rtpt_gt4 now takes precedence over the generic quad-cache split when its packet-edge rule matches.
+- Expected load log: profile loaded ... game=SCUS-943.00 modes=2.
+
+- 2026-03-08 follow-up: runtime saves now preserve MODE rules, and the paired-edge quad cache stores corners interleaved as [prev0, cur0, prev1, cur1] instead of grouped by edge.
+

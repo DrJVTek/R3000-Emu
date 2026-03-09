@@ -192,6 +192,8 @@ class Cpu
     }
 
     uint32_t gpr(uint32_t idx) const { return (idx < 32) ? gpr_[idx] : 0; }
+    uint32_t hi() const { return hi_; }
+    uint32_t lo() const { return lo_; }
 
     void set_cop0(uint32_t idx, uint32_t v) { if (idx < 32) cop0_[idx] = v; }
 
@@ -205,6 +207,16 @@ class Cpu
         int enabled;            // Master enable
     };
 
+    struct GteTraceConfig
+    {
+        uint32_t pc_start;      // Start PC of trace range (0 = disabled)
+        uint32_t pc_end;        // End PC of trace range
+        uint32_t start_frame;   // Start VBlank/frame gate (0 = immediate)
+        uint32_t end_frame;     // End VBlank/frame gate (0 = unbounded)
+        int enabled;            // Master enable
+        int summary_dumped;     // Summary already emitted for current window
+    };
+
     void set_reg_trace(uint32_t pc_start, uint32_t pc_end, uint32_t watch_value = 0)
     {
         reg_trace_.pc_start = pc_start;
@@ -214,6 +226,35 @@ class Cpu
     }
 
     void set_reg_trace_enabled(int enabled) { reg_trace_.enabled = enabled; }
+    void set_gte_trace(uint32_t pc_start, uint32_t pc_end)
+    {
+        gte_trace_.pc_start = pc_start;
+        gte_trace_.pc_end = pc_end;
+        // 0:0 means "all PCs". Keep the trace enabled so callers can bound it
+        // by frame without having to invent a fake PC range.
+        gte_trace_.enabled = 1;
+        gte_trace_.summary_dumped = 0;
+        gte_trace_pc_hist_.clear();
+        gte_trace_op_hist_.clear();
+    }
+    void set_gte_trace_frames(uint32_t start_frame, uint32_t end_frame)
+    {
+        gte_trace_.start_frame = start_frame;
+        gte_trace_.end_frame = end_frame;
+        gte_trace_.summary_dumped = 0;
+        gte_trace_pc_hist_.clear();
+        gte_trace_op_hist_.clear();
+    }
+    void set_gte_trace_enabled(int enabled)
+    {
+        gte_trace_.enabled = enabled;
+        if (!enabled)
+        {
+            gte_trace_.summary_dumped = 0;
+            gte_trace_pc_hist_.clear();
+            gte_trace_op_hist_.clear();
+        }
+    }
 
     StepResult step();
 
@@ -499,6 +540,9 @@ class Cpu
 
     // Advanced register trace
     RegTraceConfig reg_trace_{};
+    GteTraceConfig gte_trace_{};
+    std::unordered_map<uint32_t, uint32_t> gte_trace_pc_hist_{};
+    std::unordered_map<uint32_t, uint32_t> gte_trace_op_hist_{};
 };
 
 } // namespace r3000
