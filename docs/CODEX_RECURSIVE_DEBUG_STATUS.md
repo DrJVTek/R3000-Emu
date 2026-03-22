@@ -164,7 +164,7 @@ Scope: UE5 live + CLI, Tekken non-HLE, BIOS réel
 
 - Git milestones pushed:
   - stable temporary baseline: branch `stable/2026-03-22-ue5-tekken-baseline` -> commit `8a4b571`
-  - current callback-order checkpoint: branch `checkpoint/2026-03-22-tekken-dma3-callback-order` -> commit `4962887`
+  - current callback-order checkpoint: branch `checkpoint/2026-03-22-tekken-dma3-callback-order`
 - Current UE5 baseline to preserve:
   - Sony boot OK
   - `Licensed by PlayStation` text visible
