@@ -149,6 +149,9 @@ class Cdrom
     void set_secondary_reading();
     void set_secondary_playing();
     void cancel_pending_read_advance();
+    void arm_pending_irq_after(uint32_t delay_cycles);
+    void arm_command_execution_after(uint32_t delay_cycles);
+    void arm_motor_idle_after(uint32_t delay_cycles);
 
     // CDDA audio processing
     void start_cdda_playback();
@@ -236,7 +239,7 @@ class Cdrom
     // Seek time depends on LBA distance (logarithmic model like DuckStation).
     uint8_t motor_spinning_{0};      // 0=idle (needs spin-up), 1=spinning
     uint32_t head_lba_{0};           // Physical head position (for seek distance calc)
-    uint32_t motor_idle_countdown_{0}; // Cycles until motor spins down after Pause
+    uint64_t motor_idle_deadline_{0}; // absolute emulated cycle when motor spins down
 
     // Audio volume registers (pas critique pour boot, mais présents dans l'I/O map).
     uint8_t vol_ll_{0x80}; // L-CD -> L-SPU
@@ -270,7 +273,7 @@ class Cdrom
     // On real hardware, IRQs are delivered asynchronously by the drive.
     // We queue them and deliver after a short delay so the CPU has time
     // to return to its polling loop with interrupts enabled.
-    uint32_t pending_irq_delay_{0};  // cycles until pending IRQ fires
+    uint64_t pending_irq_due_cycle_{0}; // absolute emulated cycle when pending IRQ may fire
     uint8_t pending_irq_type_{0};    // IRQ type to deliver (1-5), 0=none
     uint8_t pending_irq_resp_{0};    // response byte 0 (stat)
     uint8_t pending_irq_live_status_{0}; // if set, response byte 0 is read from current status_ on delivery
@@ -281,7 +284,7 @@ class Cdrom
     // Command response delay: irq_flags set after this delay elapses.
     // Real hardware schedules command execution/ACK, it does not expose the
     // response bytes immediately on command write.
-    uint32_t cmd_exec_delay_{0};      // cycles until command executes
+    uint64_t cmd_exec_due_cycle_{0};   // absolute emulated cycle when command executes
     uint8_t cmd_exec_valid_{0};       // delayed command pending
     uint8_t cmd_exec_cmd_{0};         // command byte to execute
     uint8_t cmd_exec_params_[16]{};   // latched parameter bytes
@@ -289,11 +292,15 @@ class Cdrom
 
     uint8_t last_cmd_{0};             // last command executed (for debug)
 
-    // DuckStation-style MINIMUM_INTERRUPT_DELAY: cycles since last IRQ ack.
-    // New IRQs cannot be delivered until at least 1000 cycles after ack.
-    // This prevents rapid-fire IRQ sequences that confuse the BIOS state machine.
+    // Emulated timebase for CDROM. All asynchronous command/IRQ timing is based
+    // on absolute cycle deadlines so behavior stays invariant across host tick
+    // granularity (CLI vs UE5 worker thread).
+    uint64_t now_cycles_{0};
+
+    // DuckStation-style MINIMUM_INTERRUPT_DELAY.
+    // New IRQs cannot be delivered until at least 1000 cycles after ACK.
     static constexpr uint32_t kMinInterruptDelay = 1000;
-    uint32_t cycles_since_irq_ack_{kMinInterruptDelay}; // start ready to deliver
+    uint64_t next_irq_ready_cycle_{0};
 
     // Trace counters (per-instance, not static, so they reset between PIE sessions).
     int mmio_rd_trace_{0};

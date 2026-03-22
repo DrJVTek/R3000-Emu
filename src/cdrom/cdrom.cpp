@@ -589,7 +589,7 @@ void Cdrom::cancel_pending_read_advance()
     if (pending_irq_type_ == 0x01 && pending_irq_reason_ == 0xFFu)
     {
         pending_irq_type_ = 0;
-        pending_irq_delay_ = 0;
+        pending_irq_due_cycle_ = 0;
         pending_irq_live_status_ = 0;
         pending_irq_reason_ = 0;
         pending_irq_extra_len_ = 0;
@@ -823,6 +823,21 @@ void Cdrom::clear_params()
     param_count_ = 0;
 }
 
+void Cdrom::arm_pending_irq_after(uint32_t delay_cycles)
+{
+    pending_irq_due_cycle_ = now_cycles_ + static_cast<uint64_t>(delay_cycles);
+}
+
+void Cdrom::arm_command_execution_after(uint32_t delay_cycles)
+{
+    cmd_exec_due_cycle_ = now_cycles_ + static_cast<uint64_t>(delay_cycles);
+}
+
+void Cdrom::arm_motor_idle_after(uint32_t delay_cycles)
+{
+    motor_idle_deadline_ = (delay_cycles == 0u) ? 0u : (now_cycles_ + static_cast<uint64_t>(delay_cycles));
+}
+
 void Cdrom::queue_cmd_irq(uint8_t flags)
 {
     // Command execution itself is already delayed. Once exec_command() runs,
@@ -843,7 +858,7 @@ void Cdrom::schedule_command_execution(uint8_t cmd, const uint8_t* params, uint8
     uint32_t delay = disc_ ? 25000u : 15000u;
     if (cmd == 0x0A) // Init
         delay = 80000u;
-    cmd_exec_delay_ = delay;
+    arm_command_execution_after(delay);
     busy_ = 1;
 }
 
@@ -921,7 +936,7 @@ void Cdrom::stop_reading_with_error(uint8_t reason)
 
     // Clear any pending async IRQ (but not command IRQs)
     pending_irq_type_ = 0;
-    pending_irq_delay_ = 0;
+    pending_irq_due_cycle_ = 0;
     pending_irq_live_status_ = 0;
     pending_irq_reason_ = 0;
     pending_irq_extra_len_ = 0;
@@ -1589,10 +1604,10 @@ void Cdrom::exec_command(uint8_t cmd)
                 pending_irq_resp_ = status_;  // No error flag (disc is ready)
                 pending_irq_live_status_ = 1;
                 pending_irq_reason_ = 0x00;   // 0x00 = shell closed (not 0x08 = shell opened!)
-                pending_irq_delay_ = 50000;   // ~1.5ms after ACK
+                arm_pending_irq_after(50000);   // ~1.5ms after ACK
                 shell_close_sent_ = 1;
                 emu::logf(emu::LogLevel::info, "BUS",
-                    "CD INT5 (shell close) queued after GetStat (delay=%u)", pending_irq_delay_);
+                    "CD INT5 (shell close) queued after GetStat (delay=%u)", 50000u);
             }
             else
             {
@@ -1673,7 +1688,7 @@ void Cdrom::exec_command(uint8_t cmd)
             data_ready_pending_ = 0;
             async_stat_pending_ = 0;
             // Keep motor spinning for CDDA playback
-            motor_idle_countdown_ = 0;
+            motor_idle_deadline_ = 0;
             motor_spinning_ = 1;
 
             // Start CDDA playback
@@ -1728,7 +1743,7 @@ void Cdrom::exec_command(uint8_t cmd)
             queue_cmd_irq(0x03); // INT3 (first response)
 
             // Stop motor countdown - reading keeps motor spinning
-            motor_idle_countdown_ = 0;
+            motor_idle_deadline_ = 0;
             set_secondary_reading();
             break;
         }
@@ -1736,7 +1751,7 @@ void Cdrom::exec_command(uint8_t cmd)
         {
             status_ |= STAT_MOTOR_ON;
             motor_spinning_ = 1;
-            motor_idle_countdown_ = 0;
+            motor_idle_deadline_ = 0;
             push_resp(status_);
             queue_cmd_irq(0x03);
             break;
@@ -1755,13 +1770,13 @@ void Cdrom::exec_command(uint8_t cmd)
             set_secondary_idle(false);
             // Motor spins down immediately on Stop
             motor_spinning_ = 0;
-            motor_idle_countdown_ = 0;
+            motor_idle_deadline_ = 0;
             // Stop has INT2 second response
             pending_irq_type_ = 0x02;
             pending_irq_resp_ = status_;
             pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
-            pending_irq_delay_ = 80000;
+            arm_pending_irq_after(80000);
             break;
         }
         case 0x09: // Pause
@@ -1779,13 +1794,13 @@ void Cdrom::exec_command(uint8_t cmd)
             set_secondary_idle(true);
             // Motor spins down after a delay on Pause (~1 second)
             // DuckStation: motor becomes idle, next read needs spin-up
-            motor_idle_countdown_ = 33868800u; // ~1 second at 33.8MHz
+            arm_motor_idle_after(33868800u); // ~1 second at 33.8MHz
             // Pause has INT2 second response
             pending_irq_type_ = 0x02;
             pending_irq_resp_ = status_;
             pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
-            pending_irq_delay_ = 50000;
+            arm_pending_irq_after(50000);
             break;
         }
         case 0x0A: // Init
@@ -1797,7 +1812,7 @@ void Cdrom::exec_command(uint8_t cmd)
             mode_ = 0x20; // default mode: double speed
             // Init starts motor spin-up, but doesn't complete immediately
             motor_spinning_ = 0; // Will need spin-up on first read
-            motor_idle_countdown_ = 0;
+            motor_idle_deadline_ = 0;
             head_lba_ = 0; // Reset head position
             read_lba_ = 0;
             data_lba_ = 0;
@@ -1810,7 +1825,7 @@ void Cdrom::exec_command(uint8_t cmd)
             pending_irq_resp_ = status_;
             pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
-            pending_irq_delay_ = 80000;
+            arm_pending_irq_after(80000);
             pending_irq_extra_len_ = 0; // Clear leftover extra bytes from previous cmd (e.g. GetID)
             break;
         }
@@ -2057,12 +2072,12 @@ void Cdrom::exec_command(uint8_t cmd)
             pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
             // Calculate realistic seek time (no spin-up for SeekL/SeekP, motor was already on)
-            pending_irq_delay_ = calc_seek_time(head_lba_, loc_lba_, false);
+            arm_pending_irq_after(calc_seek_time(head_lba_, loc_lba_, false));
             // A mechanical seek implies the spindle/head assembly is active.
             // Without this, the following ReadN incorrectly pays a full spin-up again
             // and falls back into a BIOS-like long wait path.
             motor_spinning_ = 1;
-            motor_idle_countdown_ = 0;
+            motor_idle_deadline_ = 0;
             seek_in_progress_ = 1;
             seek_target_lba_ = loc_lba_;
             pending_irq_extra_len_ = 0;
@@ -2198,7 +2213,7 @@ void Cdrom::exec_command(uint8_t cmd)
             pending_irq_resp_ = status_;
             pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
-            pending_irq_delay_ = 50000; // ~1.5ms
+            arm_pending_irq_after(50000); // ~1.5ms
             pending_irq_extra_len_ = 0;
             if (has_data_track && disc_region_.letter != 0)
             {
@@ -2344,7 +2359,7 @@ void Cdrom::exec_command(uint8_t cmd)
             pending_irq_resp_ = status_;
             pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
-            pending_irq_delay_ = 50000; // ~1.5ms
+            arm_pending_irq_after(50000); // ~1.5ms
             pending_irq_extra_len_ = 0;
             cd_log(
                 log_cd_,
@@ -2642,11 +2657,11 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     irq_callback_(new_line, irq_callback_user_);
                 }
 
-                // DuckStation MINIMUM_INTERRUPT_DELAY: reset counter when IRQ is acked.
-                // New IRQs cannot be delivered until kMinInterruptDelay cycles pass.
+                // DuckStation MINIMUM_INTERRUPT_DELAY: after an ACK, the next IRQ
+                // cannot be delivered until a fixed emulated-cycle deadline.
                 if (old_flags != 0 && (irq_flags_ & 0x1Fu) == 0)
                 {
-                    cycles_since_irq_ack_ = 0;
+                    next_irq_ready_cycle_ = now_cycles_ + kMinInterruptDelay;
                 }
 
                 // Special bits:
@@ -2675,9 +2690,10 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     // away, plus any outstanding seek/spin-up cost if SetLoc moved the head.
                     const uint8_t needs_seek =
                         (seek_pending_ || !motor_spinning_ || head_lba_ != read_lba_ || seek_in_progress_) ? 1u : 0u;
-                    pending_irq_delay_ = read_sector_ticks();
+                    uint32_t irq_delay = read_sector_ticks();
                     if (needs_seek)
-                        pending_irq_delay_ += calc_seek_time(head_lba_, read_lba_, true);
+                        irq_delay += calc_seek_time(head_lba_, read_lba_, true);
+                    arm_pending_irq_after(irq_delay);
                     // Mark motor as spinning after this seek
                     motor_spinning_ = 1;
                     pending_read_seek_commit_ = needs_seek;
@@ -2689,9 +2705,9 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                             (unsigned)(irq_flags_ & 0x1Fu),
                             (unsigned)read_lba_,
                             (unsigned)data_lba_,
-                            (unsigned)pending_irq_delay_,
+                            (unsigned)irq_delay,
                             (unsigned)needs_seek,
-                            (unsigned)cycles_since_irq_ack_);
+                            (unsigned)((next_irq_ready_cycle_ > now_cycles_) ? (next_irq_ready_cycle_ - now_cycles_) : 0u));
                     }
                 }
                 // ReadN/ReadS continuous: after INT1 is acked, queue next sector read.
@@ -2707,10 +2723,11 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     pending_irq_resp_ = status_;
                     pending_irq_live_status_ = 1;
                     pending_irq_reason_ = 0xFFu; // marker: advance sector on delivery
-                    pending_irq_delay_ = read_sector_ticks();
+                    const uint32_t irq_delay = read_sector_ticks();
+                    arm_pending_irq_after(irq_delay);
                     pending_read_seek_commit_ = 0;
                     emu::logf(emu::LogLevel::debug, "CD",
-                        "ReadN continuous: queued next INT1, current LBA=%u delay=%u", read_lba_, pending_irq_delay_);
+                        "ReadN continuous: queued next INT1, current LBA=%u delay=%u", read_lba_, irq_delay);
                 }
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
@@ -2721,7 +2738,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     pending_irq_resp_ = status_;
                     pending_irq_live_status_ = 1;
                     pending_irq_reason_ = 0;
-                    pending_irq_delay_ = 5000;
+                    arm_pending_irq_after(5000);
                     emu::logf(emu::LogLevel::debug, "CD", "Deferred async INT1 (status=0x%02X)", status_);
                 }
 
@@ -2775,27 +2792,14 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
 
 void Cdrom::tick(uint32_t cycles)
 {
-    // Track cycles since last IRQ ack (DuckStation MINIMUM_INTERRUPT_DELAY).
-    // New IRQs cannot be delivered until kMinInterruptDelay cycles have passed.
-    if (cycles_since_irq_ack_ < kMinInterruptDelay)
-    {
-        cycles_since_irq_ack_ += cycles;
-    }
+    now_cycles_ += cycles;
 
     // Execute a pending command after its command-event delay.
     // Unlike the previous model, the response FIFO becomes visible only here,
     // when the command actually executes, not at command-write time.
     if (cmd_exec_valid_ != 0)
     {
-        if (cmd_exec_delay_ > 0)
-        {
-            if (cycles >= cmd_exec_delay_)
-                cmd_exec_delay_ = 0;
-            else
-                cmd_exec_delay_ -= cycles;
-        }
-
-        if (cmd_exec_delay_ == 0 &&
+        if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&
             pending_irq_type_ == 0 &&
             resp_r_ == resp_w_ &&
@@ -2809,7 +2813,7 @@ void Cdrom::tick(uint32_t cycles)
 
             const uint8_t exec_cmd = cmd_exec_cmd_;
             cmd_exec_valid_ = 0;
-            cmd_exec_delay_ = 0;
+            cmd_exec_due_cycle_ = 0;
 
             exec_command(exec_cmd);
             if (!queued_cmd_valid_ && !cmd_exec_valid_)
@@ -2836,23 +2840,10 @@ void Cdrom::tick(uint32_t cycles)
     // Deliver pending async IRQs after delay expires.
     if (pending_irq_type_ != 0)
     {
-        // Count down delay ONLY after the first response (INT3) has been
-        // delivered.  On real hardware the second response (INT2) arrives
-        // well after the first; counting both delays simultaneously caused
-        // INT2 to fire immediately after INT3 was ACK'd, which confused
-        // the BIOS state machine (it expects a real gap between the two).
-        if (!cmd_exec_valid_ && pending_irq_delay_ > 0)
-        {
-            if (cycles >= pending_irq_delay_)
-                pending_irq_delay_ = 0;
-            else
-                pending_irq_delay_ -= cycles;
-        }
-
-        // Once delay has elapsed, deliver when irq_flags are clear AND
-        // enough cycles have passed since last IRQ ack (DuckStation MINIMUM_INTERRUPT_DELAY).
-        if (pending_irq_delay_ == 0 && (irq_flags_ & 0x1Fu) == 0u &&
-            cycles_since_irq_ack_ >= kMinInterruptDelay)
+        // Deliver once the absolute due cycle is reached and the minimum
+        // post-ACK quiet time has elapsed.
+        if (now_cycles_ >= pending_irq_due_cycle_ && (irq_flags_ & 0x1Fu) == 0u &&
+            now_cycles_ >= next_irq_ready_cycle_)
         {
             const uint32_t deliver_read_lba = read_lba_;
             const uint32_t deliver_data_lba = data_lba_;
@@ -2931,6 +2922,7 @@ void Cdrom::tick(uint32_t cycles)
                 "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
                 (unsigned)pending_irq_type_, (unsigned)irq_resp, (unsigned)pending_irq_reason_);
             pending_irq_type_ = 0;
+            pending_irq_due_cycle_ = 0;
             pending_irq_live_status_ = 0;
             pending_irq_reason_ = 0;
         }
@@ -2940,18 +2932,14 @@ void Cdrom::tick(uint32_t cycles)
     // (ReadN/ReadS second response is also async on real hardware.)
 
     // Motor idle countdown: after Pause, motor spins down after ~1 second
-    if (motor_idle_countdown_ > 0)
+    if (motor_idle_deadline_ != 0)
     {
-        if (cycles >= motor_idle_countdown_)
+        if (now_cycles_ >= motor_idle_deadline_)
         {
-            motor_idle_countdown_ = 0;
+            motor_idle_deadline_ = 0;
             motor_spinning_ = 0;
             set_secondary_idle(false);
             emu::logf(emu::LogLevel::info, "CD", "Motor spun down (idle)");
-        }
-        else
-        {
-            motor_idle_countdown_ -= cycles;
         }
     }
 

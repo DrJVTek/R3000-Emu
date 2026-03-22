@@ -2029,3 +2029,22 @@ It now progresses into later BIOS parsing and then crashes deterministically:
 - Reason:
   - while the deeper CD refactor is still pending, UE5 must stop using a coarser hardware cadence than CLI
   - this removes the most obvious host-dependent timing delta first
+
+## 2026-03-22 absolute-time CD refactor
+
+- Follow-up structural fix applied in `src/cdrom/cdrom.cpp/.h`:
+  - CD async state no longer counts down relative delays per `tick()`
+  - it now uses an internal absolute emulated timebase:
+    - `now_cycles_`
+    - `cmd_exec_due_cycle_`
+    - `pending_irq_due_cycle_`
+    - `motor_idle_deadline_`
+    - `next_irq_ready_cycle_`
+- This specifically replaces the old tick-granularity-sensitive fields:
+  - `cmd_exec_delay_`
+  - `pending_irq_delay_`
+  - `motor_idle_countdown_`
+  - `cycles_since_irq_ack_`
+- Goal:
+  - make CD command/IRQ ordering invariant to host wakeup granularity
+  - reduce the remaining UE5-vs-CLI divergence without relying on host timer behavior
