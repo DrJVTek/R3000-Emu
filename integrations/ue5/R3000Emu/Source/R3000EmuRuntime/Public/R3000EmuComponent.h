@@ -70,6 +70,10 @@ class UR3000EmuComponent : public UActorComponent
     UFUNCTION(BlueprintCallable, Category = "R3000Emu")
     int32 GetProgramCounter() const;
 
+    UFUNCTION(BlueprintCallable, Category = "R3000Emu")
+    FString GetProgramCounterString() const;
+
+
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu")
     int64 GetStepsExecuted() const { return static_cast<int64>(StepsExecuted_.Load()); }
 
@@ -155,7 +159,7 @@ class UR3000EmuComponent : public UActorComponent
 
     // emu::logf level (error|warn|info|debug|trace) - component logging (GPU, CD, SPU, etc.)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Logs")
-    FString EmuLogLevel{TEXT("debug")};
+    FString EmuLogLevel{TEXT("info")};
 
     // Enable ASM disassembly trace (very verbose, needs OutputDir).
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Logs")

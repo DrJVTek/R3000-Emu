@@ -156,7 +156,7 @@ Gpu::Gpu(rlog::Logger* logger)
     , vram_(std::make_unique<uint16_t[]>(kVramPixels))
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "GPU", "GPU source v13 (double_buf_corr)");
+    emu::logf(emu::LogLevel::warn, "GPU", "GPU source v14 (session_2026_03_22)");
     status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
     vblank_div_ = 0;
@@ -475,6 +475,20 @@ int Gpu::tick_vblank(uint32_t cycles)
     return 0;
 }
 
+uint32_t Gpu::current_scanline() const
+{
+    const uint32_t period = display_.is_pal ? kVblankPeriodCyclesPal : kVblankPeriodCyclesNtsc;
+    const uint32_t total_lines = display_.is_pal ? 314u : 263u;
+    if (period == 0u)
+        return 0u;
+    return (vblank_div_ * total_lines) / period;
+}
+
+uint32_t Gpu::total_scanlines() const
+{
+    return display_.is_pal ? 314u : 263u;
+}
+
 // ---------------------------------------------------------------------------
 // Logging / dump
 // ---------------------------------------------------------------------------
@@ -549,6 +563,23 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
             const uint32_t ready_cmd = (gp0_state_ == Gp0State::idle) ? 1u : 0u;
             const uint32_t ready_dma = ready_cmd;
             const uint32_t ready_v2c = vram_to_cpu_active_ ? 1u : 0u;
+            const uint32_t scanline = current_scanline();
+            uint32_t display_line_lsb = 0u;
+            if (display_.interlace && display_.v_res)
+            {
+                // 480i mode: report the parity of the raster line currently being
+                // displayed. During VBlank, drop the field offset so games polling
+                // GPUSTAT together with TMR1 see the field contribution disappear.
+                const uint32_t active_field = in_vblank_ ? 0u : (even_odd_field_ ? 1u : 0u);
+                display_line_lsb =
+                    (uint32_t)((display_.display_y + scanline + active_field) & 1u);
+            }
+            else
+            {
+                // Non-480i: simple per-frame toggle. Games detect VSync by
+                // waiting for this bit to change between frames.
+                display_line_lsb = even_odd_field_ ? 1u : 0u;
+            }
 
             v &= ~((1u << 26) | (1u << 28) | (1u << 27));
             if (ready_cmd) v |= (1u << 26);
@@ -563,11 +594,11 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
             else if ((dma_dir_ & 3u) == 2u && ready_dma) v |= (1u << 25);
             else if ((dma_dir_ & 3u) == 3u && ready_v2c) v |= (1u << 25);
 
-            // Bit 31: Even/odd field indicator (toggles each VBlank).
-            // NOT a VBlank pulse - real hardware toggles this per-frame.
-            // Games detect VSync by waiting for this bit to change.
+            // Bit 31: display line parity, not a simple once-per-frame toggle.
+            // Some games poll GPUSTAT together with a timer/HBlank counter and
+            // expect this bit to reflect current raster progression.
             v &= ~(1u << 31);
-            if (even_odd_field_) v |= (1u << 31);
+            if (display_line_lsb) v |= (1u << 31);
 
             return v;
         }

@@ -554,7 +554,7 @@ void Cdrom::set_log_sinks(const flog::Sink& cd_only, const flog::Sink& combined,
     has_clock_ = 1;
 
     // Version marker to verify rebuild - update this when making changes!
-    emu::logf(emu::LogLevel::warn, "CD", "CDROM source v6 (vsync_stuck_detect)");
+    emu::logf(emu::LogLevel::warn, "CD", "CDROM source v14 (reduced_cd_poll_logging)");
 
     cd_log(
         log_cd_,
@@ -991,7 +991,7 @@ void Cdrom::try_fill_data_fifo()
             }
         }
         push_data(data, sizeof(data));
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::trace,
             "FIFO LBA=%u [%02X%02X%02X%02X %02X%02X%02X%02X]",
             (unsigned)loc_lba_,
             data[0],data[1],data[2],data[3],data[4],data[5],data[6],data[7]);
@@ -1031,12 +1031,11 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
     // 157 LBA: ~1,712,543 ticks = ~51 ms
     // Speed change (spin-up): 20,321,280 ticks = ~600 ms
 
-    // FAST CD TIMING: Reduced by 10x for wall-clock mode compatibility
-    // Original realistic values caused VBlank timeout in wall-clock mode
-    // because the game disables VBlank during CD loading
-    constexpr uint32_t kSpinUpDelay = 2032128u;   // ~60ms (was ~600ms)
-    constexpr uint32_t kMinSeekTicks = 40000u;    // ~1.2ms (was ~12ms)
-    constexpr uint32_t kMaxSeekTicks = 200000u;   // ~6ms (was ~60ms)
+    // Seek/spin-up: keep fast (10x) for BIOS compatibility.
+    // Only continuous sector reads are slowed down (see pending_irq_delay_ below).
+    constexpr uint32_t kSpinUpDelay = 2032128u;   // ~60ms (10x fast)
+    constexpr uint32_t kMinSeekTicks = 40000u;    // ~1.2ms (10x fast)
+    constexpr uint32_t kMaxSeekTicks = 200000u;   // ~6ms (10x fast)
 
     uint32_t total = 0;
 
@@ -1053,8 +1052,7 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
 
     if (dist == 0)
     {
-        // No seek needed, just rotational latency
-        // FAST CD TIMING: Reduced by 10x (original: 110000/220000)
+        // No seek needed, just rotational latency (10x fast, same as old)
         const uint32_t rot_delay = (mode_ & 0x80u) ? 11000u : 22000u;
         total += rot_delay;
     }
@@ -1075,9 +1073,7 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
             log2_dist++;
         }
 
-        // FAST CD TIMING: Reduced by 10x
-        // Original: ~14ms base + ~4ms per doubling, max ~60ms
-        // Fast: ~1.2ms base + ~0.4ms per doubling, max ~6ms
+        // Logarithmic seek (10x fast)
         const uint32_t seek_ticks = kMinSeekTicks + log2_dist * 13500u;
         total += (seek_ticks > kMaxSeekTicks) ? kMaxSeekTicks : seek_ticks;
     }
@@ -2340,7 +2336,7 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
     if (do_rd_trace)
     {
         ++mmio_rd_trace_;
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::trace,
             "RD 0x%X idx=%u -> 0x%02X (irq=0x%02X drp=%d want=%d busy=%d resp=%u/%u data=%u/%u)",
             (unsigned)(off & 3u), (unsigned)index_, (unsigned)out,
             (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_,
@@ -2356,7 +2352,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
     {
         ++mmio_wr_trace_;
         const uint32_t o = (addr - 0x1F80'1800u) & 3u;
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::trace,
             "WR 0x%X idx=%u val=0x%02X (irq=0x%02X drp=%d want=%d)",
             (unsigned)o, (unsigned)index_, (unsigned)v,
             (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_);
@@ -2503,10 +2499,10 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 const uint8_t m = v & 0x1Fu;
                 irq_flags_ &= (uint8_t)~m;
                 const int new_line = irq_line();
-                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::debug,
                     "IRQ_ACK: write=0x%02X old=0x%02X new=0x%02X status=0x%02X shell_sent=%d disc=%d",
                     v, old_flags, (irq_flags_ & 0x1Fu), status_reg(), (int)shell_close_sent_, disc_ ? 1 : 0);
-                emu::logf(emu::LogLevel::info, "CD",
+                emu::logf(emu::LogLevel::debug, "CD",
                     "IRQ_ACK: write=0x%02X old=0x%02X new=0x%02X read_pend=%d queued=%d line=%d->%d",
                     v, old_flags, (irq_flags_ & 0x1Fu), (int)read_pending_irq1_, (int)queued_cmd_valid_,
                     old_line, new_line);
@@ -2569,10 +2565,9 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     // Original: single=~220000 cycles (~6.7ms), double=~110000 cycles (~3.3ms)
                     // Fast: single=~22000 cycles (~0.65ms), double=~11000 cycles (~0.33ms)
                     pending_irq_delay_ = (mode_ & 0x80u) ? 11000u : 22000u;
-                    emu::logf(emu::LogLevel::info, "CD",
+                    emu::logf(emu::LogLevel::debug, "CD",
                         "ReadN continuous: queued next INT1, current LBA=%u delay=%u", loc_lba_, pending_irq_delay_);
                 }
-
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
                 if (async_stat_pending_ && ((old_flags & 0x07u) != 0u) && ((irq_flags_ & 0x07u) == 0u))
@@ -2724,9 +2719,9 @@ void Cdrom::tick(uint32_t cycles)
                 push_resp(pending_irq_extra_[i]);
             pending_irq_extra_len_ = 0;
             set_irq(pending_irq_type_);
-            emu::logf(emu::LogLevel::info, "CD", "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
+            emu::logf(emu::LogLevel::debug, "CD", "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
                 (unsigned)pending_irq_type_, (unsigned)pending_irq_resp_, (unsigned)pending_irq_reason_);
-            cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+            cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::debug,
                 "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
                 (unsigned)pending_irq_type_, (unsigned)pending_irq_resp_, (unsigned)pending_irq_reason_);
             pending_irq_type_ = 0;

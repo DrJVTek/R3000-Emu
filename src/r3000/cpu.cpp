@@ -77,12 +77,12 @@ static void gte_trace_dump_top(const char* tag, uint32_t frame, const std::unord
     {
         if (name_fn)
         {
-            emu::logf(emu::LogLevel::warn, tag, "frame=%u top[%zu] op=%s(0x%02X) count=%u",
+            emu::logf(emu::LogLevel::debug, tag, "frame=%u top[%zu] op=%s(0x%02X) count=%u",
                 frame, i, name_fn((uint32_t)items[i].first), (uint32_t)items[i].first, items[i].second);
         }
         else
         {
-            emu::logf(emu::LogLevel::warn, tag, "frame=%u top[%zu] pc=0x%08X count=%u",
+            emu::logf(emu::LogLevel::debug, tag, "frame=%u top[%zu] pc=0x%08X count=%u",
                 frame, i, (uint32_t)items[i].first, items[i].second);
         }
     }
@@ -254,10 +254,35 @@ static int psx_is_mmio(uint32_t phys_addr)
     return 0;
 }
 
+static int psx_is_critical_mmio(uint32_t phys_addr)
+{
+    switch (phys_addr)
+    {
+        case 0x1F801070u: // I_STAT
+        case 0x1F801074u: // I_MASK
+        case 0x1F8010F0u: // DPCR
+        case 0x1F8010F4u: // DICR
+        case 0x1F801800u: // CDROM idx/stat
+        case 0x1F801801u: // CDROM cmd
+        case 0x1F801802u: // CDROM param
+        case 0x1F801803u: // CDROM resp/data
+        case 0x1F801810u: // GPU GP0
+        case 0x1F801814u: // GPU GP1
+            return 1;
+        default:
+            break;
+    }
+
+    if (phys_addr >= 0x1F801100u && phys_addr < 0x1F801130u)
+        return 1; // TMR0/1/2 count/mode/target
+
+    return 0;
+}
+
 Cpu::Cpu(Bus& bus, rlog::Logger* logger) : bus_(bus), logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "CPU", "CPU source v9 (camera_root_tracking)");
+    emu::logf(emu::LogLevel::debug, "CPU", "CPU source v10 (session_2026_03_22)");
 }
 
 void Cpu::set_hle_vectors(int enabled)
@@ -434,7 +459,7 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
             uint32_t instr_word = 0;
             if (paddr < bus_.ram_size())
                 instr_word = *(uint32_t*)(bus_.ram_ptr() + paddr);
-            emu::logf(emu::LogLevel::warn, "CPU", "RI #%d PC=0x%08X instr=0x%08X IEc=%d ra=0x%08X",
+            emu::logf(emu::LogLevel::debug, "CPU", "RI #%d PC=0x%08X instr=0x%08X IEc=%d ra=0x%08X",
                 ri_trace_count_, pc_of_fault, instr_word,
                 (int)(cop0_[COP0_STATUS] & 1), gpr_[31]);
         }
@@ -479,6 +504,26 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
                     );
                 }
             }
+        }
+    }
+
+    // Diagnostic: log non-IRQ exceptions from game code (faults that cause infinite loops)
+    if ((code & 0x1Fu) != 0u && pc_of_fault >= 0x80100000u)
+    {
+        static uint32_t fault_log = 0;
+        if (fault_log < 10)
+        {
+            ++fault_log;
+            emu::logf(emu::LogLevel::error, "CPU",
+                "FAULT code=%u(%s) PC=0x%08X EPC=0x%08X BadVAddr=0x%08X ra=0x%08X (#%u)",
+                code & 0x1Fu,
+                ((code & 0x1Fu) == 4) ? "ADEL" :
+                ((code & 0x1Fu) == 5) ? "ADES" :
+                ((code & 0x1Fu) == 10) ? "RI" :
+                ((code & 0x1Fu) == 8) ? "SYS" :
+                ((code & 0x1Fu) == 9) ? "Bp" :
+                ((code & 0x1Fu) == 12) ? "OV" : "?",
+                pc_of_fault, epc, badvaddr, gpr_[31], fault_log);
         }
     }
 
@@ -532,7 +577,7 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
     if (exc_trace_armed_ && exc_trace_count_ < kExcTraceMax)
     {
         ++exc_trace_count_;
-        emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+        emu::logf(emu::LogLevel::debug, "EXC-TRACE",
             "EXCEPTION code=%u PC=0x%08X EPC=0x%08X Status=0x%08X Cause=0x%08X BD=%d i_stat=0x%04X i_mask=0x%04X",
             code, pc_of_fault, epc, cop0_[COP0_STATUS], cop0_[COP0_CAUSE], in_delay_slot,
             (unsigned)(bus_.irq_stat_raw() & 0xFFFFu), (unsigned)(bus_.irq_mask_raw() & 0xFFFFu));
@@ -549,7 +594,7 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
             {
                 uint32_t w = 0;
                 bus_.read_u32(addr, w, mf2);
-                emu::logf(emu::LogLevel::warn, "EXC-DISASM", "RAM[0x%04X] = 0x%08X", addr, w);
+                emu::logf(emu::LogLevel::debug, "EXC-DISASM", "RAM[0x%04X] = 0x%08X", addr, w);
             }
             // Dump SysEnqIntRP chain heads and nodes
             for (int prio = 0; prio < 4; ++prio)
@@ -557,7 +602,7 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
                 uint32_t head = 0;
                 Bus::MemFault mf{};
                 bus_.read_u32(0x100u + prio * 4u, head, mf);
-                emu::logf(emu::LogLevel::warn, "EXC-CHAIN",
+                emu::logf(emu::LogLevel::debug, "EXC-CHAIN",
                     "SysEnqIntRP[%d] head=0x%08X", prio, head);
                 // Walk chain (max 8 nodes)
                 uint32_t node_addr = head;
@@ -567,7 +612,7 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
                     bus_.read_u32(node_addr & 0x1FFFFFFFu, next, mf);
                     bus_.read_u32((node_addr + 4u) & 0x1FFFFFFFu, func, mf);
                     bus_.read_u32((node_addr + 8u) & 0x1FFFFFFFu, verify, mf);
-                    emu::logf(emu::LogLevel::warn, "EXC-CHAIN",
+                    emu::logf(emu::LogLevel::debug, "EXC-CHAIN",
                         "  node[%d]=0x%08X next=0x%08X func=0x%08X verify=0x%08X",
                         j, node_addr, next, func, verify);
                     node_addr = next;
@@ -692,7 +737,7 @@ void Cpu::maybe_log_camera_candidates()
 
     const uint32_t n = (uint32_t)top.size() > 6u ? 6u : (uint32_t)top.size();
     emu::logf(
-        emu::LogLevel::warn,
+        emu::LogLevel::debug,
         "CAM_ROOT",
         "vblank=%u candidates=%u top=%u",
         vb,
@@ -702,7 +747,7 @@ void Cpu::maybe_log_camera_candidates()
     {
         const CameraRootCandidate* c = top[i];
         emu::logf(
-            emu::LogLevel::warn,
+            emu::LogLevel::debug,
             "CAM_ROOT",
             "  #%u addr=0x%08X region=%s frame_hits=%u hits=%u regs=0x%03X last_pc=0x%08X",
             i,
@@ -781,7 +826,7 @@ Cpu::StepResult Cpu::step()
     {
         exc_trace_armed_ = 1;
         exc_trace_pc_log_ = 0;
-        emu::logf(emu::LogLevel::warn, "EXC-TRACE", "ARMED at B(0x4B) StartPAD, Status=0x%08X",
+        emu::logf(emu::LogLevel::debug, "EXC-TRACE", "ARMED at B(0x4B) StartPAD, Status=0x%08X",
             cop0_[COP0_STATUS]);
     }
 
@@ -793,7 +838,7 @@ Cpu::StepResult Cpu::step()
         {
             if (exc_trace_pc_log_ < 1500)
             {
-                emu::logf(emu::LogLevel::warn, "EXC-STUCK",
+                emu::logf(emu::LogLevel::debug, "EXC-STUCK",
                     "[%d] PC=0x%08X s1=0x%08X t4=0x%08X STAT=0x%04X",
                     exc_trace_pc_log_, pc_, gpr_[17], gpr_[12],
                     (unsigned)bus_.sio0_stat_debug());
@@ -801,7 +846,7 @@ Cpu::StepResult Cpu::step()
         }
         else if ((exc_trace_pc_log_ % 10) == 1 || exc_trace_pc_log_ <= 20)
         {
-            emu::logf(emu::LogLevel::warn, "EXC-PC",
+            emu::logf(emu::LogLevel::debug, "EXC-PC",
                 "[%d] PC=0x%08X Status=0x%08X ra=0x%08X s1=0x%08X a0=0x%08X",
                 exc_trace_pc_log_, pc_, cop0_[COP0_STATUS], gpr_[31], gpr_[17], gpr_[4]);
         }
@@ -817,7 +862,7 @@ Cpu::StepResult Cpu::step()
         if (!is_putchar)
         {
             ++exc_trace_count_;
-            emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+            emu::logf(emu::LogLevel::debug, "EXC-TRACE",
                 "BIOS %c(0x%02X) ra=0x%08X Status=0x%08X a0=0x%08X a1=0x%08X",
                 (pc_ == 0xA0u ? 'A' : (pc_ == 0xB0u ? 'B' : 'C')),
                 fn, gpr_[31], cop0_[COP0_STATUS],
@@ -878,7 +923,7 @@ Cpu::StepResult Cpu::step()
                 if (sio0_exc_log < 10)
                 {
                     ++sio0_exc_log;
-                    emu::logf(emu::LogLevel::warn, "CPU",
+                    emu::logf(emu::LogLevel::debug, "CPU",
                         "SIO0 exception! PC=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
                         pc_, bus_.irq_stat_raw(), bus_.irq_mask_raw(), sio0_exc_log);
                 }
@@ -2451,8 +2496,8 @@ Cpu::StepResult Cpu::step()
         {
             rlog::logger_logf(logger_, rlog::Level::error, rlog::Category::exc, "Stop-on-pc: PC=0x%08X", pc_);
             rlog::logger_logf(logger_, rlog::Level::error, rlog::Category::exc, "Instr@PC=0x%08X", instr);
-            // Dump a small window of instructions around PC for quick inspection.
-            for (int i = -4; i <= 4; ++i)
+            // Dump a wider window of instructions around PC for quick inspection.
+            for (int i = -16; i <= 16; ++i)
             {
                 const uint32_t vaddr = pc_ + (uint32_t)(i * 4);
                 uint32_t w = 0;
@@ -2484,6 +2529,29 @@ Cpu::StepResult Cpu::step()
                 "Regs: s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X sp=0x%08X",
                 gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[29]
             );
+            rlog::logger_logf(
+                logger_,
+                rlog::Level::error,
+                rlog::Category::exc,
+                "Regs: t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X t8=0x%08X t9=0x%08X",
+                gpr_[8], gpr_[9], gpr_[10], gpr_[11], gpr_[12], gpr_[13], gpr_[14], gpr_[15], gpr_[24], gpr_[25]
+            );
+            rlog::logger_logf(
+                logger_,
+                rlog::Level::error,
+                rlog::Category::exc,
+                "Regs: gp=0x%08X fp=0x%08X sp=0x%08X",
+                gpr_[28], gpr_[30], gpr_[29]
+            );
+            rlog::logger_logf(
+                logger_,
+                rlog::Level::error,
+                rlog::Category::exc,
+                "IRQ: I_STAT=0x%08X I_MASK=0x%08X pending=0x%08X",
+                bus_.irq_stat_raw(),
+                bus_.irq_mask_raw(),
+                bus_.irq_pending_masked()
+            );
 
             // Dump a few words at s1/s2 (often point to structs in BIOS loops).
             const uint32_t ptrs[2] = { gpr_[17], gpr_[18] };
@@ -2514,6 +2582,100 @@ Cpu::StepResult Cpu::step()
                             names[pi],
                             evt_addr, w0, w1, w2, w3
                         );
+                    }
+                }
+            }
+
+            // Dump timer/global pointers often used by game-side frame loops.
+            const uint32_t probe_ptrs[2] = { gpr_[14], gpr_[24] }; // t6, t8
+            const char* probe_names[2] = { "t6", "t8" };
+            for (int pi = 0; pi < 2; ++pi)
+            {
+                const uint32_t probe_addr = probe_ptrs[pi];
+                if (probe_addr == 0)
+                    continue;
+                uint32_t w0 = 0, w1 = 0;
+                Bus::MemFault mf{};
+                const int ok0 = bus_.read_u32(virt_to_phys(probe_addr + 0u), w0, mf) ? 1 : 0;
+                const int ok1 = bus_.read_u32(virt_to_phys(probe_addr + 4u), w1, mf) ? 1 : 0;
+                rlog::logger_logf(
+                    logger_,
+                    rlog::Level::error,
+                    rlog::Category::exc,
+                    "%s@0x%08X: [0]=0x%08X [4]=0x%08X",
+                    probe_names[pi],
+                    probe_addr,
+                    ok0 ? w0 : 0xFFFF'FFFFu,
+                    ok1 ? w1 : 0xFFFF'FFFFu
+                );
+            }
+
+            // Dump kernel event table state. This is often enough to tell whether
+            // the BIOS/game is stuck waiting on an event that never becomes READY.
+            {
+                const uint32_t ram_size = bus_.ram_size();
+                if (ram_size != 0)
+                {
+                    uint8_t* ram = bus_.ram_ptr();
+                    const uint32_t ptr_off = 0x0120u & (ram_size - 1u);
+                    const uint32_t size_off = 0x0124u & (ram_size - 1u);
+                    const uint32_t evt_ptr = (uint32_t)ram[ptr_off] |
+                                             ((uint32_t)ram[ptr_off + 1] << 8) |
+                                             ((uint32_t)ram[ptr_off + 2] << 16) |
+                                             ((uint32_t)ram[ptr_off + 3] << 24);
+                    const uint32_t tbl_size = (uint32_t)ram[size_off] |
+                                              ((uint32_t)ram[size_off + 1] << 8) |
+                                              ((uint32_t)ram[size_off + 2] << 16) |
+                                              ((uint32_t)ram[size_off + 3] << 24);
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::error,
+                        rlog::Category::exc,
+                        "Event table: ptr=0x%08X size=0x%08X",
+                        evt_ptr,
+                        tbl_size
+                    );
+
+                    if (evt_ptr != 0)
+                    {
+                        const uint32_t base_phys = evt_ptr & (ram_size - 1u);
+                        const uint32_t max_entries = (tbl_size > 0u) ? (tbl_size / 0x1Cu) : 16u;
+                        const uint32_t limit = (max_entries < 16u) ? max_entries : 16u;
+                        for (uint32_t i = 0; i < limit; ++i)
+                        {
+                            const uint32_t eoff = base_phys + i * 0x1Cu;
+                            if (eoff + 0x14u > ram_size)
+                                break;
+                            const uint32_t cls = (uint32_t)ram[eoff] |
+                                                 ((uint32_t)ram[eoff + 1] << 8) |
+                                                 ((uint32_t)ram[eoff + 2] << 16) |
+                                                 ((uint32_t)ram[eoff + 3] << 24);
+                            const uint32_t status = (uint32_t)ram[eoff + 4] |
+                                                    ((uint32_t)ram[eoff + 5] << 8) |
+                                                    ((uint32_t)ram[eoff + 6] << 16) |
+                                                    ((uint32_t)ram[eoff + 7] << 24);
+                            const uint32_t spec = (uint32_t)ram[eoff + 8] |
+                                                  ((uint32_t)ram[eoff + 9] << 8) |
+                                                  ((uint32_t)ram[eoff + 10] << 16) |
+                                                  ((uint32_t)ram[eoff + 11] << 24);
+                            const uint32_t mode = (uint32_t)ram[eoff + 12] |
+                                                  ((uint32_t)ram[eoff + 13] << 8) |
+                                                  ((uint32_t)ram[eoff + 14] << 16) |
+                                                  ((uint32_t)ram[eoff + 15] << 24);
+                            if (cls == 0 && status == 0 && spec == 0 && mode == 0)
+                                continue;
+                            rlog::logger_logf(
+                                logger_,
+                                rlog::Level::error,
+                                rlog::Category::exc,
+                                "  Event[%u] cls=0x%08X spec=0x%08X status=0x%08X mode=0x%08X",
+                                i,
+                                cls,
+                                spec,
+                                status,
+                                mode
+                            );
+                        }
                     }
                 }
             }
@@ -3076,7 +3238,7 @@ Cpu::StepResult Cpu::step()
         const uint32_t src_mtok = reg_last_mem_valid_[r] ? bus_.ram_face_token(src_paddr) : kNoFaceToken;
         const uint32_t ctx_tok = infer_callctx_face();
         emu::logf(
-            emu::LogLevel::warn,
+            emu::LogLevel::debug,
             "PSX3D_BP",
             "pc=0x%08X op=%s seen=%u miss=%u vaddr=0x%08X reg=r%u gtok=0x%08X mem_valid=%u mem_addr=0x%08X mem_tok=0x%08X ctx_tok=0x%08X final_tok=0x%08X callctx=0x%08X",
             pc,
@@ -3099,13 +3261,222 @@ Cpu::StepResult Cpu::step()
             {
                 const uint32_t pos = (recent_pos_ - back) & 255u;
                 emu::logf(
-                    emu::LogLevel::warn,
+                    emu::LogLevel::debug,
                     "PSX3D_BP",
                     "  hist[-%u] pc=0x%08X instr=0x%08X",
                     back,
                     recent_pc_[pos],
                     recent_instr_[pos]);
             }
+        }
+    };
+    auto trace_dma3_program = [&](const char* op, uint32_t pc, uint32_t vaddr, uint32_t base_reg, int32_t off, uint32_t src_reg)
+    {
+        const uint32_t phys = virt_to_phys(vaddr);
+        if (phys < 0x1F80'10B0u || phys > 0x1F80'10B8u)
+            return;
+
+        const char* field = "DMA3?";
+        switch (phys)
+        {
+            case 0x1F80'10B0u: field = "DMA3.MADR"; break;
+            case 0x1F80'10B4u: field = "DMA3.BCR"; break;
+            case 0x1F80'10B8u: field = "DMA3.CHCR"; break;
+            default: break;
+        }
+
+        static uint32_t log_count = 0;
+        const uint32_t s = src_reg & 31u;
+        const uint32_t b = base_reg & 31u;
+        const uint32_t value = gpr_[s];
+        const bool suspicious =
+            (phys == 0x1F80'10B0u && value < 0x200u) ||
+            (phys == 0x1F80'10B8u && (value & 0x0100'0000u) != 0u);
+        const bool should_log = suspicious || (log_count < 32u);
+        if (!should_log)
+            return;
+        ++log_count;
+
+        const uint32_t src_paddr = reg_last_mem_addr_[s];
+        emu::logf(
+            suspicious ? emu::LogLevel::warn : emu::LogLevel::debug,
+            "DMA3_TRACE",
+            "pc=0x%08X op=%s %s vaddr=0x%08X phys=0x%08X base=r%u(0x%08X) off=%d src=r%u val=0x%08X src_mem_valid=%u src_mem=0x%08X",
+            pc,
+            op ? op : "?",
+            field,
+            vaddr,
+            phys,
+            b,
+            gpr_[b],
+            off,
+            s,
+            value,
+            (uint32_t)reg_last_mem_valid_[s],
+            src_paddr);
+
+        if (suspicious)
+        {
+            for (uint32_t back = 1; back <= 6; ++back)
+            {
+                const uint32_t pos = (recent_pos_ - back) & 255u;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "DMA3_TRACE",
+                    "  hist[-%u] pc=0x%08X instr=0x%08X",
+                    back,
+                    recent_pc_[pos],
+                    recent_instr_[pos]);
+            }
+        }
+    };
+    auto trace_tekk_dma3_ptr_slot = [&](const char* op, uint32_t pc, uint32_t vaddr, uint32_t reg_idx, uint32_t value, bool is_load)
+    {
+        const uint32_t phys = virt_to_phys(vaddr);
+        if (phys < 0x001EE380u || phys > 0x001EE390u)
+            return;
+
+        static uint32_t log_count = 0;
+        const bool suspicious = (phys == 0x001EE38Cu && value == 0u);
+        const bool should_log = suspicious || (log_count < 64u);
+        if (!should_log)
+            return;
+        ++log_count;
+
+        const uint32_t r = reg_idx & 31u;
+        emu::logf(
+            suspicious ? emu::LogLevel::warn : emu::LogLevel::debug,
+            "TEKK_DMA3_SLOT",
+            "pc=0x%08X op=%s kind=%s vaddr=0x%08X phys=0x%08X reg=r%u val=0x%08X src_mem_valid=%u src_mem=0x%08X",
+            pc,
+            op ? op : "?",
+            is_load ? "load" : "store",
+            vaddr,
+            phys,
+            r,
+            value,
+            (uint32_t)reg_last_mem_valid_[r],
+            reg_last_mem_addr_[r]);
+
+        if (suspicious)
+        {
+            for (uint32_t back = 1; back <= 8; ++back)
+            {
+                const uint32_t pos = (recent_pos_ - back) & 255u;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "TEKK_DMA3_SLOT",
+                    "  hist[-%u] pc=0x%08X instr=0x%08X",
+                    back,
+                    recent_pc_[pos],
+                    recent_instr_[pos]);
+            }
+        }
+    };
+    auto trace_tekk_cd_buffers = [&](const char* op, uint32_t pc, uint32_t vaddr, uint32_t reg_idx, uint32_t value, bool is_load)
+    {
+        const uint32_t phys = virt_to_phys(vaddr);
+        const char* field = nullptr;
+        switch (phys)
+        {
+            case 0x001CB404u: field = "WAVE_HEAD_BUF"; break;
+            case 0x001CB40Cu: field = "WAVE_BODY_BUF"; break;
+            case 0x001CA690u: field = "CD_DST_PARAM"; break;
+            case 0x001CA694u: field = "CD_DST_CUR"; break;
+            case 0x001CA69Cu: field = "CD_CHUNK_WORDS"; break;
+            default: break;
+        }
+        if (!field)
+            return;
+
+        static uint32_t log_count = 0;
+        const bool suspicious =
+            ((phys == 0x001CB404u || phys == 0x001CB40Cu || phys == 0x001CA690u || phys == 0x001CA694u) &&
+             value == 0u);
+        const bool should_log = suspicious || (log_count < 128u);
+        if (!should_log)
+            return;
+        ++log_count;
+
+        const uint32_t r = reg_idx & 31u;
+        emu::logf(
+            suspicious ? emu::LogLevel::warn : emu::LogLevel::debug,
+            "TEKK_BUF",
+            "pc=0x%08X op=%s kind=%s %s vaddr=0x%08X phys=0x%08X reg=r%u val=0x%08X src_mem_valid=%u src_mem=0x%08X",
+            pc,
+            op ? op : "?",
+            is_load ? "load" : "store",
+            field,
+            vaddr,
+            phys,
+            r,
+            value,
+            (uint32_t)reg_last_mem_valid_[r],
+            reg_last_mem_addr_[r]);
+
+        if (suspicious)
+        {
+            for (uint32_t back = 1; back <= 8; ++back)
+            {
+                const uint32_t pos = (recent_pos_ - back) & 255u;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "TEKK_BUF",
+                    "  hist[-%u] pc=0x%08X instr=0x%08X",
+                    back,
+                    recent_pc_[pos],
+                    recent_instr_[pos]);
+            }
+        }
+    };
+    auto trace_tekk_dma3_call = [&](const char* op, uint32_t pc, uint32_t target)
+    {
+        if (target >= 0x8016A98Cu && target <= 0x8016AA00u)
+        {
+            emu::logf(
+                gpr_[4] == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
+                "TEKK_DMA3_CALL",
+                "pc=0x%08X op=%s target=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X ra=0x%08X",
+                pc,
+                op ? op : "?",
+                target,
+                gpr_[4],
+                gpr_[5],
+                gpr_[6],
+                gpr_[7],
+                gpr_[16],
+                gpr_[17],
+                gpr_[29],
+                gpr_[31]);
+            return;
+        }
+        if (target == 0x8016AAE0u)
+        {
+            Bus::MemFault mf{};
+            uint32_t dst_param = 0, dst_cur = 0, remain = 0, chunk = 0;
+            (void)bus_.read_u32(0x001CA690u, dst_param, mf);
+            (void)bus_.read_u32(0x001CA694u, dst_cur, mf);
+            (void)bus_.read_u32(0x001CA6A0u, remain, mf);
+            (void)bus_.read_u32(0x001CA69Cu, chunk, mf);
+            emu::logf(
+                gpr_[4] == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
+                "TEKK_DMA3_AAE0",
+                "pc=0x%08X op=%s target=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X ra=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
+                pc,
+                op ? op : "?",
+                target,
+                gpr_[4],
+                gpr_[5],
+                gpr_[6],
+                gpr_[7],
+                gpr_[16],
+                gpr_[17],
+                gpr_[29],
+                gpr_[31],
+                dst_param,
+                dst_cur,
+                remain,
+                chunk);
         }
     };
     auto decode_face_token_from_tagged_sxy = [&](uint32_t sxy) -> uint32_t
@@ -3292,6 +3663,7 @@ Cpu::StepResult Cpu::step()
                                 wb_valid = 1;
                             }
                             set_reg(d ? d : 31u, ra);
+                            trace_tekk_dma3_call("JALR", r.pc, gpr_[s]);
                             callctx_push(r.pc, gpr_[s], ra);
                             schedule_branch(gpr_[s]);
                             break;
@@ -3879,6 +4251,8 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LW";
                 mem_addr = addr;
                 mem_val = v;
+                trace_tekk_dma3_ptr_slot("LW", r.pc, addr, t, v, true);
+                trace_tekk_cd_buffers("LW", r.pc, addr, t, v, true);
                 // Load delay slot: pas de writeback immédiat.
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
@@ -3903,6 +4277,9 @@ Cpu::StepResult Cpu::step()
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
                 const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
                 trace_hotspot_store("SW", r.pc, addr, t, store_tok);
+                trace_dma3_program("SW", r.pc, addr, s, off, t);
+                trace_tekk_dma3_ptr_slot("SW", r.pc, addr, t, gpr_[t], false);
+                trace_tekk_cd_buffers("SW", r.pc, addr, t, gpr_[t], false);
                 if (!store_u32(addr, gpr_[t], store_tok))
                 {
                     // Exception déjà déclenchée (ADES). On sort.
@@ -4035,6 +4412,7 @@ Cpu::StepResult Cpu::step()
                 wb_new = ra;
                 wb_valid = 1;
                 set_reg(31, ra);
+                trace_tekk_dma3_call("JAL", r.pc, target);
                 callctx_push(r.pc, target, ra);
                 schedule_branch(target);
                 break;
@@ -4117,6 +4495,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LB";
                 mem_addr = addr;
                 mem_val = b;
+                trace_tekk_cd_buffers("LB", r.pc, addr, t, v, true);
                 // Load delay slot: pas de writeback immédiat.
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
@@ -4144,6 +4523,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LBU";
                 mem_addr = addr;
                 mem_val = b;
+                trace_tekk_cd_buffers("LBU", r.pc, addr, t, v, true);
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
@@ -4170,6 +4550,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LH";
                 mem_addr = addr;
                 mem_val = h;
+                trace_tekk_cd_buffers("LH", r.pc, addr, t, v, true);
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
@@ -4196,6 +4577,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LHU";
                 mem_addr = addr;
                 mem_val = h;
+                trace_tekk_cd_buffers("LHU", r.pc, addr, t, v, true);
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
                 next_pending_load.value = v;
@@ -4216,6 +4598,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
                 const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
                 trace_hotspot_store("SB", r.pc, addr, t, store_tok);
+                trace_tekk_cd_buffers("SB", r.pc, addr, t, gpr_[t] & 0xFFu, false);
                 if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu), store_tok))
                     break;
                 mem_valid = 1;
@@ -4232,6 +4615,7 @@ Cpu::StepResult Cpu::step()
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
                 const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
                 trace_hotspot_store("SH", r.pc, addr, t, store_tok);
+                trace_tekk_cd_buffers("SH", r.pc, addr, t, gpr_[t] & 0xFFFFu, false);
                 if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu), store_tok))
                     break;
                 mem_valid = 1;
@@ -4417,7 +4801,7 @@ Cpu::StepResult Cpu::step()
                     if (exc_trace_armed_ && (d & 31u) == COP0_STATUS && exc_trace_count_ < kExcTraceMax)
                     {
                         ++exc_trace_count_;
-                        emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+                        emu::logf(emu::LogLevel::debug, "EXC-TRACE",
                             "MTC0 Status PC=0x%08X old=0x%08X new=0x%08X (IEc %d->%d)",
                             r.pc, cop0_[COP0_STATUS], gpr_[t],
                             (int)(cop0_[COP0_STATUS] & 1), (int)(gpr_[t] & 1));
@@ -4440,7 +4824,7 @@ Cpu::StepResult Cpu::step()
                         if (exc_trace_armed_ && exc_trace_count_ < kExcTraceMax)
                         {
                             ++exc_trace_count_;
-                            emu::logf(emu::LogLevel::warn, "EXC-TRACE",
+                            emu::logf(emu::LogLevel::debug, "EXC-TRACE",
                                 "RFE PC=0x%08X Status 0x%08X -> 0x%08X (IEc=%d->%d)",
                                 r.pc, st_before, st, (int)(st_before & 1), (int)(st & 1));
                         }
@@ -4544,7 +4928,7 @@ Cpu::StepResult Cpu::step()
                             trace_frame > gte_trace_.end_frame &&
                             !gte_trace_.summary_dumped)
                         {
-                            emu::logf(emu::LogLevel::warn, "GTE_TRACE",
+                            emu::logf(emu::LogLevel::debug, "GTE_TRACE",
                                 "window frame=%u..%u closed at frame=%u vblank=%u pcs=%zu ops=%zu",
                                 gte_trace_.start_frame, gte_trace_.end_frame,
                                 trace_frame, trace_vblank,
@@ -4581,10 +4965,10 @@ Cpu::StepResult Cpu::step()
                             {
                                 ++gte_corr_diag_count_;
                                 if (!corr)
-                                    emu::logf(emu::LogLevel::warn, "CPU",
+                                    emu::logf(emu::LogLevel::debug, "CPU",
                                         "GTE RTPS/RTPT: corr=NULL (func=0x%02X)", gte_func);
                                 else
-                                    emu::logf(emu::LogLevel::warn, "CPU",
+                                    emu::logf(emu::LogLevel::debug, "CPU",
                                         "GTE RTPS/RTPT: snapshot.valid=0 (func=0x%02X)", gte_func);
                             }
                         }
@@ -4938,39 +5322,226 @@ Cpu::StepResult Cpu::step()
         );
     }
 
+    // Tekken targeted trace: follow how s1 is populated before DMA3.MADR=0.
+    if (r.pc >= 0x8016A980u && r.pc <= 0x8016ABA0u)
+    {
+        static uint32_t tekk_dma3_func_logs = 0;
+        if ((r.pc == 0x8016A98Cu || r.pc == 0x8016A990u || r.pc == 0x8016AAE8u || r.pc == 0x8016AB64u) && tekk_dma3_func_logs < 32u)
+        {
+            ++tekk_dma3_func_logs;
+            emu::logf(
+                emu::LogLevel::warn,
+                "TEKK_S1",
+                "entry pc=0x%08X a0=0x%08X a1=0x%08X s1=0x%08X sp=0x%08X ra=0x%08X",
+                r.pc,
+                gpr_[4],
+                gpr_[5],
+                gpr_[17],
+                gpr_[29],
+                gpr_[31]);
+        }
+
+        if (r.pc >= 0x8016A98Cu && r.pc <= 0x8016A99Cu)
+        {
+            emu::logf(
+                emu::LogLevel::warn,
+                "TEKK_WIN",
+                "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X",
+                r.pc,
+                instr,
+                gpr_[4],
+                gpr_[5],
+                gpr_[6],
+                gpr_[7],
+                gpr_[2],
+                gpr_[3],
+                gpr_[16],
+                gpr_[17],
+                gpr_[29]);
+        }
+
+        if (wb_valid && (wb_reg & 31u) == 17u)
+        {
+            emu::logf(
+                wb_new == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
+                "TEKK_S1",
+                "pc=0x%08X wb s1: 0x%08X -> 0x%08X",
+                r.pc,
+                wb_old,
+                wb_new);
+        }
+        if (ld_valid && (ld_reg & 31u) == 17u)
+        {
+            emu::logf(
+                ld_val == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
+                "TEKK_S1",
+                "pc=0x%08X ld_sched s1=0x%08X from vaddr=0x%08X phys=0x%08X",
+                r.pc,
+                ld_val,
+                mem_addr,
+                virt_to_phys(mem_addr));
+        }
+        if (wb2_valid && (wb2_reg & 31u) == 17u)
+        {
+            emu::logf(
+                wb2_new == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
+                "TEKK_S1",
+                "pc=0x%08X ld_commit s1: 0x%08X -> 0x%08X",
+                r.pc,
+                wb2_old,
+                wb2_new);
+        }
+    }
+
+    // Tekken higher-level CD pipeline trace:
+    // 8015D1E0 -> 80168F40 -> 8016A7D0 -> 8016A2D4 -> 8016AAE0
+    if (r.pc == 0x8015D1E0u || r.pc == 0x80168F40u || r.pc == 0x8016A7D0u ||
+        r.pc == 0x8016A2D4u || r.pc == 0x8016AAE0u)
+    {
+        static uint32_t tekk_pipe_logs = 0;
+        if (tekk_pipe_logs < 256u)
+        {
+            ++tekk_pipe_logs;
+            Bus::MemFault mf{};
+            uint32_t wave_head_buf = 0, wave_body_buf = 0, dst_param = 0, dst_cur = 0, remain = 0, chunk = 0;
+            (void)bus_.read_u32(0x001CB404u, wave_head_buf, mf);
+            (void)bus_.read_u32(0x001CB40Cu, wave_body_buf, mf);
+            (void)bus_.read_u32(0x001CA690u, dst_param, mf);
+            (void)bus_.read_u32(0x001CA694u, dst_cur, mf);
+            (void)bus_.read_u32(0x001CA6A0u, remain, mf);
+            (void)bus_.read_u32(0x001CA69Cu, chunk, mf);
+            emu::logf(
+                (gpr_[4] == 0u || dst_cur == 0u || dst_param == 0u) ? emu::LogLevel::warn : emu::LogLevel::debug,
+                "TEKK_PIPE",
+                "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X wave_head=0x%08X wave_body=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
+                r.pc,
+                instr,
+                gpr_[4],
+                gpr_[5],
+                gpr_[6],
+                gpr_[7],
+                gpr_[2],
+                gpr_[3],
+                gpr_[16],
+                gpr_[17],
+                gpr_[29],
+                wave_head_buf,
+                wave_body_buf,
+                dst_param,
+                dst_cur,
+                remain,
+                chunk);
+        }
+    }
+
+    // Tekken targeted trace: caller block that prepares CD DMA destination/count.
+    if (r.pc >= 0x8016A6C0u && r.pc <= 0x8016A714u)
+    {
+        static uint32_t tekk_cdprep_logs = 0;
+        if (tekk_cdprep_logs < 256u)
+        {
+            ++tekk_cdprep_logs;
+            Bus::MemFault mf{};
+            uint32_t dst_param = 0, dst_cur = 0, remain = 0, chunk = 0;
+            (void)bus_.read_u32(0x001CA690u, dst_param, mf);
+            (void)bus_.read_u32(0x001CA694u, dst_cur, mf);
+            (void)bus_.read_u32(0x001CA6A0u, remain, mf);
+            (void)bus_.read_u32(0x001CA69Cu, chunk, mf);
+            emu::logf(
+                emu::LogLevel::warn,
+                "TEKK_CDPREP",
+                "pc=0x%08X instr=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
+                r.pc,
+                instr,
+                gpr_[2],
+                gpr_[3],
+                gpr_[4],
+                gpr_[5],
+                gpr_[6],
+                gpr_[7],
+                gpr_[16],
+                gpr_[17],
+                gpr_[29],
+                dst_param,
+                dst_cur,
+                remain,
+                chunk);
+        }
+    }
+
     // Debug: trace MMIO verbeuse (I/O) pour comprendre ce que le BIOS attend (IRQ/DMA/CDROM/GPU).
-    if (trace_io_ && mem_valid && logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::mem))
+    // Keep a much smaller always-on subset for critical registers so --trace-io stays usable.
+    if (trace_io_ && mem_valid && logger_)
     {
         const uint32_t phys = virt_to_phys(mem_addr);
         if (psx_is_mmio(phys))
         {
             const char* name = psx_mmio_name(phys);
-            if (name)
+            if (psx_is_critical_mmio(phys) && trace_io_critical_count_ < 2048u)
             {
-                rlog::logger_logf(
-                    logger_,
-                    rlog::Level::debug,
-                    rlog::Category::mem,
-                    "MMIO %s %s (vaddr=0x%08X phys=0x%08X) val=0x%08X",
-                    mem_op,
-                    name,
-                    mem_addr,
-                    phys,
-                    mem_val
-                );
+                ++trace_io_critical_count_;
+                if (name)
+                {
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::info,
+                        rlog::Category::mem,
+                        "MMIO[%u] PC=0x%08X %s %s (vaddr=0x%08X phys=0x%08X) val=0x%08X",
+                        trace_io_critical_count_,
+                        r.pc,
+                        mem_op,
+                        name,
+                        mem_addr,
+                        phys,
+                        mem_val
+                    );
+                }
+                else
+                {
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::info,
+                        rlog::Category::mem,
+                        "MMIO[%u] PC=0x%08X %s (vaddr=0x%08X phys=0x%08X) val=0x%08X",
+                        trace_io_critical_count_,
+                        r.pc,
+                        mem_op,
+                        mem_addr,
+                        phys,
+                        mem_val
+                    );
+                }
             }
-            else
+
+            if (rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::mem))
             {
-                rlog::logger_logf(
-                    logger_,
-                    rlog::Level::debug,
-                    rlog::Category::mem,
-                    "MMIO %s (vaddr=0x%08X phys=0x%08X) val=0x%08X",
-                    mem_op,
-                    mem_addr,
-                    phys,
-                    mem_val
-                );
+                if (name)
+                {
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::debug,
+                        rlog::Category::mem,
+                        "MMIO %s %s (vaddr=0x%08X phys=0x%08X) val=0x%08X",
+                        mem_op,
+                        name,
+                        mem_addr,
+                        phys,
+                        mem_val
+                    );
+                }
+                else
+                {
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::debug,
+                        rlog::Category::mem,
+                        "MMIO %s (vaddr=0x%08X phys=0x%08X) val=0x%08X",
+                        mem_op,
+                        mem_addr,
+                        phys,
+                        mem_val
+                    );
+                }
             }
         }
     }
@@ -5014,24 +5585,24 @@ Cpu::StepResult Cpu::step()
             // If watch value hit, log extra detail
             if (watch_hit)
             {
-                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                emu::logf(emu::LogLevel::debug, "REGTRACE",
                     "WATCH HIT! PC=%08X value=0x%08X in %s (r%d)",
                     trace_pc, reg_trace_.watch_value, reg_name(watch_reg), watch_reg);
 
                 // Dump all 32 registers
-                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                emu::logf(emu::LogLevel::debug, "REGTRACE",
                     "FULL DUMP: r0-r7:  %08X %08X %08X %08X %08X %08X %08X %08X",
                     gpr_[0], gpr_[1], gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
-                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                emu::logf(emu::LogLevel::debug, "REGTRACE",
                     "FULL DUMP: r8-r15: %08X %08X %08X %08X %08X %08X %08X %08X",
                     gpr_[8], gpr_[9], gpr_[10], gpr_[11], gpr_[12], gpr_[13], gpr_[14], gpr_[15]);
-                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                emu::logf(emu::LogLevel::debug, "REGTRACE",
                     "FULL DUMP: r16-r23: %08X %08X %08X %08X %08X %08X %08X %08X",
                     gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[20], gpr_[21], gpr_[22], gpr_[23]);
-                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                emu::logf(emu::LogLevel::debug, "REGTRACE",
                     "FULL DUMP: r24-r31: %08X %08X %08X %08X %08X %08X %08X %08X",
                     gpr_[24], gpr_[25], gpr_[26], gpr_[27], gpr_[28], gpr_[29], gpr_[30], gpr_[31]);
-                emu::logf(emu::LogLevel::warn, "REGTRACE",
+                emu::logf(emu::LogLevel::debug, "REGTRACE",
                     "HI=%08X LO=%08X", hi_, lo_);
             }
         }

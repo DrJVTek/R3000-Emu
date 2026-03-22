@@ -11,6 +11,7 @@
 
 namespace emu { struct Hooks; }
 namespace gpu { class GteCorrelationTable; }
+namespace mdec { class Mdec; }
 
 namespace cdrom
 {
@@ -154,6 +155,10 @@ class Bus
     void set_gte_3d(gte::Gte3D* g) { gte_3d_ = g; }
     gpu::Gpu3D* gpu_3d() const { return gpu_3d_; }
     gte::Gte3D* gte_3d() const { return gte_3d_; }
+
+    // Real MDEC decoder
+    void set_mdec(mdec::Mdec* m) { mdec_ = m; }
+    mdec::Mdec* mdec() const { return mdec_; }
 
     // Enable WAV output for audio debugging
     void enable_wav_output(const char* path);
@@ -318,6 +323,7 @@ class Bus
     uint32_t dicr_{0};
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
+    mdec::Mdec* mdec_{nullptr};     // Real MDEC decoder (owned by Core)
     uint32_t vblank_no_mask_count_{0}; // VBlank frames with I_MASK=0 (for auto-enable workaround)
     uint32_t no_mask_cycles_{0}; // Cycles accumulated with I_MASK=0 (for auto-enable workaround)
 

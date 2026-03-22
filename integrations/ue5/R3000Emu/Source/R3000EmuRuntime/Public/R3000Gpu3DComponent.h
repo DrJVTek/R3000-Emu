@@ -130,6 +130,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D", meta = (EditCondition = "!bAutoScale2D"))
     float Depth2DFront{50.0f};
 
+    /** Global depth bias applied to all 2D elements after OT depth mapping.
+     *  Negative values push 2D farther behind the 3D mesh, useful to debug
+     *  cases where background quads overlap reconstructed geometry. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D")
+    float Depth2DBias{-150.0f};
+
     /** Debug: log 3D correlation stats per frame. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU3D|Debug")
     bool bDebug3DLog{false};

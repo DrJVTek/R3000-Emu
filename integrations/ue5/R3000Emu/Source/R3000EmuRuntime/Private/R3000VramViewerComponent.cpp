@@ -73,6 +73,8 @@ void UR3000VramViewerComponent::CreateVramTexture()
     }
 
     VramTexture_->Filter = TF_Nearest;
+    VramTexture_->AddressX = TA_Wrap;
+    VramTexture_->AddressY = TA_Wrap;
     VramTexture_->SRGB = false;
     VramTexture_->NeverStream = true;
 #if WITH_EDITORONLY_DATA

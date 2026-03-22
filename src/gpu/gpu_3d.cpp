@@ -1552,58 +1552,83 @@ void Gpu3D::push_quad(
     const char* packet_edge_layout = "none";
     if (is_3d && gte_3d_ && rule_packet_edge_pairs && (rule_paired_edge || rule_subdivided_ft4))
     {
-        struct PacketEdgeCandidate
+        if (rule_paired_edge)
         {
-            int idx[4];
-            const char* label;
-        };
-        static const PacketEdgeCandidate kCandidates[] = {
-            {{0, 1, 2, 3}, "01_23"},
-            {{0, 2, 1, 3}, "02_13"},
-            {{0, 3, 1, 2}, "03_12"},
-        };
-
-        int best_score = -1;
-        for (const auto& cand : kCandidates)
-        {
-            const int a0 = cand.idx[0], a1 = cand.idx[1];
-            const int b0 = cand.idx[2], b1 = cand.idx[3];
-            const uint16_t px[4] = {x0, x1, x2, x3};
-            const uint16_t py[4] = {y0, y1, y2, y3};
             const uint32_t fi_a = gte_3d_->lookup_edge_face_by_segment(
-                static_cast<int16_t>(px[a0]), static_cast<int16_t>(py[a0]),
-                static_cast<int16_t>(px[a1]), static_cast<int16_t>(py[a1]));
+                static_cast<int16_t>(x0), static_cast<int16_t>(y0),
+                static_cast<int16_t>(x1), static_cast<int16_t>(y1));
             const uint32_t fi_b = gte_3d_->lookup_edge_face_by_segment(
-                static_cast<int16_t>(px[b0]), static_cast<int16_t>(py[b0]),
-                static_cast<int16_t>(px[b1]), static_cast<int16_t>(py[b1]));
-            if (fi_a == 0xFFFFFFFFu || fi_b == 0xFFFFFFFFu ||
-                fi_a == 0u || fi_b == 0u || fi_a == fi_b)
-                continue;
-
-            const gte::GteCacheFace* fa = gte_3d_->face_by_index(fi_a);
-            const gte::GteCacheFace* fb = gte_3d_->face_by_index(fi_b);
-            if (!is_edge_face(fa) || !is_edge_face(fb))
-                continue;
-
-            int score = 0;
-            if (fi_a == face_idx || fi_b == face_idx)
-                score += 8;
-            if (face_idx_secondary_hint != kNoFaceHint &&
-                (fi_a == face_idx_secondary_hint || fi_b == face_idx_secondary_hint))
-                score += 4;
-            if (fa->source_pc != 0 && fb->source_pc != 0 && fa->source_pc == fb->source_pc)
-                score += 2;
-
-            if (score > best_score)
+                static_cast<int16_t>(x2), static_cast<int16_t>(y2),
+                static_cast<int16_t>(x3), static_cast<int16_t>(y3));
+            if (fi_a != 0xFFFFFFFFu && fi_b != 0xFFFFFFFFu &&
+                fi_a != 0u && fi_b != 0u && fi_a != fi_b)
             {
-                best_score = score;
-                packet_edge_face_a = fa;
-                packet_edge_face_b = fb;
-                packet_edge_draw_idx[0] = a0;
-                packet_edge_draw_idx[1] = a1;
-                packet_edge_draw_idx[2] = b0;
-                packet_edge_draw_idx[3] = b1;
-                packet_edge_layout = cand.label;
+                const gte::GteCacheFace* fa = gte_3d_->face_by_index(fi_a);
+                const gte::GteCacheFace* fb = gte_3d_->face_by_index(fi_b);
+                if (is_edge_face(fa) && is_edge_face(fb))
+                {
+                    packet_edge_face_a = fa;
+                    packet_edge_face_b = fb;
+                    packet_edge_layout = "01_23";
+                }
+            }
+        }
+
+        if (!packet_edge_face_a || !packet_edge_face_b)
+        {
+            struct PacketEdgeCandidate
+            {
+                int idx[4];
+                const char* label;
+            };
+            static const PacketEdgeCandidate kCandidates[] = {
+                {{0, 1, 2, 3}, "01_23"},
+                {{0, 2, 1, 3}, "02_13"},
+                {{0, 3, 1, 2}, "03_12"},
+            };
+
+            int best_score = -1;
+            for (const auto& cand : kCandidates)
+            {
+                const int a0 = cand.idx[0], a1 = cand.idx[1];
+                const int b0 = cand.idx[2], b1 = cand.idx[3];
+                const uint16_t px[4] = {x0, x1, x2, x3};
+                const uint16_t py[4] = {y0, y1, y2, y3};
+                const uint32_t fi_a = gte_3d_->lookup_edge_face_by_segment(
+                    static_cast<int16_t>(px[a0]), static_cast<int16_t>(py[a0]),
+                    static_cast<int16_t>(px[a1]), static_cast<int16_t>(py[a1]));
+                const uint32_t fi_b = gte_3d_->lookup_edge_face_by_segment(
+                    static_cast<int16_t>(px[b0]), static_cast<int16_t>(py[b0]),
+                    static_cast<int16_t>(px[b1]), static_cast<int16_t>(py[b1]));
+                if (fi_a == 0xFFFFFFFFu || fi_b == 0xFFFFFFFFu ||
+                    fi_a == 0u || fi_b == 0u || fi_a == fi_b)
+                    continue;
+
+                const gte::GteCacheFace* fa = gte_3d_->face_by_index(fi_a);
+                const gte::GteCacheFace* fb = gte_3d_->face_by_index(fi_b);
+                if (!is_edge_face(fa) || !is_edge_face(fb))
+                    continue;
+
+                int score = 0;
+                if (fi_a == face_idx || fi_b == face_idx)
+                    score += 8;
+                if (face_idx_secondary_hint != kNoFaceHint &&
+                    (fi_a == face_idx_secondary_hint || fi_b == face_idx_secondary_hint))
+                    score += 4;
+                if (fa->source_pc != 0 && fb->source_pc != 0 && fa->source_pc == fb->source_pc)
+                    score += 2;
+
+                if (score > best_score)
+                {
+                    best_score = score;
+                    packet_edge_face_a = fa;
+                    packet_edge_face_b = fb;
+                    packet_edge_draw_idx[0] = a0;
+                    packet_edge_draw_idx[1] = a1;
+                    packet_edge_draw_idx[2] = b0;
+                    packet_edge_draw_idx[3] = b1;
+                    packet_edge_layout = cand.label;
+                }
             }
         }
     }
@@ -1784,56 +1809,113 @@ void Gpu3D::push_quad(
 
     if (paired_edge_packet_ok)
     {
-        edge_draw_idx[0] = packet_edge_draw_idx[0];
-        edge_draw_idx[1] = packet_edge_draw_idx[1];
-        edge_draw_idx[2] = packet_edge_draw_idx[2];
-        edge_draw_idx[3] = packet_edge_draw_idx[3];
-
-        const EdgeQuadCorner a0 = make_corner(packet_edge_face_a, 0);
-        const EdgeQuadCorner a1 = make_corner(packet_edge_face_a, 1);
-        const EdgeQuadCorner b0 = make_corner(packet_edge_face_b, 0);
-        const EdgeQuadCorner b1 = make_corner(packet_edge_face_b, 1);
-
-        EdgeQuadCorner pairing_direct[4] = {a0, a1, b0, b1};
-        EdgeQuadCorner pairing_swapped[4] = {a0, a1, b1, b0};
-
-        const double direct_span = dist2_2d(a0, b0) + dist2_2d(a1, b1);
-        const double swapped_span = dist2_2d(a0, b1) + dist2_2d(a1, b0);
-
-        const EdgeQuadCorner* chosen_pairing = pairing_direct;
-        if (swapped_span + 1e-6 < direct_span)
+        auto orient_edge_to_segment = [&](const gte::GteCacheFace* f,
+                                          int16_t sx0, int16_t sy0,
+                                          int16_t sx1, int16_t sy1,
+                                          EdgeQuadCorner& out0,
+                                          EdgeQuadCorner& out1)
         {
-            chosen_pairing = pairing_swapped;
-            edge_pairing = "packet_swapped";
-            edge_draw_idx[2] = 3;
-            edge_draw_idx[3] = 2;
-        }
-        else
-        {
-            edge_pairing = "packet_direct";
-        }
+            const bool forward =
+                f->sx[0] == sx0 && f->sy[0] == sy0 &&
+                f->sx[1] == sx1 && f->sy[1] == sy1;
+            const bool reverse =
+                f->sx[0] == sx1 && f->sy[0] == sy1 &&
+                f->sx[1] == sx0 && f->sy[1] == sy0;
+            if (reverse && !forward)
+            {
+                out0 = make_corner(f, 1);
+                out1 = make_corner(f, 0);
+            }
+            else
+            {
+                out0 = make_corner(f, 0);
+                out1 = make_corner(f, 1);
+            }
+        };
 
-        for (int i = 0; i < 4; ++i)
-            edge_quad[i] = chosen_pairing[i];
+        EdgeQuadCorner a0{};
+        EdgeQuadCorner a1{};
+        EdgeQuadCorner b0{};
+        EdgeQuadCorner b1{};
 
-        const double diag12_score = diag_score(edge_quad, false);
-        const double diag03_score = diag_score(edge_quad, true);
-        if (diag03_score > diag12_score)
+        if (rule_paired_edge)
         {
+            edge_pairing = "packet_fixed";
+            edge_diag = "03";
+            edge_draw_idx[0] = 0;
+            edge_draw_idx[1] = 1;
+            edge_draw_idx[2] = 2;
+            edge_draw_idx[3] = 3;
             edge_tri0[0] = 0; edge_tri0[1] = 1; edge_tri0[2] = 3;
             edge_tri1[0] = 0; edge_tri1[1] = 3; edge_tri1[2] = 2;
-            edge_diag = "03";
+
+            orient_edge_to_segment(packet_edge_face_a,
+                                   static_cast<int16_t>(x0), static_cast<int16_t>(y0),
+                                   static_cast<int16_t>(x1), static_cast<int16_t>(y1),
+                                   a0, a1);
+            orient_edge_to_segment(packet_edge_face_b,
+                                   static_cast<int16_t>(x2), static_cast<int16_t>(y2),
+                                   static_cast<int16_t>(x3), static_cast<int16_t>(y3),
+                                   b0, b1);
+
+            edge_quad[0] = a0;
+            edge_quad[1] = a1;
+            edge_quad[2] = b0;
+            edge_quad[3] = b1;
         }
         else
         {
-            edge_diag = "12";
+            edge_draw_idx[0] = packet_edge_draw_idx[0];
+            edge_draw_idx[1] = packet_edge_draw_idx[1];
+            edge_draw_idx[2] = packet_edge_draw_idx[2];
+            edge_draw_idx[3] = packet_edge_draw_idx[3];
+
+            a0 = make_corner(packet_edge_face_a, 0);
+            a1 = make_corner(packet_edge_face_a, 1);
+            b0 = make_corner(packet_edge_face_b, 0);
+            b1 = make_corner(packet_edge_face_b, 1);
+
+            EdgeQuadCorner pairing_direct[4] = {a0, a1, b0, b1};
+            EdgeQuadCorner pairing_swapped[4] = {a0, a1, b1, b0};
+
+            const double direct_span = dist2_2d(a0, b0) + dist2_2d(a1, b1);
+            const double swapped_span = dist2_2d(a0, b1) + dist2_2d(a1, b0);
+
+            const EdgeQuadCorner* chosen_pairing = pairing_direct;
+            if (swapped_span + 1e-6 < direct_span)
+            {
+                chosen_pairing = pairing_swapped;
+                edge_pairing = "packet_swapped";
+                edge_draw_idx[2] = 3;
+                edge_draw_idx[3] = 2;
+            }
+            else
+            {
+                edge_pairing = "packet_direct";
+            }
+
+            for (int i = 0; i < 4; ++i)
+                edge_quad[i] = chosen_pairing[i];
+
+            const double diag12_score = diag_score(edge_quad, false);
+            const double diag03_score = diag_score(edge_quad, true);
+            if (diag03_score > diag12_score)
+            {
+                edge_tri0[0] = 0; edge_tri0[1] = 1; edge_tri0[2] = 3;
+                edge_tri1[0] = 0; edge_tri1[1] = 3; edge_tri1[2] = 2;
+                edge_diag = "03";
+            }
+            else
+            {
+                edge_diag = "12";
+            }
         }
 
         static uint32_t paired_edge_diag_logs = 0;
         if (paired_edge_diag_logs < 96)
         {
             emu::logf(
-                emu::LogLevel::warn, "GPU3D_PAIRED_EDGE",
+                emu::LogLevel::debug, "GPU3D_PAIRED_EDGE",
                 "face=0x%X layout=%s pair=%s diag=%s "
                 "A=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
                 "B=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
@@ -1895,7 +1977,7 @@ void Gpu3D::push_quad(
         if (edge_strip_diag_logs < 96)
         {
             emu::logf(
-                emu::LogLevel::warn, "GPU3D_EDGE",
+                emu::LogLevel::debug, "GPU3D_EDGE",
                 "face=0x%X face_b_src=%s secondary_hint=0x%X pair=%s diag=%s "
                 "A=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
                 "B=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
@@ -2010,7 +2092,7 @@ void Gpu3D::push_quad(
         quad_partial_diag_logs < 64)
     {
         emu::logf(
-            emu::LogLevel::warn, "GPU3D_PARTIAL",
+            emu::LogLevel::debug, "GPU3D_PARTIAL",
             "face=0x%X secondary_hint=0x%X edge_strip=%d "
             "A=((%d,%d,%d),(%d,%d,%d),(%d,%d,%d)) "
             "screen=((%d,%d),(%d,%d),(%d,%d),(%d,%d))",
@@ -2200,7 +2282,7 @@ void Gpu3D::on_vblank()
     {
         const uint32_t cpu_pc = bus_ ? bus_->cpu_pc() : 0;
         const uint32_t vblank = bus_ ? bus_->vblank_count() : 0;
-        emu::logf(emu::LogLevel::warn, "GPU3D_VBLANK",
+        emu::logf(emu::LogLevel::debug, "GPU3D_VBLANK",
             "frame=%u vblank=%u pc=0x%08X words=%u cmds=%u vram_skips=%u tris=%zu 3d=%u 2d=%u state=%d quad_cache=%u quad_paired_edge=%u quad_edge=%u quad_facepair=%u quad_debug_vtx=%u quad_partial=%u tok_hint=%u tok_miss=%u tok_cached=%u v3_hint=%u vtx_hit=%u vtx_miss=%u miss_no_hint=%u miss_hint_stale=%u miss_decode_fail=%u",
             frame_count_, vblank, cpu_pc, gp0_words_accum_, gp0_cmds_accum_, gp0_vram_skips_accum_,
             dl.cmds_3d.size(), n3d, n2d, (int)gp0_state_,
@@ -2222,7 +2304,7 @@ void Gpu3D::on_vblank()
             const size_t topn = std::min<size_t>(items.size(), 4);
             for (size_t i = 0; i < topn; ++i)
             {
-                emu::logf(emu::LogLevel::warn, tag,
+                emu::logf(emu::LogLevel::debug, tag,
                     "frame=%u top[%zu] pc=0x%08X count=%u",
                     frame, i, items[i].first, items[i].second);
             }

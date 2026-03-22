@@ -96,7 +96,7 @@ public:
 
     virtual uint32 Run() override
     {
-        emu::logf(emu::LogLevel::warn, "CORE", "Worker Run() entered (delta-time loop v25)");
+        emu::logf(emu::LogLevel::warn, "CORE", "Worker Run() entered (delta-time loop v26 session_2026_03_22)");
 
         uint64 LocalTotalCycles = 0;
         uint64 LocalSteps = 0;
@@ -449,7 +449,6 @@ bool UR3000EmuComponent::BootBiosInternal()
     Opt.hle_vectors = bHleVectors ? 1 : 0;
     Opt.loop_detectors = bLoopDetectors ? 1 : 0;
     Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
-
     if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
     {
         UE_LOG(LogR3000Emu, Error, TEXT("Core init (BIOS) failed: %hs"), err[0] ? err : "unknown error");
@@ -606,7 +605,6 @@ void UR3000EmuComponent::InitEmulator()
         Opt.hle_vectors = 1; // Dev kit always uses HLE
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
-
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
             UE_LOG(LogR3000Emu, Error, TEXT("Core init (devkit) failed: %hs"), err[0] ? err : "unknown error");
@@ -652,7 +650,6 @@ void UR3000EmuComponent::InitEmulator()
         Opt.hle_vectors = 0; // fastboot will enable HLE vectors internally after loading EXE
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
-
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
             UE_LOG(LogR3000Emu, Error, TEXT("Core init (fastboot) failed: %hs"), err[0] ? err : "unknown error");
@@ -688,14 +685,32 @@ void UR3000EmuComponent::InitEmulator()
     // Optional disc insert (skip in dev kit mode — no CD needed).
     if (!bDevKitMode && !DiscPath.IsEmpty())
     {
+        emu::logf(
+            emu::LogLevel::warn,
+            "CORE",
+            "UE insert_disc begin path='%s' fastboot=%d hle_vectors=%d",
+            FTCHARToUTF8(*DiscPath).Get(),
+            bFastBoot ? 1 : 0,
+            bHleVectors ? 1 : 0);
         FTCHARToUTF8 DiscUtf8(*DiscPath);
         if (!Core_->insert_disc(DiscUtf8.Get(), err, sizeof(err)))
         {
             UE_LOG(LogR3000Emu, Error, TEXT("CD insert failed: %hs"), err[0] ? err : "unknown error");
+            emu::logf(
+                emu::LogLevel::error,
+                "CORE",
+                "UE insert_disc FAILED path='%s' err='%s'",
+                DiscUtf8.Get(),
+                err[0] ? err : "unknown error");
         }
         else
         {
             UE_LOG(LogR3000Emu, Log, TEXT("CD inserted."));
+            emu::logf(
+                emu::LogLevel::warn,
+                "CORE",
+                "UE insert_disc OK path='%s'",
+                DiscUtf8.Get());
         }
     }
     else if (!bDevKitMode)
@@ -1170,6 +1185,12 @@ int32 UR3000EmuComponent::GetProgramCounter() const
 {
     return Core_ ? (int32)Core_->pc() : 0;
 }
+
+FString UR3000EmuComponent::GetProgramCounterString() const
+{
+    return Core_ ? FString::Printf(TEXT("%08x"), (int32)Core_->pc()) : TEXT("error");
+}
+
 
 void UR3000EmuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {

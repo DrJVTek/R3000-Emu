@@ -186,6 +186,8 @@ class Gpu
 
     // VBlank generator (approximate; used to raise IRQ0/I_STAT.bit0).
     int tick_vblank(uint32_t cycles);
+    uint32_t current_scanline() const;
+    uint32_t total_scanlines() const;
 
     // Access for UE5 bridge
     const DrawEnv& draw_env() const { return draw_env_; }

@@ -39,6 +39,7 @@ set(CORE_SOURCES
   src/gte/gte.cpp
   src/gte/gte_3d.cpp
   src/loader/loader.cpp
+  src/mdec/mdec.cpp
   src/r3000/bus.cpp
   src/r3000/cpu.cpp
   src/r3000/cpu_provenance_analyzer.cpp

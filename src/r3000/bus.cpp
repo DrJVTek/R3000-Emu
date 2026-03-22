@@ -14,6 +14,7 @@
 #include "../gpu/gpu_3d.h"
 #include "../gte/gte_3d.h"
 #include "../log/emu_log.h"
+#include "../mdec/mdec.h"
 
 // ---- Global pad button state (avoids Hot Reload class-layout issues) ----
 static std::atomic<uint16_t> g_pad_buttons{0xFFFFu};
@@ -48,7 +49,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v26 (face_token_flow)");
+    emu::logf(emu::LogLevel::debug, "BUS", "BUS source v27 (session_2026_03_22)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -261,6 +262,7 @@ void Bus::timer_write_mode(int ch, uint16_t v)
     // Just reset the timer's IRQ contribution.
 
     timer_update_counting(ch);
+    timer_check_irq(ch, t.count);
 }
 
 void Bus::timer_update_counting(int ch)
@@ -310,12 +312,18 @@ void Bus::timer_check_irq(int ch, uint32_t old_count)
             irq_request = true;
         t.mode |= 0x0800u; // reached_target flag (bit 11)
 
-        if ((t.mode & 0x0008u) && t.target > 0) // reset_at_target
-            t.count %= t.target;
+        if (t.mode & 0x0008u) // reset_at_target
+        {
+            // The PS1 counter is effectively 16-bit with a target period of
+            // (target + 1), not "target". Using modulo target shortens the
+            // cycle by one tick and is especially wrong for target=0xFFFF.
+            const uint32_t period = (uint32_t)t.target + 1u;
+            t.count %= period;
+        }
     }
 
     // Check overflow
-    if (t.count >= 0xFFFFu)
+    if (t.count > 0xFFFFu)
     {
         if (t.mode & 0x0020u) // irq_on_overflow
             irq_request = true;
@@ -385,7 +393,7 @@ uint16_t Bus::sio0_read_data()
         if (btns != 0xFFFFu && rd_log < 50)
         {
             ++rd_log;
-            emu::logf(emu::LogLevel::warn, "BUS",
+            emu::logf(emu::LogLevel::debug, "BUS",
                 "SIO0 READ data=0x%02X phase=%u rxrdy=%u btns=0x%04X (#%u)",
                 v, phase, (sio0_rx_ready_ ? 1u : 0u), btns, rd_log);
         }
@@ -563,7 +571,7 @@ void Bus::sio0_do_transfer()
         if (btns != 0xFFFFu && prev_phase == 4u && sio0_pressed_log < 20)
         {
             ++sio0_pressed_log;
-            emu::logf(emu::LogLevel::warn, "BUS",
+            emu::logf(emu::LogLevel::debug, "BUS",
                 "SIO0 xfer COMPLETE: btns=0x%04X lo=0x%02X hi=0x%02X (#%u)",
                 btns, (unsigned)(btns & 0xFF), (unsigned)(btns >> 8), sio0_pressed_log);
         }
@@ -601,7 +609,7 @@ void Bus::sio0_write_data(uint8_t v)
     {
         static uint32_t overrun_log = 0;
         if (overrun_log++ < 5)
-            emu::logf(emu::LogLevel::warn, "BUS", "SIO0 TX FIFO overrun (v=0x%02X)", v);
+            emu::logf(emu::LogLevel::debug, "BUS", "SIO0 TX FIFO overrun (v=0x%02X)", v);
     }
 
     sio0_data_ = v;
@@ -885,6 +893,13 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         return true;
     }
 
+    // MDEC registers (0x1F801820 = data/response, 0x1F801824 = status)
+    if (mdec_ && (phys == 0x1F80'1820u || phys == 0x1F80'1824u))
+    {
+        out = mdec_->read_reg(phys);
+        return true;
+    }
+
     // CDROM (byte-access only, but handle 32-bit for completion)
     if (phys >= kCdromBase && phys < kCdromBase + kCdromSize)
     {
@@ -1025,7 +1040,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
                 if (imask_log < 3)
                 {
                     ++imask_log;
-                    emu::logf(emu::LogLevel::warn, "BUS", "I_MASK VBlank off (byte): 0x%04X -> 0x%04X (#%u)",
+                    emu::logf(emu::LogLevel::debug, "BUS", "I_MASK VBlank off (byte): 0x%04X -> 0x%04X (#%u)",
                         (unsigned)old_mask, (unsigned)i_mask_, imask_log);
                 }
             }
@@ -1137,6 +1152,18 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         {
             emu::logf(emu::LogLevel::info, "IRQ", "I_MASK word write: 0x%04X -> 0x%04X",
                 (unsigned)old_mask, (unsigned)i_mask_);
+            // Diagnostic: when re-enabled from 0, log which IRQ is stuck
+            if (old_mask == 0 && i_mask_ != 0)
+            {
+                static uint32_t diag16 = 0;
+                if (diag16 < 5)
+                {
+                    ++diag16;
+                    emu::logf(emu::LogLevel::warn, "IRQ",
+                        "DIAG16 I_MASK re-enable: 0x%04X I_STAT=0x%04X pending=0x%04X (#%u)",
+                        (unsigned)i_mask_, (unsigned)i_stat_, (unsigned)(i_stat_ & i_mask_), diag16);
+                }
+            }
             // CRITICAL: Log when VBlank (bit 0) is disabled - this causes VSync timeout!
             if ((old_mask & 0x01) && !(i_mask_ & 0x01))
             {
@@ -1145,7 +1172,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
                 if (imask_log2 < 3)
                 {
                     ++imask_log2;
-                    emu::logf(emu::LogLevel::warn, "BUS", "I_MASK VBlank off (word): 0x%04X -> 0x%04X (#%u)",
+                    emu::logf(emu::LogLevel::debug, "BUS", "I_MASK VBlank off (word): 0x%04X -> 0x%04X (#%u)",
                         (unsigned)old_mask, (unsigned)i_mask_, imask_log2);
                 }
             }
@@ -1213,9 +1240,18 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         {
             switch (reg)
             {
-            case 0: timers_[ch].count = (uint16_t)v; break;
+            case 0:
+            {
+                const uint32_t old_count = timers_[ch].count;
+                timers_[ch].count = (uint16_t)v;
+                timer_check_irq(ch, old_count);
+                break;
+            }
             case 1: timer_write_mode(ch, (uint16_t)v); break;
-            case 2: timers_[ch].target = (uint16_t)v; break;
+            case 2:
+                timers_[ch].target = (uint16_t)v;
+                timer_check_irq(ch, timers_[ch].count);
+                break;
             }
         }
         return true;
@@ -1297,6 +1333,18 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         {
             emu::logf(emu::LogLevel::info, "IRQ", "I_MASK hw write: 0x%04X -> 0x%04X",
                 (unsigned)old_mask, (unsigned)i_mask_);
+            // Diagnostic: when I_MASK is re-enabled from 0, log I_STAT to identify stuck IRQ
+            if (old_mask == 0 && i_mask_ != 0)
+            {
+                static uint32_t diag_log = 0;
+                if (diag_log < 5)
+                {
+                    ++diag_log;
+                    emu::logf(emu::LogLevel::warn, "IRQ",
+                        "DIAG I_MASK re-enable: 0x%04X I_STAT=0x%04X pending=0x%04X (#%u)",
+                        (unsigned)i_mask_, (unsigned)i_stat_, (unsigned)(i_stat_ & i_mask_), diag_log);
+                }
+            }
         }
         return true;
     }
@@ -1311,15 +1359,62 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         {
             switch (reg)
             {
-            case 0: dma_[ch].madr = v; break;
+            case 0:
+                dma_[ch].madr = v;
+                // Diagnostic: log DMA3 MADR=0 (kernel corruption risk)
+                if (ch == 3 && (v & 0x1FFFFFu) < 0x200u)
+                {
+                    emu::logf(emu::LogLevel::error, "BUS",
+                        "DMA3 MADR=0x%08X (kernel area!) PC=0x%08X",
+                        v, cpu_pc_);
+                }
+                break;
             case 1: dma_[ch].bcr = v; break;
             case 2:
                 dma_[ch].chcr = v;
                 // Handle DMA start
                 if (v & 0x01000000u)
                 {
+                    // MDEC: DMA0 (MDEC IN) and DMA1 (MDEC OUT)
+                    if ((ch == 0 || ch == 1) && mdec_)
+                    {
+                        const uint32_t bs = dma_[ch].bcr & 0xFFFF;
+                        const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
+                        const uint32_t words = bs * (bc ? bc : 1);
+                        uint32_t ma = dma_[ch].madr & 0x1FFFFF;
+
+                        if (ch == 0)
+                        {
+                            // DMA0: RAM → MDEC (compressed data in)
+                            std::vector<uint32_t> buf(words);
+                            for (uint32_t i = 0; i < words; ++i)
+                            {
+                                buf[i] = (uint32_t)ram_[ma] |
+                                         ((uint32_t)ram_[ma + 1] << 8) |
+                                         ((uint32_t)ram_[ma + 2] << 16) |
+                                         ((uint32_t)ram_[ma + 3] << 24);
+                                ma = (ma + 4) & 0x1FFFFF;
+                            }
+                            mdec_->dma_write(buf.data(), words);
+                        }
+                        else
+                        {
+                            // DMA1: MDEC → RAM (decoded pixels out)
+                            std::vector<uint32_t> buf(words);
+                            mdec_->dma_read(buf.data(), words);
+                            for (uint32_t i = 0; i < words; ++i)
+                            {
+                                ram_[ma]     = (uint8_t)(buf[i]);
+                                ram_[ma + 1] = (uint8_t)(buf[i] >> 8);
+                                ram_[ma + 2] = (uint8_t)(buf[i] >> 16);
+                                ram_[ma + 3] = (uint8_t)(buf[i] >> 24);
+                                ma = (ma + 4) & 0x1FFFFF;
+                            }
+                        }
+                        dma_finish(ch);
+                    }
                     // DMA2 (GPU)
-                    if (ch == 2 && gpu_)
+                    else if (ch == 2 && gpu_)
                     {
                         const int dir = (v >> 0) & 1;
                         const int mode = (v >> 9) & 3;
@@ -1519,13 +1614,26 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                     // DMA3 (CDROM → RAM)
                     if (ch == 3 && cdrom_)
                     {
-                        emu::logf(emu::LogLevel::info, "BUS", "DMA3 CD→RAM madr=0x%08X bcr=0x%08X words=%u",
-                            dma_[ch].madr, dma_[ch].bcr,
-                            (dma_[ch].bcr & 0xFFFF) * (((dma_[ch].bcr >> 16) & 0xFFFF) ? ((dma_[ch].bcr >> 16) & 0xFFFF) : 1));
                         const uint32_t bs = dma_[ch].bcr & 0xFFFF;
                         const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
                         const uint32_t words = bs * (bc ? bc : 1);
                         uint32_t ma = dma_[ch].madr & 0x1FFFFF;
+                        const uint32_t end_addr = (ma + words * 4) & 0x1FFFFF;
+
+                        emu::logf(emu::LogLevel::info, "BUS", "DMA3 CD→RAM madr=0x%08X bcr=0x%08X words=%u",
+                            dma_[ch].madr, dma_[ch].bcr, words);
+
+                        // Guard: skip DMA writing into kernel area (0x00-0x200)
+                        // On real PS1 this never happens — MADR=0 means a game-side
+                        // pointer wasn't initialised due to missing emulation elsewhere.
+                        if (ma < 0x200u)
+                        {
+                            emu::logf(emu::LogLevel::error, "BUS",
+                                "DMA3 BLOCKED: madr=0x%05X words=%u — would overwrite kernel vectors (PC=0x%08X)",
+                                ma, words, cpu_pc_);
+                            dma_finish(ch);
+                            break;
+                        }
 
                         for (uint32_t i = 0; i < words; ++i)
                         {
@@ -1555,6 +1663,17 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
 
                         emu::logf(emu::LogLevel::info, "BUS", "DMA6 OTC: madr=0x%08X bcr=0x%08X words=%u (OT tail at 0x%05X)",
                             dma_[ch].madr, dma_[ch].bcr, words, ma);
+
+                        // Guard: OTC walks backward — check if it reaches kernel area
+                        {
+                            uint32_t lowest = (words > 0) ? ((ma - (words - 1) * 4) & 0x1FFFFF) : ma;
+                            if (lowest < 0x200u)
+                            {
+                                emu::logf(emu::LogLevel::error, "BUS",
+                                    "DMA6 OTC KERNEL CORRUPT! madr=0x%05X words=%u lowest=0x%05X",
+                                    ma, words, lowest);
+                            }
+                        }
 
                         for (uint32_t i = 0; i < words; ++i)
                         {
@@ -1601,6 +1720,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         return true;
     }
 
+    // MDEC registers (write)
+    if (mdec_ && (phys == 0x1F80'1820u || phys == 0x1F80'1824u))
+    {
+        mdec_->write_reg(phys, v);
+        return true;
+    }
+
     // GPU
     if (phys == kGpuBase || phys == kGpuBase + 4)
     {
@@ -1627,9 +1753,18 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         {
             switch (reg)
             {
-            case 0: timers_[ch].count = (uint16_t)v; break;
+            case 0:
+            {
+                const uint32_t old_count = timers_[ch].count;
+                timers_[ch].count = (uint16_t)v;
+                timer_check_irq(ch, old_count);
+                break;
+            }
             case 1: timer_write_mode(ch, (uint16_t)v); break;
-            case 2: timers_[ch].target = (uint16_t)v; break;
+            case 2:
+                timers_[ch].target = (uint16_t)v;
+                timer_check_irq(ch, timers_[ch].count);
+                break;
             }
         }
         return true;
@@ -1830,7 +1965,23 @@ void Bus::check_cdrom_irq_edge()
 
 void Bus::tick(uint32_t cycles)
 {
-    static constexpr uint32_t kForceMaskAfterCycles = 600000u; // ~1 VBlank period worth of CPU cycles
+    // Must wait long enough for BIOS to install SysEnqIntRP chain handlers
+    // before enabling IRQs.  600k was FAR too early (fired before VBlank #1,
+    // causing infinite exception loop because no handler acknowledged I_STAT).
+    // 30 PAL frames ≈ 30*680688 ≈ 20M cycles — well past BIOS init.
+    static constexpr uint32_t kForceMaskAfterCycles = 30u * 680688u;
+    uint32_t gpu_scanline_delta = 0;
+    bool gpu_vblank_fired = false;
+
+    if (gpu_)
+    {
+        const uint32_t old_scanline = gpu_->current_scanline();
+        const uint32_t total_scanlines = gpu_->total_scanlines();
+        gpu_vblank_fired = gpu_->tick_vblank(cycles) != 0;
+        const uint32_t new_scanline = gpu_->current_scanline();
+        if (total_scanlines != 0u)
+            gpu_scanline_delta = (new_scanline + total_scanlines - old_scanline) % total_scanlines;
+    }
 
     // Tick timers (DuckStation-style: counting_enabled + proper IRQ logic)
     for (int ch = 0; ch < 3; ++ch)
@@ -1852,10 +2003,20 @@ void Bus::tick(uint32_t cycles)
             }
             else if (ch == 1)
             {
-                // HBlank: ~2150 CPU cycles per HBlank line
-                timer_prescale_accum_[1] += cycles;
-                inc = timer_prescale_accum_[1] / 2150;
-                timer_prescale_accum_[1] %= 2150;
+                // HBlank: phase-lock Timer 1 to the actual GPU scanline
+                // progression so TMR1 and GPUSTAT bit31 advance together.
+                if (gpu_)
+                {
+                    inc = gpu_scanline_delta;
+                }
+                else
+                {
+                    const uint32_t frame_cycles = 571088u;
+                    const uint32_t lines_per_frame = 263u;
+                    timer_prescale_accum_[1] += cycles * lines_per_frame;
+                    inc = timer_prescale_accum_[1] / frame_cycles;
+                    timer_prescale_accum_[1] %= frame_cycles;
+                }
             }
             else // ch == 2
             {
@@ -1937,11 +2098,9 @@ void Bus::tick(uint32_t cycles)
         }
     }
 
-    // Tick GPU VBlank
-    if (gpu_)
+    // Handle GPU VBlank edge latched at the start of this tick.
+    if (gpu_vblank_fired)
     {
-        if (gpu_->tick_vblank(cycles))
-        {
             i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
             ++vblank_total_count_;
 
@@ -1976,7 +2135,7 @@ void Bus::tick(uint32_t cycles)
                 {
                 const size_t n = (top.size() < 6) ? top.size() : 6;
                 emu::logf(
-                    emu::LogLevel::warn,
+                    emu::LogLevel::debug,
                     "DMA2_NOHINT",
                     "vblank=%u nohint_words=%u unique_pcs=%u",
                     vblank_total_count_,
@@ -1985,7 +2144,7 @@ void Bus::tick(uint32_t cycles)
                 for (size_t i = 0; i < n; ++i)
                 {
                     emu::logf(
-                        emu::LogLevel::warn,
+                        emu::LogLevel::debug,
                         "DMA2_NOHINT",
                         "  top[%u] pc=0x%08X words=%u",
                         (uint32_t)i,
@@ -2055,17 +2214,17 @@ void Bus::tick(uint32_t cycles)
                     }
 
                     // Log comprehensive state dump
-                    emu::logf(emu::LogLevel::warn, "BUS", "===== VSYNC STUCK DETECTED =====");
-                    emu::logf(emu::LogLevel::warn, "BUS", "VBlank #%u: stuck for %u VBlanks (no primitives)",
+                    emu::logf(emu::LogLevel::debug, "BUS", "===== VSYNC STUCK DETECTED =====");
+                    emu::logf(emu::LogLevel::debug, "BUS", "VBlank #%u: stuck for %u VBlanks (no primitives)",
                         vblank_total_count_, vblank_stuck_count_);
-                    emu::logf(emu::LogLevel::warn, "BUS", "Last real frame: VBlank #%u", vblank_last_frame_);
-                    emu::logf(emu::LogLevel::warn, "BUS", "I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X",
+                    emu::logf(emu::LogLevel::debug, "BUS", "Last real frame: VBlank #%u", vblank_last_frame_);
+                    emu::logf(emu::LogLevel::debug, "BUS", "I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X",
                         (unsigned)i_stat_, (unsigned)i_mask_, (unsigned)(i_stat_ & i_mask_));
-                    emu::logf(emu::LogLevel::warn, "BUS", "CPU PC=0x%08X", cpu_pc_);
-                    emu::logf(emu::LogLevel::warn, "BUS", "Event table ptr=0x%08X", evt_ptr);
-                    emu::logf(emu::LogLevel::warn, "BUS", "SysEnqIntRP chains: [0]=0x%08X [1]=0x%08X [2]=0x%08X [3]=0x%08X",
+                    emu::logf(emu::LogLevel::debug, "BUS", "CPU PC=0x%08X", cpu_pc_);
+                    emu::logf(emu::LogLevel::debug, "BUS", "Event table ptr=0x%08X", evt_ptr);
+                    emu::logf(emu::LogLevel::debug, "BUS", "SysEnqIntRP chains: [0]=0x%08X [1]=0x%08X [2]=0x%08X [3]=0x%08X",
                         chain_ptrs[0], chain_ptrs[1], chain_ptrs[2], chain_ptrs[3]);
-                    emu::logf(emu::LogLevel::warn, "BUS", "PCB=0x%08X TCB=0x%08X", pcb_ptr, tcb_ptr);
+                    emu::logf(emu::LogLevel::debug, "BUS", "PCB=0x%08X TCB=0x%08X", pcb_ptr, tcb_ptr);
 
                     // Scan event table for VSync-related events
                     if (evt_ptr != 0)
@@ -2078,7 +2237,7 @@ void Bus::tick(uint32_t cycles)
                         const uint32_t max_entries = (tbl_size > 0) ? (tbl_size / 0x1C) : 16;
                         const uint32_t base_phys = evt_ptr & (ram_size_ - 1);
 
-                        emu::logf(emu::LogLevel::warn, "BUS", "Event table size=%u max_entries=%u", tbl_size, max_entries);
+                        emu::logf(emu::LogLevel::debug, "BUS", "Event table size=%u max_entries=%u", tbl_size, max_entries);
 
                         int found_vsync = 0;
                         for (uint32_t i = 0; i < max_entries && i < 32; ++i)
@@ -2107,7 +2266,7 @@ void Bus::tick(uint32_t cycles)
                             const char* st_str = (status == 0x4000u) ? "READY" :
                                                  (status == 0x2000u) ? "BUSY" :
                                                  (status == 0x1000u) ? "ALLOCATED" : "???";
-                            emu::logf(emu::LogLevel::warn, "BUS", "  Event[%u]: cls=0x%08X spec=0x%04X status=0x%04X (%s)",
+                            emu::logf(emu::LogLevel::debug, "BUS", "  Event[%u]: cls=0x%08X spec=0x%04X status=0x%04X (%s)",
                                 i, cls, spec, status, st_str);
 
                             // Check for VSync-related classes
@@ -2116,10 +2275,10 @@ void Bus::tick(uint32_t cycles)
                         }
                         if (!found_vsync)
                         {
-                            emu::logf(emu::LogLevel::warn, "BUS", "  (No VSync events - game may use callbacks instead)");
+                            emu::logf(emu::LogLevel::debug, "BUS", "  (No VSync events - game may use callbacks instead)");
                         }
                     }
-                    emu::logf(emu::LogLevel::warn, "BUS", "===== END STUCK DUMP =====");
+                    emu::logf(emu::LogLevel::debug, "BUS", "===== END STUCK DUMP =====");
                 }
             }
 
@@ -2164,7 +2323,7 @@ void Bus::tick(uint32_t cycles)
                                                       ((uint32_t)ram_[spec_off + 2] << 16) |
                                                       ((uint32_t)ram_[spec_off + 3] << 24);
 
-                            emu::logf(emu::LogLevel::warn, "BUS",
+                            emu::logf(emu::LogLevel::debug, "BUS",
                                 "RESCUE: Event[%u] cls=0x%08X spec=0x%04X BUSY->READY",
                                 i, evt_class, evt_spec);
 
@@ -2201,7 +2360,6 @@ void Bus::tick(uint32_t cycles)
             {
                 vblank_no_mask_count_ = 0;
             }
-        }
     }
 
     // Tick CDROM

@@ -12,6 +12,7 @@
 // Explicit include to keep tooling in sync with Cpu API.
 #include "../r3000/cpu.h"
 #include "../log/emu_log.h"
+#include "../mdec/mdec.h"
 
 // Boot start time for milestone tracking
 static std::chrono::steady_clock::time_point g_boot_start;
@@ -61,7 +62,7 @@ static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nul
 Core::Core(rlog::Logger* logger) : logger_(logger), cdrom_(logger), gpu_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "CORE", "R3000-Emu core v6 (vsync_stuck_detect)");
+    emu::logf(emu::LogLevel::warn, "CORE", "R3000-Emu core v7 (session_2026_03_22)");
     psx3d_mode_mgr_.reset();
     provenance_profiler_.reset();
 }
@@ -131,6 +132,8 @@ static std::string psx3d_normalize_boot_game_id(const char* boot_name)
 Core::~Core()
 {
     try_save_psx3d_profile();
+    delete mdec_;
+    mdec_ = nullptr;
 }
 
 void Core::set_err(char* err, size_t err_cap, const char* msg) const
@@ -358,6 +361,12 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
 
     cpu_->set_loop_detectors(opt.loop_detectors ? 1 : 0);
     cpu_->set_bus_tick_batch(opt.bus_tick_batch);
+    // Create the real MDEC decoder once and keep it installed on the bus.
+    if (!mdec_)
+    {
+        mdec_ = new mdec::Mdec();
+        bus_->set_mdec(mdec_);
+    }
     cpu_->set_stop_on_high_ram(opt.stop_on_high_ram ? 1 : 0);
     cpu_->set_stop_on_bios_to_ram_nop(opt.stop_on_bios_to_ram_nop ? 1 : 0);
     cpu_->set_stop_on_ram_nop(opt.stop_on_ram_nop ? 1 : 0);
@@ -1417,4 +1426,3 @@ bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
 }
 
 } // namespace emu
-

@@ -315,6 +315,13 @@ struct AddrWatchCtx
     std::FILE*  log_file;
 };
 
+struct RangeWatchCtx
+{
+    uint32_t   phys_start;
+    uint32_t   phys_end;
+    std::FILE* log_file;
+};
+
 static void addr_watch_on_vblank(uint32_t vblank_count, void* user)
 {
     auto* ctx = static_cast<AddrWatchCtx*>(user);
@@ -341,6 +348,17 @@ static void addr_watch_on_write(uint32_t phys_addr, uint32_t value, uint32_t siz
     auto* ctx = static_cast<AddrWatchCtx*>(user);
     std::fprintf(ctx->log_file, "WRITE [0x%08X] = 0x%08X (size=%u)\n",
         phys_addr, value, size);
+    std::fflush(ctx->log_file);
+}
+
+static void range_watch_on_write(uint32_t phys_addr, uint32_t value, uint32_t size, void* user)
+{
+    auto* ctx = static_cast<RangeWatchCtx*>(user);
+    const uint32_t last = phys_addr + (size ? (size - 1u) : 0u);
+    if (last < ctx->phys_start || phys_addr > ctx->phys_end)
+        return;
+    std::fprintf(ctx->log_file, "WRITE [0x%08X..0x%08X] = 0x%08X (size=%u)\n",
+        phys_addr, last, value, size);
     std::fflush(ctx->log_file);
 }
 
@@ -750,6 +768,7 @@ static void print_usage(void)
         "  --stop-on-pc=ADDR     Stop when PC hits ADDR (hex ok)\n"
         "  --emu-log-level=LVL   Set emu log level (error|warn|info|debug|trace)\n"
         "  --watch-addr=ADDR     Watch RAM address (physical, hex ok) — log changes each VBlank\n"
+        "  --watch-range=S:E     Watch RAM write range (physical, hex ok) -> logs/watch_range.log\n"
         "  --watch-writes        Also log every write to watched address (verbose!)\n"
         "  --3d-diag             Log 3D reconstruction stats each VBlank to logs/3d_diag.log\n"
         "  --reg-trace=START:END[:WATCH]  Trace registers in PC range, optionally watch for value\n"
@@ -1206,6 +1225,8 @@ int main(int argc, char** argv)
     // --- Hook system: register watches ---
     AddrWatchCtx watch_ctx{};
     std::FILE* watch_log_f = nullptr;
+    RangeWatchCtx range_watch_ctx{};
+    std::FILE* range_watch_log_f = nullptr;
     const char* watch_addr_s = arg_value(argc, argv, "--watch-addr=");
     if (watch_addr_s && core.bus())
     {
@@ -1225,6 +1246,27 @@ int main(int argc, char** argv)
             {
                 core.hooks().add_write(addr_watch_on_write, &watch_ctx, watch_phys);
                 emu::logf(emu::LogLevel::info, "HOOK", "Write watch on phys 0x%08X", watch_phys);
+            }
+        }
+    }
+    const char* watch_range_s = arg_value(argc, argv, "--watch-range=");
+    if (watch_range_s && core.bus())
+    {
+        char* endp = nullptr;
+        const uint32_t start = (uint32_t)std::strtoul(watch_range_s, &endp, 0);
+        if (endp && *endp == ':')
+        {
+            const uint32_t end = (uint32_t)std::strtoul(endp + 1, nullptr, 0);
+            range_watch_log_f = std::fopen("logs/watch_range.log", "wb");
+            if (range_watch_log_f)
+            {
+                range_watch_ctx.phys_start = start;
+                range_watch_ctx.phys_end = end;
+                range_watch_ctx.log_file = range_watch_log_f;
+                core.hooks().add_write(range_watch_on_write, &range_watch_ctx, 0);
+                emu::logf(emu::LogLevel::info, "HOOK",
+                    "Write range watch on phys 0x%08X..0x%08X -> logs/watch_range.log",
+                    start, end);
             }
         }
     }
@@ -1293,6 +1335,8 @@ int main(int argc, char** argv)
             std::fclose(diag3d_log_f);
         if (watch_log_f)
             std::fclose(watch_log_f);
+        if (range_watch_log_f)
+            std::fclose(range_watch_log_f);
         if (outtext)
             std::fclose(outtext);
         if (cdlog_f)
@@ -1410,6 +1454,8 @@ int main(int argc, char** argv)
 
     if (watch_log_f)
         std::fclose(watch_log_f);
+    if (range_watch_log_f)
+        std::fclose(range_watch_log_f);
     if (outtext)
         std::fclose(outtext);
     if (cdlog_f)

@@ -390,6 +390,7 @@ class Cpu
     int stopped_on_pc_{0};
     uint32_t stop_pc_{0};
     int trace_io_{0};
+    uint32_t trace_io_critical_count_{0};
     int hle_vectors_{0};
     std::FILE* text_out_{nullptr};
     PutcharCallback putchar_cb_{nullptr};

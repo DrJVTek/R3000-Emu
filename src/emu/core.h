@@ -13,6 +13,7 @@
 #include "../gpu/gpu_3d.h"
 #include "../gte/gte_3d.h"
 #include "../loader/loader.h"
+#include "../mdec/mdec.h"
 #include "../log/filelog.h"
 #include "../log/logger.h"
 #include "../r3000/bus.h"
@@ -181,6 +182,7 @@ class Core
 
     std::unique_ptr<r3000::Bus> bus_{};
     std::unique_ptr<r3000::Cpu> cpu_{};
+    mdec::Mdec* mdec_{nullptr}; // MDEC decoder (owned, created in init)
 
     std::FILE* compare_file_{nullptr};
 

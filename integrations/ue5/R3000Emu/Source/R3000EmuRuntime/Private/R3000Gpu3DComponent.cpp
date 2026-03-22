@@ -470,12 +470,14 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
                 }
 
                 // GTE camera-space → UE5 coordinate mapping:
-                //   GTE: X=right, Y=down, Z=into screen
-                //   UE5: X=forward, Y=right, Z=up
+                //   For Ridge Racer flag quads, X/Z span the cloth surface while Y
+                //   carries the wave displacement. Map the surface to UE's YZ plane,
+                //   keep the wave on UE X, then rotate 180 deg around UE Z so the
+                //   flag faces the correct direction.
                 TriPos[j] = FVector(
-                    cz * WorldScale,    // GTE Z (depth) → UE X (forward)
-                    cx * WorldScale,    // GTE X (right) → UE Y (right)
-                   -cy * WorldScale     // GTE Y (down)  → UE -Z (up)
+                    cy * WorldScale,    // GTE Y (wave/displacement) → UE X
+                   -cx * WorldScale,    // GTE X (horizontal span)   → UE Y
+                    cz * WorldScale     // GTE Z (vertical span)     → UE Z
                 );
             }
             else
@@ -486,12 +488,12 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
                 // This avoids the offset mismatch problem where the frame-level draw_env
                 // doesn't match the per-primitive draw state.
                 //
-                // Depth from OT Z: each primitive carries its actual OT depth level
-                // from the DMA2 linked-list traversal. ot_z=0 = farthest (back of OT),
-                // ot_z=max = nearest (front/HUD). Primitives at the same OT level
-                // share the same depth — this is the real PS1 Z-ordering.
-                const float DepthT = static_cast<float>(Cmd3D.ot_z) / static_cast<float>(MaxOtZ);
-                const float Depth2D = FMath::Lerp(EffDepthBack, EffDepthFront, DepthT);
+                // OT traversal order is renderer-facing, not semantic "near/far". In practice
+                // we want later OT layers to sit visually in front in UE, so invert the
+                // normalized index before mapping it to UE depth.
+                const float DepthT = 1.0f - (static_cast<float>(Cmd3D.ot_z) / static_cast<float>(MaxOtZ));
+                // Keep the PS1 OT ordering intact, then shift the whole 2D stack in UE space.
+                const float Depth2D = FMath::Lerp(EffDepthBack, EffDepthFront, DepthT) + Depth2DBias;
 
                 const float sx = static_cast<float>(V.x);
                 const float sy = static_cast<float>(V.y);
@@ -511,13 +513,13 @@ void UR3000Gpu3DComponent::RebuildMesh3D()
         if (bHas3D && (Cmd3D.nx[0] != 0 || Cmd3D.ny[0] != 0 || Cmd3D.nz[0] != 0))
         {
             // Use per-vertex normals from GTE (NCS/NCT/NCDS/NCDT).
-            // Same coordinate remap as positions: GTE(X,Y,Z) → UE(Z,X,-Y).
+            // Same coordinate remap as positions.
             for (int32 j = 0; j < 3; ++j)
             {
                 VertNormals[j] = FVector(
-                    static_cast<float>(Cmd3D.nz[j]),   // GTE Z → UE X
-                    static_cast<float>(Cmd3D.nx[j]),    // GTE X → UE Y
-                   -static_cast<float>(Cmd3D.ny[j])     // GTE Y → UE -Z
+                    static_cast<float>(Cmd3D.ny[j]),    // GTE Y → UE X
+                   -static_cast<float>(Cmd3D.nx[j]),    // GTE X → UE Y
+                    static_cast<float>(Cmd3D.nz[j])     // GTE Z → UE Z
                 ).GetSafeNormal();
             }
         }
