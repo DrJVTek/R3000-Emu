@@ -2006,3 +2006,26 @@ It now progresses into later BIOS parsing and then crashes deterministically:
 - Focus on the exact LBA/sector ordering that populates the BIOS scratch region around:
   - `0xA000B070..0xA000B88F`
 - The next useful correction is in CD state/sequencing after `Pause`, not in raw DMA plumbing.
+
+## 2026-03-22 timing/thread review
+
+- Important architectural conclusion:
+  - the real divergence is not "UE5 uses a thread"
+  - the real divergence is that UE5 threaded mode was still allowed to run with a different hardware batching policy than CLI
+- Concrete source point:
+  - `Cpu::step()` accumulates cycles and only calls `bus_.tick(...)` once `bus_tick_batch_` is reached
+  - this makes CD/IRQ ordering dependent on how cycles are grouped
+- UE5 runtime previously allowed:
+  - `bThreadedMode=true`
+  - `BusTickBatch=32`
+- CLI default remains:
+  - `bus_tick_batch=1`
+- That means UE5 and CLI could consume the same total cycles but still resolve async CD state transitions in a different order.
+
+### Fix applied
+
+- In UE5 threaded mode, `bus_tick_batch` is now forced to `1`.
+- `BusTickBatch` remains configurable only for legacy/non-threaded mode.
+- Reason:
+  - while the deeper CD refactor is still pending, UE5 must stop using a coarser hardware cadence than CLI
+  - this removes the most obvious host-dependent timing delta first

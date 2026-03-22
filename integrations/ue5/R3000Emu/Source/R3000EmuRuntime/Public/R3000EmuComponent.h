@@ -184,11 +184,11 @@ class UR3000EmuComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     bool bHleVectors{false};
 
-    // Bus tick batching: tick hardware every N cycles instead of every cycle.
-    // 1 = cycle-accurate but slow (~34M tick calls/sec), 32 = fast (~1M tick calls/sec).
-    // 32 is recommended: accurate enough for games, 100%+ speed on modern CPUs.
+    // Bus tick batching for legacy/non-threaded mode.
+    // In threaded mode we force bus_tick_batch=1 to keep hardware ordering as
+    // close as possible to CLI and avoid host-dependent CD/IRQ divergence.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "1", ClampMax = "128"))
-    int32 BusTickBatch{32};
+    int32 BusTickBatch{1};
 
     // Cycle multiplier: cycles counted per CPU instruction.
     // Real R3000A averages ~2-3 CPI. With CycleMultiplier=1, each instruction =
@@ -198,11 +198,10 @@ class UR3000EmuComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "1", ClampMax = "10"))
     int32 CycleMultiplier{2};
 
-    // THREADED MODE (Recommended): Run emulation on a dedicated worker thread.
-    // This uses Windows waitable timers for precise PS1 timing (33.8688 MHz).
-    // Main UE5 thread only reads GPU state for rendering.
-    // This allows BusTickBatch=1 (cycle-accurate) without frame drops.
-    // When OFF, emulation runs in TickComponent (legacy mode).
+    // THREADED MODE (Recommended): run emulation on a dedicated worker thread.
+    // Main UE5 thread only consumes snapshots / audio / logs.
+    // In this mode we intentionally force bus_tick_batch=1 so hardware timing
+    // matches CLI as closely as possible.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu")
     bool bThreadedMode{true};
 

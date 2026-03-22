@@ -43,6 +43,11 @@ static constexpr double kPS1CpuClock = 33868800.0;
 static constexpr uint32 kCyclesPerSample = 768;
 static constexpr uint32 kSampleRate = 44100;
 
+static uint32 EffectiveBusTickBatch(bool bThreadedMode, int32 RequestedBusTickBatch)
+{
+    return bThreadedMode ? 1u : static_cast<uint32>(FMath::Clamp(RequestedBusTickBatch, 1, 128));
+}
+
 //=============================================================================
 // FR3000EmuWorker: Worker thread for emulation with precise timing
 //=============================================================================
@@ -448,7 +453,7 @@ bool UR3000EmuComponent::BootBiosInternal()
     // User can toggle via bHleVectors property in Blueprint.
     Opt.hle_vectors = bHleVectors ? 1 : 0;
     Opt.loop_detectors = bLoopDetectors ? 1 : 0;
-    Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
+    Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
     if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
     {
         UE_LOG(LogR3000Emu, Error, TEXT("Core init (BIOS) failed: %hs"), err[0] ? err : "unknown error");
@@ -460,8 +465,8 @@ bool UR3000EmuComponent::BootBiosInternal()
     Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
 
     UE_LOG(LogR3000Emu, Log, TEXT("BIOS boot initialized. PC=0x%08X CycleMult=%d Timing=WallClock"), Core_->pc(), CycleMultiplier);
-    emu::logf(emu::LogLevel::info, "CORE", "UE BIOS init OK pc=0x%08X hle_vectors=%d bus_tick_batch=%u cycle_mult=%u timing=wallclock",
-        (unsigned)Core_->pc(), Opt.hle_vectors, (unsigned)Opt.bus_tick_batch, (unsigned)CycleMultiplier);
+    emu::logf(emu::LogLevel::info, "CORE", "UE BIOS init OK pc=0x%08X hle_vectors=%d bus_tick_batch=%u cycle_mult=%u threaded=%d timing=wallclock",
+        (unsigned)Core_->pc(), Opt.hle_vectors, (unsigned)Opt.bus_tick_batch, (unsigned)CycleMultiplier, bThreadedMode ? 1 : 0);
     StepsExecuted_.Store(0);
     TotalCyclesExecuted_.Store(0);
     LastAudioSamplesConsumed_.Store(0);
@@ -604,7 +609,7 @@ void UR3000EmuComponent::InitEmulator()
         Opt.trace_io = bTraceIO ? 1 : 0;
         Opt.hle_vectors = 1; // Dev kit always uses HLE
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
-        Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
+        Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
             UE_LOG(LogR3000Emu, Error, TEXT("Core init (devkit) failed: %hs"), err[0] ? err : "unknown error");
@@ -649,7 +654,7 @@ void UR3000EmuComponent::InitEmulator()
         Opt.trace_io = bTraceIO ? 1 : 0;
         Opt.hle_vectors = 0; // fastboot will enable HLE vectors internally after loading EXE
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
-        Opt.bus_tick_batch = static_cast<uint32>(FMath::Clamp(BusTickBatch, 1, 128));
+        Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
             UE_LOG(LogR3000Emu, Error, TEXT("Core init (fastboot) failed: %hs"), err[0] ? err : "unknown error");
