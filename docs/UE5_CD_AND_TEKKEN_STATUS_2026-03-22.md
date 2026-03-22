@@ -9,10 +9,8 @@ Scope: UE5 live, Tekken (Europe), non-HLE, BIOS réel
   - commit `8a4b571`
 - Current debug checkpoint pushed:
   - branch `checkpoint/2026-03-22-tekken-dma3-callback-order`
-  - commit `4962887`
 - Current clean work branch pushed:
   - branch `work/2026-03-22-tekken-dma3-repro-next`
-  - commit `c816d9c`
 
 ## Goal
 - Separate the older Tekken gameplay/loading issue from the newer CD boot regression.
