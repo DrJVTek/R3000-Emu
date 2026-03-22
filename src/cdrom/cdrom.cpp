@@ -2561,10 +2561,14 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     pending_irq_type_ = 0x01; // INT1 (next sector ready)
                     pending_irq_resp_ = status_;
                     pending_irq_reason_ = 0xFFu; // marker: advance sector on delivery
-                    // FAST CD TIMING: Reduced by 10x for wall-clock mode
-                    // Original: single=~220000 cycles (~6.7ms), double=~110000 cycles (~3.3ms)
-                    // Fast: single=~22000 cycles (~0.65ms), double=~11000 cycles (~0.33ms)
-                    pending_irq_delay_ = (mode_ & 0x80u) ? 11000u : 22000u;
+                    // Continuous sector delivery should follow the physical CD cadence.
+                    // PS1 CD sectors arrive at ~75 Hz single-speed, ~150 Hz double-speed.
+                    // At 33,868,800 CPU cycles/s this is:
+                    // - single-speed: 33,868,800 / 75  = 451,584 cycles/sector
+                    // - double-speed: 33,868,800 / 150 = 225,792 cycles/sector
+                    // Using a much smaller delay causes the game-side ready callback
+                    // to run ahead of its EXE init path and eventually DMA from MADR=0.
+                    pending_irq_delay_ = (mode_ & 0x80u) ? 225792u : 451584u;
                     emu::logf(emu::LogLevel::debug, "CD",
                         "ReadN continuous: queued next INT1, current LBA=%u delay=%u", loc_lba_, pending_irq_delay_);
                 }

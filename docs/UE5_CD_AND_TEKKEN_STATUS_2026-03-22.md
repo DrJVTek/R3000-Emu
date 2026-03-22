@@ -75,10 +75,19 @@ Scope: UE5 live, Tekken (Europe), non-HLE, BIOS réel
   - the remaining suspect is the CD continuous-read scheduling that feeds DMA3
   - not generic DMA itself
   - and not the earlier reverted `Pause` patch
- - Latest UE5 log review adds one more concrete issue:
-   - the CD command flow itself is still progressing
-   - but the run is heavily slowed by high-volume CD polling logs during active reads
-   - this pollutes the timing signal while diagnosing the Sony/logo regression
+- Latest UE5 log review adds one more concrete issue:
+  - the CD command flow itself is still progressing
+  - but the run is heavily slowed by high-volume CD polling logs during active reads
+  - this pollutes the timing signal while diagnosing the Sony/logo regression
+ - Latest DMA3 log review adds a stronger timing hypothesis:
+   - after restoring continuous `ReadN`, the code was still using `10x fast` per-sector delivery
+   - current logs show `ReadN advance -> LBA=...` bursts every few milliseconds
+   - this can plausibly generate an extra sector-ready/DMA cycle before the game-side `Pause`/buffer accounting catches up
+ - This is a generic CD timing issue, not a Tekken-only special case.
+ - Additional observed side effect:
+   - changing only the continuous sector timing also changes the visible BIOS/license behavior
+   - user reported that PlayStation license text appears again in a way it did not before
+   - therefore this timing path clearly participates in the Sony -> PlayStation transition and must be preserved in the debug history
 
 ## Active Current Suspect
 - One functional delta versus the older better baseline was:
@@ -119,4 +128,37 @@ Scope: UE5 live, Tekken (Europe), non-HLE, BIOS réel
     - later `Now Loading` stall
 - Current immediate test:
   - verify whether restoring the removed `ReadN continuous` requeue block plus reducing CD polling log spam is enough to recover that baseline
+  - then verify whether the previously documented compromise timing (`56000/112000`) removes the extra `DMA3 MADR=0` path before `Now Loading`
 - Only after the older baseline is back should the later Tekken loading issue be debugged further.
+## Current proven point
+
+- Important correction:
+  - the EXE callback globals sit at `0x801CB324/33C/334`
+  - not `0x801DB324/33C/334`
+- The current Tekken crash is not caused by the last valid CD DMA prep block.
+- Proven by `TEKK_CDPREP_HIST`:
+  - `0x8016A6DC` calls `FUN_8016AAE0` with valid destination `0x8011DAA0`
+  - `0x8016A700` advances `dst_cur` to `0x8011E2A0`
+  - `0x8016A710` sets CD `remain=0`
+- The failing null DMA happens later in callback `0x8015D428`:
+  - it reads `EXE_DST_PTR` from `0x801CB33C`
+  - that pointer is still `0`
+  - it then calls into the DMA wrapper with `a0=0`
+- Therefore the immediate issue to debug is:
+  - why `EXE_DST_PTR` is still zero when callback `0x8015D428` first runs
+  - or why that callback runs before the expected init path
+
+### Current timing correction under test
+
+- `cdrom.cpp` `ReadN continuous` delay moved from the old fast compromise to physical cadence:
+  - double-speed (`mode & 0x80`): `225,792` cycles/sector
+  - single-speed: `451,584` cycles/sector
+- Reason:
+  - `cdrom.log` showed very fast `ReadN advance` bursts
+  - `TEKK_EXEINIT` never ran before `0x8015D428`
+  - `EXE_DST_PTR` was still `0` when the ready callback fired
+- Important follow-up from UE5 live testing:
+  - this timing change is not safe yet as a default
+  - it regresses the game flow earlier, after the PlayStation license screen
+  - in that regressed run, the later `DMA3 MADR=0` path no longer reproduces
+  - this means the physical cadence is a valuable signal, but not yet a shippable baseline

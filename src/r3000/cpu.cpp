@@ -1,5 +1,6 @@
 #include "cpu.h"
 
+#include <array>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -3384,6 +3385,10 @@ Cpu::StepResult Cpu::step()
             case 0x001CA690u: field = "CD_DST_PARAM"; break;
             case 0x001CA694u: field = "CD_DST_CUR"; break;
             case 0x001CA69Cu: field = "CD_CHUNK_WORDS"; break;
+            case 0x001CB324u: field = "EXE_STAGE_FLAG"; break;
+            case 0x001CB33Cu: field = "EXE_DST_PTR"; break;
+            case 0x001CB334u: field = "EXE_REMAIN_SECTORS"; break;
+            case 0x001EF68Cu: field = "CALLBACK_PTR"; break;
             default: break;
         }
         if (!field)
@@ -3391,7 +3396,8 @@ Cpu::StepResult Cpu::step()
 
         static uint32_t log_count = 0;
         const bool suspicious =
-            ((phys == 0x001CB404u || phys == 0x001CB40Cu || phys == 0x001CA690u || phys == 0x001CA694u) &&
+            ((phys == 0x001CB404u || phys == 0x001CB40Cu || phys == 0x001CA690u || phys == 0x001CA694u ||
+              phys == 0x001CB33Cu || phys == 0x001EF68Cu) &&
              value == 0u);
         const bool should_log = suspicious || (log_count < 128u);
         if (!should_log)
@@ -3427,6 +3433,57 @@ Cpu::StepResult Cpu::step()
                     recent_pc_[pos],
                     recent_instr_[pos]);
             }
+        }
+    };
+    struct TekkCdPrepSample
+    {
+        bool valid = false;
+        uint32_t pc = 0;
+        uint32_t instr = 0;
+        uint32_t v0 = 0;
+        uint32_t v1 = 0;
+        uint32_t a0 = 0;
+        uint32_t a1 = 0;
+        uint32_t a2 = 0;
+        uint32_t a3 = 0;
+        uint32_t s0 = 0;
+        uint32_t s1 = 0;
+        uint32_t sp = 0;
+        uint32_t dst_param = 0;
+        uint32_t dst_cur = 0;
+        uint32_t remain = 0;
+        uint32_t chunk = 0;
+    };
+    static std::array<TekkCdPrepSample, 16> tekk_cdprep_ring{};
+    static uint32_t tekk_cdprep_ring_pos = 0;
+    auto dump_tekk_cdprep_ring = [&](const char* reason)
+    {
+        emu::logf(emu::LogLevel::warn, "TEKK_CDPREP_HIST", "reason=%s", reason ? reason : "?");
+        for (uint32_t i = 0; i < tekk_cdprep_ring.size(); ++i)
+        {
+            const uint32_t pos = (tekk_cdprep_ring_pos + i) & 15u;
+            const TekkCdPrepSample& s = tekk_cdprep_ring[pos];
+            if (!s.valid)
+                continue;
+            emu::logf(
+                emu::LogLevel::warn,
+                "TEKK_CDPREP_HIST",
+                "pc=0x%08X instr=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
+                s.pc,
+                s.instr,
+                s.v0,
+                s.v1,
+                s.a0,
+                s.a1,
+                s.a2,
+                s.a3,
+                s.s0,
+                s.s1,
+                s.sp,
+                s.dst_param,
+                s.dst_cur,
+                s.remain,
+                s.chunk);
         }
     };
     auto trace_tekk_dma3_call = [&](const char* op, uint32_t pc, uint32_t target)
@@ -3477,6 +3534,8 @@ Cpu::StepResult Cpu::step()
                 dst_cur,
                 remain,
                 chunk);
+            if (gpr_[4] == 0u)
+                dump_tekk_cdprep_ring("call_FUN_8016AAE0_a0_zero");
         }
     };
     auto decode_face_token_from_tagged_sxy = [&](uint32_t sxy) -> uint32_t
@@ -5391,6 +5450,8 @@ Cpu::StepResult Cpu::step()
                 wb2_old,
                 wb2_new);
         }
+        if (r.pc == 0x8016AB78u && gpr_[17] == 0u)
+            dump_tekk_cdprep_ring("write_DMA3_MADR_zero");
     }
 
     // Tekken higher-level CD pipeline trace:
@@ -5434,19 +5495,134 @@ Cpu::StepResult Cpu::step()
         }
     }
 
-    // Tekken targeted trace: caller block that prepares CD DMA destination/count.
-    if (r.pc >= 0x8016A6C0u && r.pc <= 0x8016A714u)
+    if (r.pc >= 0x8015D388u && r.pc <= 0x8015D4A8u)
     {
-        static uint32_t tekk_cdprep_logs = 0;
-        if (tekk_cdprep_logs < 256u)
+        static uint32_t tekk_cb_logs = 0;
+        if (tekk_cb_logs < 256u)
         {
-            ++tekk_cdprep_logs;
+            ++tekk_cb_logs;
             Bus::MemFault mf{};
-            uint32_t dst_param = 0, dst_cur = 0, remain = 0, chunk = 0;
+            uint32_t dst_param = 0, dst_cur = 0, remain = 0, chunk = 0, cb = 0;
+            uint32_t exe_stage = 0, exe_dst_ptr = 0, exe_remain = 0;
             (void)bus_.read_u32(0x001CA690u, dst_param, mf);
             (void)bus_.read_u32(0x001CA694u, dst_cur, mf);
             (void)bus_.read_u32(0x001CA6A0u, remain, mf);
             (void)bus_.read_u32(0x001CA69Cu, chunk, mf);
+            (void)bus_.read_u32(0x001EF68Cu, cb, mf);
+            (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
+            (void)bus_.read_u32(0x001CB33Cu, exe_dst_ptr, mf);
+            (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+            emu::logf(
+                emu::LogLevel::warn,
+                "TEKK_CB",
+                "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X cb=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
+                r.pc,
+                instr,
+                gpr_[4],
+                gpr_[5],
+                gpr_[6],
+                gpr_[7],
+                gpr_[2],
+                gpr_[3],
+                gpr_[16],
+                gpr_[17],
+                gpr_[29],
+                cb,
+                dst_param,
+                dst_cur,
+                remain,
+                chunk,
+                exe_stage,
+                exe_dst_ptr,
+                exe_remain);
+
+            if (r.pc >= 0x8015D42Cu && r.pc <= 0x8015D43Cu && exe_dst_ptr == 0u)
+            {
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "TEKK_CB_ZERO",
+                    "pc=0x%08X instr=0x%08X callback=0x%08X using zero EXE_DST_PTR exe_stage=0x%08X exe_remain=0x%08X a0=0x%08X",
+                    r.pc,
+                    instr,
+                    cb,
+                    exe_stage,
+                    exe_remain,
+                    gpr_[4]);
+            }
+        }
+    }
+
+    if (r.pc >= 0x8015D3D8u && r.pc <= 0x8015D41Cu)
+    {
+        static uint32_t tekk_exeinit_logs = 0;
+        if (tekk_exeinit_logs < 128u)
+        {
+            ++tekk_exeinit_logs;
+            Bus::MemFault mf{};
+            uint32_t exe_stage = 0, exe_dst_ptr = 0, exe_remain = 0, cb = 0;
+            uint32_t sync_state = 0, ready_state = 0;
+            (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
+            (void)bus_.read_u32(0x001CB33Cu, exe_dst_ptr, mf);
+            (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+            (void)bus_.read_u32(0x001EF68Cu, cb, mf);
+            (void)bus_.read_u32(0x001CA680u, sync_state, mf);
+            (void)bus_.read_u32(0x001CA684u, ready_state, mf);
+            emu::logf(
+                emu::LogLevel::warn,
+                "TEKK_EXEINIT",
+                "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X cb=0x%08X sync=0x%08X ready=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
+                r.pc,
+                instr,
+                gpr_[4],
+                gpr_[5],
+                gpr_[6],
+                gpr_[7],
+                gpr_[2],
+                gpr_[3],
+                cb,
+                sync_state,
+                ready_state,
+                exe_stage,
+                exe_dst_ptr,
+                exe_remain);
+        }
+    }
+
+    // Tekken targeted trace: caller block that prepares CD DMA destination/count.
+    if (r.pc >= 0x8016A6C0u && r.pc <= 0x8016A714u)
+    {
+        static uint32_t tekk_cdprep_logs = 0;
+        Bus::MemFault mf{};
+        uint32_t dst_param = 0, dst_cur = 0, remain = 0, chunk = 0;
+        (void)bus_.read_u32(0x001CA690u, dst_param, mf);
+        (void)bus_.read_u32(0x001CA694u, dst_cur, mf);
+        (void)bus_.read_u32(0x001CA6A0u, remain, mf);
+        (void)bus_.read_u32(0x001CA69Cu, chunk, mf);
+
+        TekkCdPrepSample& sample = tekk_cdprep_ring[tekk_cdprep_ring_pos & 15u];
+        sample.valid = true;
+        sample.pc = r.pc;
+        sample.instr = instr;
+        sample.v0 = gpr_[2];
+        sample.v1 = gpr_[3];
+        sample.a0 = gpr_[4];
+        sample.a1 = gpr_[5];
+        sample.a2 = gpr_[6];
+        sample.a3 = gpr_[7];
+        sample.s0 = gpr_[16];
+        sample.s1 = gpr_[17];
+        sample.sp = gpr_[29];
+        sample.dst_param = dst_param;
+        sample.dst_cur = dst_cur;
+        sample.remain = remain;
+        sample.chunk = chunk;
+        ++tekk_cdprep_ring_pos;
+
+        const bool interesting = (remain == 0u || dst_cur == 0u || gpr_[4] == 0u || r.pc == 0x8016A6D0u ||
+                                  r.pc == 0x8016A6D8u || r.pc == 0x8016A6F0u || r.pc == 0x8016A700u);
+        if (interesting && tekk_cdprep_logs < 256u)
+        {
+            ++tekk_cdprep_logs;
             emu::logf(
                 emu::LogLevel::warn,
                 "TEKK_CDPREP",
