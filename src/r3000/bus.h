@@ -286,6 +286,7 @@ class Bus
     void sio0_begin_transfer(); // start a new transfer if possible
     void sio0_end_transfer();   // return to idle
     bool sio0_can_transfer() const; // check if conditions allow transfer
+    void log_irq_stat_cd_clear(uint32_t old_stat, uint32_t new_stat, const char* access_kind, uint32_t detail);
 
     // SIO0 state machine (DuckStation-style delayed transfers)
     // States: Idle → Transmitting (delayed) → WaitingForACK → Idle
@@ -371,6 +372,13 @@ class Bus
     uint32_t watch_ram_u32_last_{0};
     int watch_ram_u32_last_valid_{0};
     uint8_t watch_ram_u32_read_seen_{0};
+    uint32_t irq_pending_log_count_{0};
+    uint32_t irq_cd_clear_log_count_{0};
+    uint32_t bios_cd_mmio_log_count_{0};
+    uint32_t bios_cd_dma_dump_count_{0};
+    uint32_t bios_cd_ram_log_count_{0};
+    uint32_t bios_pvd_post_pc_trace_count_{0};
+    uint32_t bios_pvd_post_last_pc_{0xFFFFFFFFu};
 };
 
 } // namespace r3000

@@ -49,7 +49,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::debug, "BUS", "BUS source v27 (session_2026_03_22)");
+    emu::logf(emu::LogLevel::debug, "BUS", "BUS source v28 (session_2026_03_22)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -88,9 +88,9 @@ Bus::Bus(
             if (irq_state && !bus->cdrom_irq_prev_)
             {
                 bus->i_stat_ |= (1u << 2);  // CDROM IRQ = bit 2
-                emu::logf(emu::LogLevel::info, "BUS", "CDROM IRQ push: i_stat=0x%04X", (unsigned)bus->i_stat_);
-                // BIOS event system: mark CDROM class events as ready.
-                deliver_events_for_class(bus->ram_, bus->ram_size_, 0x28u);
+                emu::logf(emu::LogLevel::warn, "IRQ", "CDROM IRQ push: i_stat=0x%04X i_mask=0x%04X",
+                    (unsigned)bus->i_stat_, (unsigned)bus->i_mask_);
+                bus->cdrom_->debug_log_bus_irq_latched(bus->i_stat_, bus->i_mask_);
             }
             bus->cdrom_irq_prev_ = (uint8_t)irq_state;
         }, this);
@@ -637,6 +637,26 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
     if (phys < kRamWindow)
     {
         out = ram_[phys & (ram_size_ - 1)];
+        if (cpu_pc_ >= 0xBFC03000u && cpu_pc_ <= 0xBFC07000u &&
+            phys >= 0x0000B000u && phys < 0x0000B900u &&
+            bios_cd_ram_log_count_ < 256u)
+        {
+            ++bios_cd_ram_log_count_;
+            const unsigned v = (unsigned)out;
+            const char c = (v >= 0x20u && v <= 0x7Eu) ? (char)v : '.';
+            emu::logf(
+                emu::LogLevel::warn,
+                "CDRAM",
+                "BIOS RD8 pc=0x%08X addr=0x%08X phys=0x%05X -> 0x%02X '%c' i_stat=0x%04X i_mask=0x%04X (#%u)",
+                cpu_pc_,
+                addr,
+                phys & (ram_size_ - 1),
+                v,
+                c,
+                (unsigned)i_stat_,
+                (unsigned)i_mask_,
+                bios_cd_ram_log_count_);
+        }
         return true;
     }
 
@@ -658,6 +678,26 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
     if (phys >= kCdromBase && phys < kCdromBase + kCdromSize)
     {
         out = cdrom_ ? cdrom_->mmio_read8(phys) : 0;
+        if (cdrom_ &&
+            cpu_pc_ >= 0xBFC04A00u && cpu_pc_ <= 0xBFC05580u &&
+            bios_cd_mmio_log_count_ < 400)
+        {
+            ++bios_cd_mmio_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CDMMIO",
+                "BIOS RD pc=0x%08X addr=0x%08X off=%u -> 0x%02X idx=%u stat=0x%02X irqf=0x%02X irqe=0x%02X i_stat=0x%04X i_mask=0x%04X",
+                cpu_pc_,
+                phys,
+                (unsigned)(phys - kCdromBase),
+                (unsigned)out,
+                (unsigned)cdrom_->debug_index_raw(),
+                (unsigned)cdrom_->debug_status_reg(),
+                (unsigned)cdrom_->irq_flags_raw(),
+                (unsigned)cdrom_->irq_enable_raw(),
+                (unsigned)i_stat_,
+                (unsigned)i_mask_);
+        }
         // Check if CDROM IRQ edge occurred (e.g., after reading status that clears IRQ)
         check_cdrom_irq_edge();
         return true;
@@ -734,6 +774,23 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
         const uint32_t mp0 = phys & rm;
         const uint32_t mp1 = (phys + 1u) & rm;
         out = (uint16_t)ram_[mp0] | ((uint16_t)ram_[mp1] << 8);
+        if (cpu_pc_ >= 0xBFC03000u && cpu_pc_ <= 0xBFC07000u &&
+            phys >= 0x0000B000u && phys < 0x0000B900u &&
+            bios_cd_ram_log_count_ < 256u)
+        {
+            ++bios_cd_ram_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CDRAM",
+                "BIOS RD16 pc=0x%08X addr=0x%08X phys=0x%05X -> 0x%04X i_stat=0x%04X i_mask=0x%04X (#%u)",
+                cpu_pc_,
+                addr,
+                mp0,
+                (unsigned)out,
+                (unsigned)i_stat_,
+                (unsigned)i_mask_,
+                bios_cd_ram_log_count_);
+        }
         return true;
     }
 
@@ -831,6 +888,23 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         const uint32_t mp3 = (phys + 3u) & rm;
         out = (uint32_t)ram_[mp0] | ((uint32_t)ram_[mp1] << 8) |
               ((uint32_t)ram_[mp2] << 16) | ((uint32_t)ram_[mp3] << 24);
+        if (cpu_pc_ >= 0xBFC03000u && cpu_pc_ <= 0xBFC07000u &&
+            phys >= 0x0000B000u && phys < 0x0000B900u &&
+            bios_cd_ram_log_count_ < 256u)
+        {
+            ++bios_cd_ram_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CDRAM",
+                "BIOS RD32 pc=0x%08X addr=0x%08X phys=0x%05X -> 0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
+                cpu_pc_,
+                addr,
+                mp0,
+                out,
+                (unsigned)i_stat_,
+                (unsigned)i_mask_,
+                bios_cd_ram_log_count_);
+        }
         return true;
     }
 
@@ -1000,6 +1074,26 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     // CDROM
     if (phys >= kCdromBase && phys < kCdromBase + kCdromSize)
     {
+        if (cdrom_ &&
+            cpu_pc_ >= 0xBFC04A00u && cpu_pc_ <= 0xBFC05580u &&
+            bios_cd_mmio_log_count_ < 400)
+        {
+            ++bios_cd_mmio_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CDMMIO",
+                "BIOS WR pc=0x%08X addr=0x%08X off=%u val=0x%02X idx=%u stat=0x%02X irqf=0x%02X irqe=0x%02X i_stat=0x%04X i_mask=0x%04X",
+                cpu_pc_,
+                phys,
+                (unsigned)(phys - kCdromBase),
+                (unsigned)v,
+                (unsigned)cdrom_->debug_index_raw(),
+                (unsigned)cdrom_->debug_status_reg(),
+                (unsigned)cdrom_->irq_flags_raw(),
+                (unsigned)cdrom_->irq_enable_raw(),
+                (unsigned)i_stat_,
+                (unsigned)i_mask_);
+        }
         if (cdrom_)
         {
             cdrom_->mmio_write8(phys, v);
@@ -1020,6 +1114,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         const uint32_t old = i_stat_;
         const uint32_t new_byte = ((old >> shift) & 0xFFu) & v;
         i_stat_ = (old & ~mask) | (new_byte << shift);
+        log_irq_stat_cd_clear(old, i_stat_, "SB", byte_off);
         return true;
     }
     if (phys >= kIrqMaskAddr && phys < kIrqMaskAddr + 4)
@@ -1142,6 +1237,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         const uint32_t old = i_stat_;
         const uint32_t new_low = (old & 0xFFFFu) & (uint32_t)v;
         i_stat_ = (old & 0xFFFF0000u) | new_low;
+        log_irq_stat_cd_clear(old, i_stat_, "SH", v);
         return true;
     }
     if (phys == kIrqMaskAddr)
@@ -1322,7 +1418,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     if (phys == kIrqStatAddr)
     {
         // I_STAT: writing 0 clears the bit. (Writing 1 keeps it set.)
+        const uint32_t old = i_stat_;
         i_stat_ &= v;
+        log_irq_stat_cd_clear(old, i_stat_, "SW", v);
         return true;
     }
     if (phys == kIrqMaskAddr)
@@ -1617,11 +1715,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         const uint32_t bs = dma_[ch].bcr & 0xFFFF;
                         const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
                         const uint32_t words = bs * (bc ? bc : 1);
-                        uint32_t ma = dma_[ch].madr & 0x1FFFFF;
+                        const uint32_t start_ma = dma_[ch].madr & 0x1FFFFF;
+                        uint32_t ma = start_ma;
                         const uint32_t end_addr = (ma + words * 4) & 0x1FFFFF;
 
                         emu::logf(emu::LogLevel::info, "BUS", "DMA3 CD→RAM madr=0x%08X bcr=0x%08X words=%u",
                             dma_[ch].madr, dma_[ch].bcr, words);
+                        cdrom_->debug_log_dma3_start(dma_[ch].madr, dma_[ch].bcr, words);
 
                         // Guard: skip DMA writing into kernel area (0x00-0x200)
                         // On real PS1 this never happens — MADR=0 means a game-side
@@ -1631,6 +1731,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             emu::logf(emu::LogLevel::error, "BUS",
                                 "DMA3 BLOCKED: madr=0x%05X words=%u — would overwrite kernel vectors (PC=0x%08X)",
                                 ma, words, cpu_pc_);
+                            cdrom_->debug_log_dma3_end(dma_[ch].madr, words, 1);
                             dma_finish(ch);
                             break;
                         }
@@ -1651,7 +1752,76 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             ma = (ma + 4) & 0x1FFFFF;
                         }
 
+                        if (cpu_pc_ >= 0xBFC06000u && cpu_pc_ <= 0xBFC06800u && bios_cd_dma_dump_count_ < 12)
+                        {
+                            ++bios_cd_dma_dump_count_;
+                            bios_pvd_post_pc_trace_count_ = 512u;
+                            bios_pvd_post_last_pc_ = 0xFFFFFFFFu;
+
+                            char hexbuf[3 * 16 + 1]{};
+                            char asciibuf[16 + 1]{};
+                            for (uint32_t i = 0; i < 16; ++i)
+                            {
+                                const uint8_t b = ram_[(start_ma + i) & 0x1FFFFF];
+                                std::snprintf(&hexbuf[i * 3], 4, "%02X ", (unsigned)b);
+                                asciibuf[i] = (b >= 0x20 && b <= 0x7E) ? (char)b : '.';
+                            }
+                            asciibuf[16] = '\0';
+
+                            emu::logf(
+                                emu::LogLevel::warn,
+                                "BUS",
+                                "DMA3 BIOS RAM dump pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X words=%u read_lba=%u data_lba=%u last_cmd=0x%02X data=%s ascii='%s'",
+                                cpu_pc_,
+                                dma_[ch].madr,
+                                start_ma,
+                                end_addr,
+                                words,
+                                cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
+                                cdrom_ ? (unsigned)cdrom_->debug_data_lba() : 0u,
+                                cdrom_ ? (unsigned)cdrom_->debug_last_cmd() : 0u,
+                                hexbuf,
+                                asciibuf);
+
+                            const uint32_t probe0 = 0x0B888u;
+                            const uint32_t probe1 = 0x0B88Cu;
+                            const uint32_t range_end = (start_ma + words * 4u - 1u) & 0x1FFFFFu;
+                            const bool linear = range_end >= start_ma;
+                            const auto in_dma_range = [&](uint32_t addr) -> bool
+                            {
+                                if (linear)
+                                    return addr >= start_ma && addr <= range_end;
+                                return addr >= start_ma || addr <= range_end;
+                            };
+                            if (in_dma_range(probe0) || in_dma_range(probe1))
+                            {
+                                const uint32_t v0 =
+                                    (uint32_t)ram_[probe0] |
+                                    ((uint32_t)ram_[probe0 + 1] << 8) |
+                                    ((uint32_t)ram_[probe0 + 2] << 16) |
+                                    ((uint32_t)ram_[probe0 + 3] << 24);
+                                const uint32_t v1 =
+                                    (uint32_t)ram_[probe1] |
+                                    ((uint32_t)ram_[probe1 + 1] << 8) |
+                                    ((uint32_t)ram_[probe1 + 2] << 16) |
+                                    ((uint32_t)ram_[probe1 + 3] << 24);
+                                emu::logf(
+                                    emu::LogLevel::warn,
+                                    "BUS",
+                                    "DMA3 BIOS scratch hit pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X read_lba=%u data_lba=%u b888=0x%08X b88c=0x%08X",
+                                    cpu_pc_,
+                                    dma_[ch].madr,
+                                    start_ma,
+                                    end_addr,
+                                    cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
+                                    cdrom_ ? (unsigned)cdrom_->debug_data_lba() : 0u,
+                                    (unsigned)v0,
+                                    (unsigned)v1);
+                            }
+                        }
+
                         dma_finish(ch);
+                        cdrom_->debug_log_dma3_end(dma_[ch].madr, words, 0);
                     }
 
                     // DMA6 (OTC - Ordering Table Clear)
@@ -1845,9 +2015,35 @@ uint16_t Bus::spu_read_stat() const
     return stat;
 }
 
+void Bus::log_irq_stat_cd_clear(uint32_t old_stat, uint32_t new_stat, const char* access_kind, uint32_t detail)
+{
+    if ((old_stat & 0x0004u) == 0u || (new_stat & 0x0004u) != 0u)
+        return;
+    if (irq_cd_clear_log_count_ >= 128u)
+        return;
+    ++irq_cd_clear_log_count_;
+    emu::logf(emu::LogLevel::warn, "IRQ",
+        "I_STAT ACK CD via %s pc=0x%08X old=0x%04X new=0x%04X detail=0x%08X i_mask=0x%04X (#%u)",
+        access_kind,
+        cpu_pc_,
+        (unsigned)(old_stat & 0xFFFFu),
+        (unsigned)(new_stat & 0xFFFFu),
+        (unsigned)detail,
+        (unsigned)(i_mask_ & 0xFFFFu),
+        irq_cd_clear_log_count_);
+}
+
 uint32_t Bus::irq_pending_masked() const
 {
-    return i_stat_ & i_mask_;
+    const uint32_t pending = i_stat_ & i_mask_;
+    if (pending != 0u && irq_pending_log_count_ < 256u)
+    {
+        ++const_cast<Bus*>(this)->irq_pending_log_count_;
+        emu::logf(emu::LogLevel::warn, "IRQ",
+            "pending_masked=0x%04X i_stat=0x%04X i_mask=0x%04X cpu_pc=0x%08X (#%u)",
+            (unsigned)pending, (unsigned)i_stat_, (unsigned)i_mask_, cpu_pc_, irq_pending_log_count_);
+    }
+    return pending;
 }
 
 // ================== DMA completion ==================
@@ -1954,9 +2150,7 @@ void Bus::check_cdrom_irq_edge()
     {
         i_stat_ |= (1u << 2);
         emu::logf(emu::LogLevel::info, "BUS", "CDROM IRQ edge: i_stat=0x%04X", (unsigned)i_stat_);
-        // BIOS event system: mark CDROM class events as ready.
-        // This mirrors the kernel DeliverEvent() that would normally run in the IRQ handler.
-        deliver_events_for_class(ram_, ram_size_, 0x28u);
+        cdrom_->debug_log_bus_irq_latched(i_stat_, i_mask_);
     }
     cdrom_irq_prev_ = cdirq;
 }
@@ -1965,6 +2159,21 @@ void Bus::check_cdrom_irq_edge()
 
 void Bus::tick(uint32_t cycles)
 {
+    if (bios_pvd_post_pc_trace_count_ != 0u &&
+        cpu_pc_ >= 0xBFC00000u && cpu_pc_ < 0xBFC80000u &&
+        cpu_pc_ != bios_pvd_post_last_pc_)
+    {
+        bios_pvd_post_last_pc_ = cpu_pc_;
+        --bios_pvd_post_pc_trace_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "PVDPC",
+            "pc=0x%08X i_stat=0x%04X i_mask=0x%04X",
+            cpu_pc_,
+            (unsigned)i_stat_,
+            (unsigned)i_mask_);
+    }
+
     // Must wait long enough for BIOS to install SysEnqIntRP chain handlers
     // before enabling IRQs.  600k was FAR too early (fired before VBlank #1,
     // causing infinite exception loop because no handler acknowledged I_STAT).

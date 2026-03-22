@@ -1,5 +1,7 @@
 #include "cdrom.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +14,11 @@ using util::fopen_utf8;
 
 namespace cdrom
 {
+
+static constexpr uint32_t kPsxMasterClock = 33868800u;
+static constexpr uint32_t kSingleSpeedSectorsPerSecond = 75u;
+static constexpr uint32_t kDoubleSpeedSectorsPerSecond = 150u;
+static constexpr uint32_t kFramesPerMinute = 75u * 60u;
 
 static uint32_t rd_le32(const uint8_t* p)
 {
@@ -539,11 +546,56 @@ struct Cdrom::Disc
 
 Cdrom::Cdrom(rlog::Logger* logger) : logger_(logger)
 {
-    // status_ très simplifié.
     status_ = 0x00;
     irq_enable_ = 0x1Fu; // PSX-SPX: defaults to 1Fh (all INT1-INT5 enabled)
     irq_flags_ = 0;
     shell_close_sent_ = 0;
+}
+
+void Cdrom::clear_secondary_active_bits()
+{
+    status_ &= (uint8_t)~(STAT_SEEKING | STAT_READING | STAT_PLAYING_CDDA);
+}
+
+void Cdrom::set_secondary_idle(bool motor_on)
+{
+    clear_secondary_active_bits();
+    if (motor_on)
+        status_ |= STAT_MOTOR_ON;
+    else
+        status_ &= (uint8_t)~STAT_MOTOR_ON;
+}
+
+void Cdrom::set_secondary_seeking()
+{
+    clear_secondary_active_bits();
+    status_ |= (STAT_MOTOR_ON | STAT_SEEKING);
+}
+
+void Cdrom::set_secondary_reading()
+{
+    clear_secondary_active_bits();
+    status_ |= (STAT_MOTOR_ON | STAT_READING);
+}
+
+void Cdrom::set_secondary_playing()
+{
+    clear_secondary_active_bits();
+    status_ |= (STAT_MOTOR_ON | STAT_PLAYING_CDDA);
+}
+
+void Cdrom::cancel_pending_read_advance()
+{
+    if (pending_irq_type_ == 0x01 && pending_irq_reason_ == 0xFFu)
+    {
+        pending_irq_type_ = 0;
+        pending_irq_delay_ = 0;
+        pending_irq_live_status_ = 0;
+        pending_irq_reason_ = 0;
+        pending_irq_extra_len_ = 0;
+        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+            "Cancelled pending continuous ReadN INT1 advance");
+    }
 }
 
 void Cdrom::set_log_sinks(const flog::Sink& cd_only, const flog::Sink& combined, const flog::Clock& clock)
@@ -553,8 +605,8 @@ void Cdrom::set_log_sinks(const flog::Sink& cd_only, const flog::Sink& combined,
     clock_ = clock;
     has_clock_ = 1;
 
-    // Version marker to verify rebuild - update this when making changes!
-    emu::logf(emu::LogLevel::warn, "CD", "CDROM source v14 (reduced_cd_poll_logging)");
+    // Version marker to verify the exact CDROM build loaded by UE5.
+    emu::logf(emu::LogLevel::warn, "CD", "CDROM source v19 (deferred_command_exec)");
 
     cd_log(
         log_cd_,
@@ -562,7 +614,7 @@ void Cdrom::set_log_sinks(const flog::Sink& cd_only, const flog::Sink& combined,
         clock_,
         has_clock_,
         flog::Level::info,
-        "log start (cd_level=%u io_level=%u)",
+        "log start v19 (cd_level=%u io_level=%u)",
         (unsigned)log_cd_.level,
         (unsigned)log_io_.level
     );
@@ -596,7 +648,7 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
     else
     {
         cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
-            "disc region unknown (GetID will fall back to SCEE)");
+            "disc region unknown (GetID will report unlicensed/unknown)");
     }
 
     if (logger_)
@@ -626,9 +678,7 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
         disc_->track_count
     );
 
-    // Set motor spinning status when disc is inserted.
-    // PSX-SPX: status bit 1 = motor on
-    status_ = 0x02u; // Motor spinning
+    set_secondary_idle(true);
 
     // PSX-SPX: Shell close INT5 should only be sent when the shell transitions
     // from open to closed. At cold boot with disc already present, the shell was
@@ -701,40 +751,8 @@ Cdrom::DiscRegion Cdrom::infer_disc_region()
         }
     }
 
-    // 2) Fallback: look at license sector text variants
-    {
-        uint8_t sec4[2048]{};
-        if (read_sector_2048(4, sec4))
-        {
-            auto contains = [&](const char* needle) -> bool {
-                const size_t n = std::strlen(needle);
-                for (size_t i = 0; i + n <= sizeof(sec4); ++i)
-                {
-                    if (std::memcmp(sec4 + i, needle, n) == 0)
-                        return true;
-                }
-                return false;
-            };
-            if (contains("of America") || contains("America"))
-            {
-                r.letter = 'A';
-                std::memcpy(r.scex, "SCEA", 4);
-                return r;
-            }
-            if (contains("Europe"))
-            {
-                r.letter = 'E';
-                std::memcpy(r.scex, "SCEE", 4);
-                return r;
-            }
-            if (contains("Japan"))
-            {
-                r.letter = 'I';
-                std::memcpy(r.scex, "SCEI", 4);
-                return r;
-            }
-        }
-    }
+    // No fallback here: region inference must come from deterministic disc metadata,
+    // not heuristic text scanning of the license sector.
 
     return r;
 }
@@ -807,20 +825,26 @@ void Cdrom::clear_params()
 
 void Cdrom::queue_cmd_irq(uint8_t flags)
 {
-    // Queue IRQ for delivery after a delay matching DuckStation's
-    // GetAckDelayForCommand(). Response data is already in the FIFO.
-    cmd_irq_pending_ = flags;
+    // Command execution itself is already delayed. Once exec_command() runs,
+    // the first response/ACK becomes visible immediately.
+    set_irq(flags);
+}
 
-    // Command response IRQ delay in CPU cycles.
-    // Real PS1: ~25000 cycles (DuckStation reference). Since our bus ticks
-    // once per instruction (not cycle-accurate), the effective delay must
-    // be large enough that the response doesn't arrive while the kernel
-    // exception handler is still dispatching the previous IRQ.
-    // Per-command delays (DuckStation: 25000 with disc, 15000 without, 80000 for Init).
+void Cdrom::schedule_command_execution(uint8_t cmd, const uint8_t* params, uint8_t param_count)
+{
+    cmd_exec_valid_ = 1;
+    cmd_exec_cmd_ = cmd;
+    cmd_exec_param_count_ = param_count;
+    if (cmd_exec_param_count_ > (uint8_t)sizeof(cmd_exec_params_))
+        cmd_exec_param_count_ = (uint8_t)sizeof(cmd_exec_params_);
+    for (uint8_t i = 0; i < cmd_exec_param_count_; ++i)
+        cmd_exec_params_[i] = params[i];
+
     uint32_t delay = disc_ ? 25000u : 15000u;
-    if (last_cmd_ == 0x0A) // Init
+    if (cmd == 0x0A) // Init
         delay = 80000u;
-    cmd_irq_delay_ = delay;
+    cmd_exec_delay_ = delay;
+    busy_ = 1;
 }
 
 void Cdrom::set_irq(uint8_t flags)
@@ -838,6 +862,13 @@ void Cdrom::set_irq(uint8_t flags)
         (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (unsigned)irq_enable_,
         (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_,
         old_line, new_line);
+    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        "IRQ set: type=%u old=0x%02X new=0x%02X irq_en=0x%02X line=%d->%d stat=0x%02X cmd=0x%02X read=%d seek=%d lba=%u data_lba=%u fifo=%u/%u",
+        (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (unsigned)irq_enable_,
+        old_line, new_line, (unsigned)status_, (unsigned)last_cmd_,
+        (int)reading_active_, (int)seek_in_progress_,
+        (unsigned)read_lba_, (unsigned)data_lba_,
+        (unsigned)data_r_, (unsigned)data_w_);
 
     // Push-model notification: immediately notify the bus of IRQ state change.
     // This mirrors DuckStation's InterruptController::SetLineState approach.
@@ -845,6 +876,39 @@ void Cdrom::set_irq(uint8_t flags)
     {
         irq_callback_(new_line, irq_callback_user_);
     }
+}
+
+void Cdrom::debug_log_bus_irq_latched(uint32_t i_stat, uint32_t i_mask)
+{
+    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        "BUS IRQ2 latch: irq_flags=0x%02X irq_en=0x%02X line=%d i_stat=0x%04X i_mask=0x%04X pending=0x%04X stat=0x%02X read=%d seek=%d lba=%u data_lba=%u",
+        (unsigned)irq_flags_, (unsigned)irq_enable_, irq_line(),
+        (unsigned)i_stat, (unsigned)i_mask, (unsigned)(i_stat & i_mask),
+        (unsigned)status_, (int)reading_active_, (int)seek_in_progress_,
+        (unsigned)read_lba_, (unsigned)data_lba_);
+}
+
+void Cdrom::debug_log_dma3_start(uint32_t madr, uint32_t bcr, uint32_t words)
+{
+    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        "DMA3 start: madr=0x%08X bcr=0x%08X words=%u irq_flags=0x%02X irq_en=0x%02X stat=0x%02X want=%d drp=%d read=%d lba=%u data_lba=%u fifo=%u/%u",
+        (unsigned)madr, (unsigned)bcr, (unsigned)words,
+        (unsigned)irq_flags_, (unsigned)irq_enable_, (unsigned)status_,
+        (int)want_data_, (int)data_ready_pending_, (int)reading_active_,
+        (unsigned)read_lba_, (unsigned)data_lba_,
+        (unsigned)data_r_, (unsigned)data_w_);
+}
+
+void Cdrom::debug_log_dma3_end(uint32_t madr, uint32_t words, int blocked)
+{
+    cd_log(log_cd_, log_io_, clock_, has_clock_, blocked ? flog::Level::warn : flog::Level::info,
+        "DMA3 %s: madr=0x%08X words=%u irq_flags=0x%02X stat=0x%02X want=%d drp=%d read=%d lba=%u data_lba=%u fifo=%u/%u",
+        blocked ? "blocked" : "done",
+        (unsigned)madr, (unsigned)words,
+        (unsigned)irq_flags_, (unsigned)status_,
+        (int)want_data_, (int)data_ready_pending_, (int)reading_active_,
+        (unsigned)read_lba_, (unsigned)data_lba_,
+        (unsigned)data_r_, (unsigned)data_w_);
 }
 
 void Cdrom::stop_reading_with_error(uint8_t reason)
@@ -858,6 +922,7 @@ void Cdrom::stop_reading_with_error(uint8_t reason)
     // Clear any pending async IRQ (but not command IRQs)
     pending_irq_type_ = 0;
     pending_irq_delay_ = 0;
+    pending_irq_live_status_ = 0;
     pending_irq_reason_ = 0;
     pending_irq_extra_len_ = 0;
 
@@ -865,11 +930,12 @@ void Cdrom::stop_reading_with_error(uint8_t reason)
     reading_active_ = 0;
     data_ready_pending_ = 0;
     want_data_ = 0;
+    set_secondary_idle(motor_spinning_ != 0);
 
     // Send error response: status|0x01 (error bit), then reason code
     // Note: Don't permanently modify status_, just include error bit in response
     clear_resp();
-    push_resp((uint8_t)(status_ | 0x01u));  // STAT_ERROR = bit 0
+    push_resp((uint8_t)(status_ | STAT_ERROR));
     push_resp(reason);
 
     // Set INT5 (error) - this goes through the normal IRQ mechanism
@@ -926,20 +992,21 @@ void Cdrom::try_fill_data_fifo()
     if (data_r_ != data_w_)
         return; // already loaded
 
+    const uint32_t data_lba = data_lba_;
     uint8_t data[2048];
     emu::logf(emu::LogLevel::info, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
-        (unsigned)loc_lba_, (void*)disc_, (int)want_data_, (int)data_ready_pending_, data_r_, data_w_);
+        (unsigned)data_lba, (void*)disc_, (int)want_data_, (int)data_ready_pending_, data_r_, data_w_);
 
     // Debug: dump first 64 bytes of sector data for directory reads
-    if (loc_lba_ <= 20)
+    if (data_lba <= 20)
     {
         uint8_t raw[2352];
         uint32_t raw_ss = 0;
-        if (disc_->read_sector_raw(loc_lba_, raw, sizeof(raw), &raw_ss))
+        if (disc_->read_sector_raw(data_lba, raw, sizeof(raw), &raw_ss))
         {
             emu::logf(emu::LogLevel::info, "CD",
                 "RAW sector %u: ss=%u mode=%02X hdr=%02X%02X%02X%02X sub=%02X%02X%02X%02X%02X%02X%02X%02X",
-                loc_lba_, raw_ss, raw[15],
+                data_lba, raw_ss, raw[15],
                 raw[12], raw[13], raw[14], raw[15],
                 raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23]);
             // Dump first 32 bytes of user data (offset 24 for Mode2)
@@ -952,7 +1019,7 @@ void Cdrom::try_fill_data_fifo()
                 ud[16],ud[17],ud[18],ud[19],ud[20],ud[21],ud[22],ud[23],
                 ud[24],ud[25],ud[26],ud[27],ud[28],ud[29],ud[30],ud[31]);
             // Dump PVD root directory record (bytes 156-171) for sector 16
-            if (loc_lba_ == 16 && raw_ss >= 2352)
+            if (data_lba == 16 && raw_ss >= 2352)
             {
                 emu::logf(emu::LogLevel::debug, "CD", "PVD RootDir[156..171]: %02X %02X %02X%02X%02X%02X %02X%02X%02X%02X",
                     ud[156], ud[157], ud[158], ud[159], ud[160], ud[161],
@@ -961,45 +1028,22 @@ void Cdrom::try_fill_data_fifo()
         }
     }
 
-    if (read_user_data_2048(loc_lba_, data))
+    if (read_user_data_2048(data_lba, data))
     {
-        // Patch license sector to match any BIOS region.
-        // Disc may say "of America", "Europe", or "Inc." — normalize to "Inc."
-        // so that the BIOS license check always passes regardless of region.
-        if (loc_lba_ == 4)
-        {
-            // Expected: "Sony Computer Entertainment <region>" at offset ~36
-            // Replace region variant with "Inc." + spaces to match BIOS ROM copy.
-            static const char* variants[] = {"of America", "Europe", "Japan"};
-            for (int v = 0; v < 3; ++v)
-            {
-                const char* s = variants[v];
-                const size_t slen = std::strlen(s);
-                for (size_t i = 0; i + slen <= 2048; ++i)
-                {
-                    if (std::memcmp(data + i, s, slen) == 0)
-                    {
-                        // Replace with "Inc." + pad with spaces
-                        std::memcpy(data + i, "Inc.", 4);
-                        for (size_t j = i + 4; j < i + slen; ++j)
-                            data[j] = 0x20;
-                        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
-                            "License patch: '%s' -> 'Inc.' at offset %u", s, (unsigned)i);
-                        break;
-                    }
-                }
-            }
-        }
         push_data(data, sizeof(data));
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::trace,
+        const flog::Level fifo_log_level =
+            (data_lba == 16 || data_lba == 60642 || data_lba == 60643)
+                ? flog::Level::info
+                : flog::Level::trace;
+        cd_log(log_cd_, log_io_, clock_, has_clock_, fifo_log_level,
             "FIFO LBA=%u [%02X%02X%02X%02X %02X%02X%02X%02X]",
-            (unsigned)loc_lba_,
+            (unsigned)data_lba,
             data[0],data[1],data[2],data[3],data[4],data[5],data[6],data[7]);
     }
     else
     {
         cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
-            "FIFO FILL FAILED LBA=%u", (unsigned)loc_lba_);
+            "FIFO FILL FAILED LBA=%u", (unsigned)data_lba);
         // Note: Don't send error here - bounds checking is done in tick()
         // during continuous reading. This can fail early for other reasons.
     }
@@ -1020,62 +1064,83 @@ uint32_t Cdrom::msf_to_lba(uint8_t m, uint8_t s, uint8_t f) const
 
 uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_spinup) const
 {
-    // Calculate seek time in CPU cycles based on LBA distance.
-    // Based on DuckStation timing model (logarithmic seek with spin-up delay).
-    //
-    // From DuckStation boot log observations:
-    //   2 LBA:   ~472,828 ticks = ~14 ms
-    //   3 LBA:   ~699,224 ticks = ~21 ms
-    //   5 LBA: ~1,162,645 ticks = ~34 ms
-    // 147 LBA: ~1,721,932 ticks = ~51 ms
-    // 157 LBA: ~1,712,543 ticks = ~51 ms
-    // Speed change (spin-up): 20,321,280 ticks = ~600 ms
-
-    // Seek/spin-up: keep fast (10x) for BIOS compatibility.
-    // Only continuous sector reads are slowed down (see pending_irq_delay_ below).
-    constexpr uint32_t kSpinUpDelay = 2032128u;   // ~60ms (10x fast)
-    constexpr uint32_t kMinSeekTicks = 40000u;    // ~1.2ms (10x fast)
-    constexpr uint32_t kMaxSeekTicks = 200000u;   // ~6ms (10x fast)
-
+    // Based on DuckStation's PS1 drive model:
+    // - small forward moves can be satisfied by waiting for the sector to rotate in
+    // - medium moves use a fixed short/long seek
+    // - large moves use a sled seek curve
+    // - spin-up is roughly one second when the motor is idle
+    constexpr uint32_t kSpinUpDelay = kPsxMasterClock;
     uint32_t total = 0;
 
-    // Add spin-up delay if motor is idle
     if (include_spinup && !motor_spinning_)
-    {
         total += kSpinUpDelay;
-        emu::logf(emu::LogLevel::info, "CD", "Drive idle, spin-up delay: %u ticks (~%u ms)",
-            kSpinUpDelay, kSpinUpDelay / 33868);
-    }
 
-    // Calculate seek distance
     const uint32_t dist = (from_lba > to_lba) ? (from_lba - to_lba) : (to_lba - from_lba);
+    const uint32_t ticks_per_sector = read_sector_ticks();
+    const uint32_t sectors_per_track = [] (uint32_t lba) -> uint32_t {
+        const uint32_t mm = lba / kFramesPerMinute;
+        if (mm == 0)
+            return 8;
+        if (mm <= 4)
+            return 9;
+        if (mm <= 7)
+            return 10;
+        if (mm <= 11)
+            return 11;
+        if (mm <= 16)
+            return 12;
+        if (mm <= 23)
+            return 13;
+        if (mm <= 27)
+            return 14;
+        if (mm <= 32)
+            return 15;
+        if (mm <= 39)
+            return 16;
+        if (mm <= 44)
+            return 17;
+        if (mm <= 52)
+            return 18;
+        if (mm <= 60)
+            return 19;
+        if (mm <= 67)
+            return 20;
+        if (mm <= 74)
+            return 21;
+        return 22;
+    }(from_lba);
 
-    if (dist == 0)
+    const uint32_t track_jump_position = (from_lba >= sectors_per_track) ? (from_lba - sectors_per_track) : 0;
+
+    if (from_lba < to_lba && dist <= sectors_per_track)
     {
-        // No seek needed, just rotational latency (10x fast, same as old)
-        const uint32_t rot_delay = (mode_ & 0x80u) ? 11000u : 22000u;
-        total += rot_delay;
+        total += ticks_per_sector * std::max(dist, 2u);
     }
-    else if (dist <= 2)
+    else if (from_lba >= to_lba && track_jump_position <= to_lba)
     {
-        // Very short seek: ~14ms
-        total += kMinSeekTicks;
+        total += ticks_per_sector * std::max(to_lba - track_jump_position, 1u);
+    }
+    else if (dist < 7200)
+    {
+        const float current_minute =
+            std::clamp(static_cast<float>(from_lba) / static_cast<float>(kFramesPerMinute), 1.0f, 72.0f);
+        const uint32_t switch_point =
+            static_cast<uint32_t>(330.0f + (-63.1333f * std::log(current_minute)));
+        const float seconds = (dist < switch_point) ? 0.05f : 0.1f;
+        total += static_cast<uint32_t>(seconds * static_cast<float>(kPsxMasterClock));
     }
     else
     {
-        // Logarithmic seek model: seek_time = base + factor * log2(distance)
-        // Approximate log2 using leading zeros count
-        uint32_t log2_dist = 0;
-        uint32_t temp = dist;
-        while (temp > 1)
-        {
-            temp >>= 1;
-            log2_dist++;
-        }
-
-        // Logarithmic seek (10x fast)
-        const uint32_t seek_ticks = kMinSeekTicks + log2_dist * 13500u;
-        total += (seek_ticks > kMaxSeekTicks) ? kMaxSeekTicks : seek_ticks;
+        constexpr float kSledFixedCost = 0.05f;
+        constexpr float kSledVariableCost = 0.85f;
+        constexpr float kLogWeight = 0.4f;
+        constexpr float kMaxSledLba = static_cast<float>(72u * kFramesPerMinute);
+        const float lba_diff_f = static_cast<float>(dist);
+        const float seconds =
+            kSledFixedCost +
+            (((kSledVariableCost * (std::log(lba_diff_f) / std::log(kMaxSledLba))) * kLogWeight)) +
+            ((kSledVariableCost * (lba_diff_f / kMaxSledLba)) * (1.0f - kLogWeight));
+        total += static_cast<uint32_t>(seconds * static_cast<float>(kPsxMasterClock));
     }
 
     emu::logf(emu::LogLevel::info, "CD", "Seek %u->%u (%u LBA): %u ticks (~%.1f ms)%s",
@@ -1083,6 +1148,12 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
         (include_spinup && !motor_spinning_) ? " (includes spin-up)" : "");
 
     return total;
+}
+
+uint32_t Cdrom::read_sector_ticks() const
+{
+    return (mode_ & 0x80u) ? (kPsxMasterClock / kDoubleSpeedSectorsPerSecond)
+                           : (kPsxMasterClock / kSingleSpeedSectorsPerSecond);
 }
 
 bool Cdrom::read_user_data_2048(uint32_t lba, uint8_t out[2048])
@@ -1474,7 +1545,7 @@ void Cdrom::exec_command(uint8_t cmd)
     {
         // Parameter count error: return error response with INT5.
         // This is real hardware behavior - commands with insufficient parameters fail.
-        push_resp(status_ | 0x01u); // Error flag in status
+        push_resp((uint8_t)(status_ | STAT_ERROR)); // Error flag in status
         push_resp(0x20);            // Error code: wrong number of parameters
         queue_cmd_irq(0x05);        // INT5: error
         cd_log(
@@ -1516,6 +1587,7 @@ void Cdrom::exec_command(uint8_t cmd)
                 // Reason 0x08 means "shell opened" which is WRONG here!
                 pending_irq_type_ = 0x05;
                 pending_irq_resp_ = status_;  // No error flag (disc is ready)
+                pending_irq_live_status_ = 1;
                 pending_irq_reason_ = 0x00;   // 0x00 = shell closed (not 0x08 = shell opened!)
                 pending_irq_delay_ = 50000;   // ~1.5ms after ACK
                 shell_close_sent_ = 1;
@@ -1569,6 +1641,7 @@ void Cdrom::exec_command(uint8_t cmd)
             cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
                 "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
                 loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_);
+            seek_pending_ = 1;
             push_resp(status_);
             queue_cmd_irq(0x03);
             break;
@@ -1634,7 +1707,7 @@ void Cdrom::exec_command(uint8_t cmd)
                 cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
                     "ReadN/S REJECTED: LBA=%u >= disc_end=%u (garbage SetLoc?)", loc_lba_, disc_end);
                 // Send error response: stat|error, reason=0x10 (invalid argument)
-                push_resp((uint8_t)(status_ | 0x01u));
+                push_resp((uint8_t)(status_ | STAT_ERROR));
                 push_resp(0x10u); // ERROR_REASON_INVALID_ARGUMENT
                 queue_cmd_irq(0x05); // INT5: error
                 break;
@@ -1648,18 +1721,20 @@ void Cdrom::exec_command(uint8_t cmd)
             data_ready_pending_ = 0;
             read_pending_irq1_ = 1;
             reading_active_ = 1;
-            // Stop motor countdown - reading keeps motor spinning
-            motor_idle_countdown_ = 0;
-
-            // Set status: motor on (bit1) + reading (bit5)
-            status_ |= 0x22u;
+            read_lba_ = loc_lba_;
+            data_lba_ = read_lba_;
+            // First response acknowledges the command with the pre-read drive state.
             push_resp(status_);
             queue_cmd_irq(0x03); // INT3 (first response)
+
+            // Stop motor countdown - reading keeps motor spinning
+            motor_idle_countdown_ = 0;
+            set_secondary_reading();
             break;
         }
         case 0x07: // MotorOn
         {
-            status_ |= 0x02u; // Motor on
+            status_ |= STAT_MOTOR_ON;
             motor_spinning_ = 1;
             motor_idle_countdown_ = 0;
             push_resp(status_);
@@ -1670,17 +1745,21 @@ void Cdrom::exec_command(uint8_t cmd)
         {
             reading_active_ = 0;
             read_pending_irq1_ = 0;
+            seek_in_progress_ = 0;
+            pending_read_seek_commit_ = 0;
+            cancel_pending_read_advance();
+            push_resp(status_);
+            queue_cmd_irq(0x03);
+
             stop_cdda_playback();  // Stop CDDA if playing
-            status_ &= ~0x20u; // clear Reading
-            status_ &= ~0x02u; // clear Motor on
+            set_secondary_idle(false);
             // Motor spins down immediately on Stop
             motor_spinning_ = 0;
             motor_idle_countdown_ = 0;
-            push_resp(status_);
-            queue_cmd_irq(0x03);
             // Stop has INT2 second response
             pending_irq_type_ = 0x02;
             pending_irq_resp_ = status_;
+            pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
             pending_irq_delay_ = 80000;
             break;
@@ -1693,31 +1772,43 @@ void Cdrom::exec_command(uint8_t cmd)
             // Clear reading and active flags
             reading_active_ = 0;
             read_pending_irq1_ = 0;
+            seek_in_progress_ = 0;
+            pending_read_seek_commit_ = 0;
+            cancel_pending_read_advance();
             stop_cdda_playback();  // Stop CDDA if playing
-            status_ &= ~0x20u;
+            set_secondary_idle(true);
             // Motor spins down after a delay on Pause (~1 second)
             // DuckStation: motor becomes idle, next read needs spin-up
             motor_idle_countdown_ = 33868800u; // ~1 second at 33.8MHz
             // Pause has INT2 second response
             pending_irq_type_ = 0x02;
             pending_irq_resp_ = status_;
+            pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
             pending_irq_delay_ = 50000;
             break;
         }
         case 0x0A: // Init
         {
-            status_ = 0x02u; // Motor on after init
+            push_resp(status_);
+            queue_cmd_irq(0x03);
+
+            set_secondary_idle(true);
             mode_ = 0x20; // default mode: double speed
             // Init starts motor spin-up, but doesn't complete immediately
             motor_spinning_ = 0; // Will need spin-up on first read
             motor_idle_countdown_ = 0;
             head_lba_ = 0; // Reset head position
-            push_resp(status_);
-            queue_cmd_irq(0x03);
+            read_lba_ = 0;
+            data_lba_ = 0;
+            seek_in_progress_ = 0;
+            seek_pending_ = 0;
+            pending_read_seek_commit_ = 0;
+            seek_target_lba_ = 0;
             // Queue second response INT2 (Init complete) after first is acked
             pending_irq_type_ = 0x02;
             pending_irq_resp_ = status_;
+            pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
             pending_irq_delay_ = 80000;
             pending_irq_extra_len_ = 0; // Clear leftover extra bytes from previous cmd (e.g. GetID)
@@ -1846,7 +1937,7 @@ void Cdrom::exec_command(uint8_t cmd)
             else
             {
                 // Multi-session not supported - return explicit error
-                push_resp(status_ | 0x01u); // Error flag in status
+                push_resp((uint8_t)(status_ | STAT_ERROR)); // Error flag in status
                 push_resp(0x10);            // Error code: invalid parameter
                 queue_cmd_irq(0x05);              // INT5: error
                 cd_log(
@@ -1960,13 +2051,20 @@ void Cdrom::exec_command(uint8_t cmd)
             // We use a logarithmic model like DuckStation.
             push_resp(status_);
             queue_cmd_irq(0x03); // INT3: command accepted
+            set_secondary_seeking();
             pending_irq_type_ = 0x02;  // INT2: seek complete
             pending_irq_resp_ = status_;
+            pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
             // Calculate realistic seek time (no spin-up for SeekL/SeekP, motor was already on)
             pending_irq_delay_ = calc_seek_time(head_lba_, loc_lba_, false);
-            // Update head position after seek completes
-            head_lba_ = loc_lba_;
+            // A mechanical seek implies the spindle/head assembly is active.
+            // Without this, the following ReadN incorrectly pays a full spin-up again
+            // and falls back into a BIOS-like long wait path.
+            motor_spinning_ = 1;
+            motor_idle_countdown_ = 0;
+            seek_in_progress_ = 1;
+            seek_target_lba_ = loc_lba_;
             pending_irq_extra_len_ = 0;
             break;
         }
@@ -1976,7 +2074,7 @@ void Cdrom::exec_command(uint8_t cmd)
             //
             // The PS1 CD-ROM drive has an internal RTC used by some games/apps.
             // We do not emulate the RTC - return explicit error.
-            push_resp(status_ | 0x01u); // Error flag
+                    push_resp((uint8_t)(status_ | STAT_ERROR)); // Error flag
             push_resp(0x40);            // Error code: command not available
             queue_cmd_irq(0x05);              // INT5: error
             cd_log(
@@ -1995,7 +2093,7 @@ void Cdrom::exec_command(uint8_t cmd)
             //
             // Returns 8 bytes: stat, year, month, day, hour, min, sec, 1/100s
             // We do not emulate the RTC - return explicit error.
-            push_resp(status_ | 0x01u); // Error flag
+            push_resp((uint8_t)(status_ | STAT_ERROR)); // Error flag
             push_resp(0x40);            // Error code: command not available
             queue_cmd_irq(0x05);              // INT5: error
             cd_log(
@@ -2077,7 +2175,7 @@ void Cdrom::exec_command(uint8_t cmd)
             if (!disc_)
             {
                 // No disc - return error
-                push_resp(status_ | 0x01u); // Error flag
+                push_resp((uint8_t)(status_ | STAT_ERROR)); // Error flag
                 push_resp(0x80);            // Error: no disc
                 queue_cmd_irq(0x05);              // INT5: error
                 break;
@@ -2098,17 +2196,16 @@ void Cdrom::exec_command(uint8_t cmd)
             // 8 bytes: stat, flags, type, atip, region[4]
             pending_irq_type_ = 0x02;  // INT2
             pending_irq_resp_ = status_;
+            pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
             pending_irq_delay_ = 50000; // ~1.5ms
             pending_irq_extra_len_ = 0;
-            if (has_data_track)
+            if (has_data_track && disc_region_.letter != 0)
             {
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // flags: 0x00 = licensed disc, region OK
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x20;  // disc type: CD-ROM (Mode1/Mode2/XA)
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x00;  // ATIP
                 const char* scex = disc_region_.scex;
-                if (disc_region_.letter == 0)
-                    scex = "SCEE"; // fallback
                 pending_irq_extra_[pending_irq_extra_len_++] = (uint8_t)scex[0];
                 pending_irq_extra_[pending_irq_extra_len_++] = (uint8_t)scex[1];
                 pending_irq_extra_[pending_irq_extra_len_++] = (uint8_t)scex[2];
@@ -2116,7 +2213,7 @@ void Cdrom::exec_command(uint8_t cmd)
             }
             else
             {
-                pending_irq_extra_[pending_irq_extra_len_++] = 0x90;  // flags: unlicensed
+                pending_irq_extra_[pending_irq_extra_len_++] = 0x90;  // flags: unlicensed or unknown region
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
                 pending_irq_extra_[pending_irq_extra_len_++] = 0x00;
@@ -2128,7 +2225,7 @@ void Cdrom::exec_command(uint8_t cmd)
         }
         case 0x1C: // Reset
         {
-            status_ = 0x00;
+            set_secondary_idle(false);
             mode_ = 0;
             filter_file_ = 0;
             filter_chan_ = 0;
@@ -2233,7 +2330,7 @@ void Cdrom::exec_command(uint8_t cmd)
             // If no disc is inserted, return error.
             if (!disc_)
             {
-                push_resp(status_ | 0x01u); // Error flag
+                push_resp((uint8_t)(status_ | STAT_ERROR)); // Error flag
                 push_resp(0x80);            // Error: no disc
                 queue_cmd_irq(0x05);              // INT5: error
                 break;
@@ -2245,6 +2342,7 @@ void Cdrom::exec_command(uint8_t cmd)
             queue_cmd_irq(0x03); // INT3: command accepted
             pending_irq_type_ = 0x02;  // INT2
             pending_irq_resp_ = status_;
+            pending_irq_live_status_ = 1;
             pending_irq_reason_ = 0;
             pending_irq_delay_ = 50000; // ~1.5ms
             pending_irq_extra_len_ = 0;
@@ -2311,8 +2409,14 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
             {
                 ++data_read_count_;
                 if (data_read_count_ <= 5 || (data_read_count_ & 0x7FF) == 0)
+                {
                     emu::logf(emu::LogLevel::info, "CD", "DATA_READ #%u = 0x%02X (fifo_r=%u fifo_w=%u)",
                         data_read_count_, out, data_r_, data_w_);
+                    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::debug,
+                        "DATA_READ #%u = 0x%02X (fifo=%u/%u data_lba=%u want=%d drp=%d)",
+                        data_read_count_, (unsigned)out, (unsigned)data_r_, (unsigned)data_w_,
+                        (unsigned)data_lba_, (int)want_data_, (int)data_ready_pending_);
+                }
             }
             break;
         case 3:
@@ -2326,9 +2430,9 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
             }
             else
             {
-                // bits5-7 read as 1, bit4 = Command Ready (1 when not busy)
-                const uint8_t cmd_ready = (busy_ || queued_cmd_valid_) ? 0u : (1u << 4);
-                out = (uint8_t)((irq_flags_ & 0x1Fu) | cmd_ready | 0xE0u);
+                // Interrupt Flag register read: bits 0-4 are raw IRQ flags, bits 5-7 read as 1.
+                // Do not OR in command-ready here; that belongs to the status register, not 1F801803 index 1/3.
+                out = (uint8_t)((irq_flags_ & 0x1Fu) | 0xE0u);
                 emu::logf(emu::LogLevel::trace, "CD", "IRQ_FLAG read: 0x%02X (irq_flags=0x%02X)", out, irq_flags_);
             }
             break;
@@ -2336,12 +2440,17 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
     if (do_rd_trace)
     {
         ++mmio_rd_trace_;
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::trace,
-            "RD 0x%X idx=%u -> 0x%02X (irq=0x%02X drp=%d want=%d busy=%d resp=%u/%u data=%u/%u)",
+        const flog::Level rd_log_level =
+            (data_lba_ == 16 || read_lba_ == 16 || data_lba_ == 60642 || data_lba_ == 60643)
+                ? flog::Level::info
+                : flog::Level::trace;
+        cd_log(log_cd_, log_io_, clock_, has_clock_, rd_log_level,
+            "RD 0x%X idx=%u -> 0x%02X (irq=0x%02X drp=%d want=%d busy=%d resp=%u/%u data=%u/%u read_lba=%u data_lba=%u)",
             (unsigned)(off & 3u), (unsigned)index_, (unsigned)out,
             (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_,
             (int)busy_, (unsigned)resp_r_, (unsigned)resp_w_,
-            (unsigned)data_r_, (unsigned)data_w_);
+            (unsigned)data_r_, (unsigned)data_w_,
+            (unsigned)read_lba_, (unsigned)data_lba_);
     }
     return out;
 }
@@ -2352,10 +2461,15 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
     {
         ++mmio_wr_trace_;
         const uint32_t o = (addr - 0x1F80'1800u) & 3u;
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::trace,
-            "WR 0x%X idx=%u val=0x%02X (irq=0x%02X drp=%d want=%d)",
+        const flog::Level wr_log_level =
+            (data_lba_ == 16 || read_lba_ == 16 || data_lba_ == 60642 || data_lba_ == 60643)
+                ? flog::Level::info
+                : flog::Level::trace;
+        cd_log(log_cd_, log_io_, clock_, has_clock_, wr_log_level,
+            "WR 0x%X idx=%u val=0x%02X (irq=0x%02X drp=%d want=%d read_lba=%u data_lba=%u)",
             (unsigned)o, (unsigned)index_, (unsigned)v,
-            (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_);
+            (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_,
+            (unsigned)read_lba_, (unsigned)data_lba_);
     }
     const uint32_t off = addr - 0x1F80'1800u;
     switch (off & 3u)
@@ -2372,10 +2486,23 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
             {
                 emu::logf(emu::LogLevel::info, "CD", "CMD_WRITE: 0x%02X (%s) irq=0x%02X busy=%d queued=%d param_count=%d",
                     v, cmd_name(v), irq_flags_, busy_, queued_cmd_valid_, param_count_);
+                const uint8_t command_pipeline_busy =
+                    (((irq_flags_ & 0x1Fu) != 0u) ||
+                     busy_ ||
+                     cmd_exec_valid_ ||
+                     (pending_irq_type_ != 0u) ||
+                     (resp_r_ != resp_w_) ||
+                     read_pending_irq1_ ||
+                     async_stat_pending_) ? 1u : 0u;
                 // If there are pending cdrom interrupts, they must be acknowledged before sending a command.
                 // Otherwise, BUSYSTS may stay set (PSX-SPX).
-                if ((irq_flags_ & 0x1Fu) != 0u || busy_)
+                // Also block while an async second response or deferred INT is still in flight.
+                if (command_pipeline_busy)
                 {
+                    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                        "QUEUE CMD 0x%02X (%s): irq=0x%02X busy=%u cmd_exec=%u pend_type=%u read_pend=%u async=%u",
+                        v, cmd_name(v), irq_flags_, (unsigned)busy_, (unsigned)cmd_exec_valid_,
+                        (unsigned)pending_irq_type_, (unsigned)read_pending_irq1_, (unsigned)async_stat_pending_);
                     queued_cmd_ = v;
                     queued_cmd_valid_ = 1;
                     queued_param_count_ = param_count_;
@@ -2391,13 +2518,15 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                             "QUEUE HIGH MSF: cmd=0x02 params=[%02X,%02X,%02X] param_count=%u",
                             param_fifo_[0], param_fifo_[1], param_fifo_[2], param_count_);
                     }
+                    if (v == 0x08 || v == 0x09)
+                    {
+                        cancel_pending_read_advance();
+                    }
                     busy_ = 1;
                 }
                 else
                 {
-                    busy_ = 1;
-                    exec_command(v);
-                    busy_ = 0;
+                    schedule_command_execution(v, param_fifo_, param_count_);
                 }
             }
             else if (index_ == 3)
@@ -2538,16 +2667,32 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 if (read_pending_irq1_ && ((old_flags & 0x07u) != 0u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     read_pending_irq1_ = 0;
-                    data_ready_pending_ = 1;
                     pending_irq_type_ = 0x01; // INT1 (data ready)
                     pending_irq_resp_ = status_;
+                    pending_irq_live_status_ = 1;
                     pending_irq_reason_ = 0;
-                    // Calculate realistic seek time: includes spin-up if motor was idle,
-                    // plus seek delay based on distance from current head position.
-                    pending_irq_delay_ = calc_seek_time(head_lba_, loc_lba_, true);
+                    // Real drive behavior: the first data-ready after ReadN is one sector interval
+                    // away, plus any outstanding seek/spin-up cost if SetLoc moved the head.
+                    const uint8_t needs_seek =
+                        (seek_pending_ || !motor_spinning_ || head_lba_ != read_lba_ || seek_in_progress_) ? 1u : 0u;
+                    pending_irq_delay_ = read_sector_ticks();
+                    if (needs_seek)
+                        pending_irq_delay_ += calc_seek_time(head_lba_, read_lba_, true);
                     // Mark motor as spinning after this seek
                     motor_spinning_ = 1;
-                    try_fill_data_fifo();
+                    pending_read_seek_commit_ = needs_seek;
+                    if (read_lba_ == 60643u || data_lba_ == 60643u)
+                    {
+                        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                            "READN INT1 ARM: old=0x%02X new=0x%02X read_lba=%u data_lba=%u delay=%u seek=%u cyc_ack=%u",
+                            (unsigned)(old_flags & 0x1Fu),
+                            (unsigned)(irq_flags_ & 0x1Fu),
+                            (unsigned)read_lba_,
+                            (unsigned)data_lba_,
+                            (unsigned)pending_irq_delay_,
+                            (unsigned)needs_seek,
+                            (unsigned)cycles_since_irq_ack_);
+                    }
                 }
                 // ReadN/ReadS continuous: after INT1 is acked, queue next sector read.
                 // Don't advance loc_lba_ yet - the current sector data must remain
@@ -2560,13 +2705,12 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     // Use reason=0xFF as a marker for "continuous read advance needed"
                     pending_irq_type_ = 0x01; // INT1 (next sector ready)
                     pending_irq_resp_ = status_;
+                    pending_irq_live_status_ = 1;
                     pending_irq_reason_ = 0xFFu; // marker: advance sector on delivery
-                    // FAST CD TIMING: Reduced by 10x for wall-clock mode
-                    // Original: single=~220000 cycles (~6.7ms), double=~110000 cycles (~3.3ms)
-                    // Fast: single=~22000 cycles (~0.65ms), double=~11000 cycles (~0.33ms)
-                    pending_irq_delay_ = (mode_ & 0x80u) ? 11000u : 22000u;
+                    pending_irq_delay_ = read_sector_ticks();
+                    pending_read_seek_commit_ = 0;
                     emu::logf(emu::LogLevel::debug, "CD",
-                        "ReadN continuous: queued next INT1, current LBA=%u delay=%u", loc_lba_, pending_irq_delay_);
+                        "ReadN continuous: queued next INT1, current LBA=%u delay=%u", read_lba_, pending_irq_delay_);
                 }
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
@@ -2575,6 +2719,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     async_stat_pending_ = 0;
                     pending_irq_type_ = 0x01; // INT1 (status update)
                     pending_irq_resp_ = status_;
+                    pending_irq_live_status_ = 1;
                     pending_irq_reason_ = 0;
                     pending_irq_delay_ = 5000;
                     emu::logf(emu::LogLevel::debug, "CD", "Deferred async INT1 (status=0x%02X)", status_);
@@ -2592,27 +2737,25 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // If there is a queued command and no pending IRQ flags (and no
                 // deferred IRQ waiting), start it now. The queued command will
                 // produce its own IRQ via queue_cmd_irq, which has a delay.
-                if (queued_cmd_valid_ && ((irq_flags_ & 0x1Fu) == 0u) && pending_irq_type_ == 0)
+                if (queued_cmd_valid_ &&
+                    ((irq_flags_ & 0x1Fu) == 0u) &&
+                    pending_irq_type_ == 0 &&
+                    !cmd_exec_valid_ &&
+                    resp_r_ == resp_w_ &&
+                    !read_pending_irq1_ &&
+                    !async_stat_pending_)
                 {
-                    // Restore queued params into the parameter fifo (as if they were written before cmd).
-                    clear_params();
-                    param_count_ = queued_param_count_;
-                    for (uint8_t i = 0; i < param_count_; ++i)
-                        param_fifo_[i] = queued_params_[i];
-
                     // DEBUG: Log if restored params contain high MSF values
-                    if (queued_cmd_ == 0x02 && param_count_ >= 1 && param_fifo_[0] >= 0x40)
+                    if (queued_cmd_ == 0x02 && queued_param_count_ >= 1 && queued_params_[0] >= 0x40)
                     {
                         cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
                             "QUEUE RESTORE HIGH MSF: cmd=0x%02X params=[%02X,%02X,%02X] queued_param_count=%u",
-                            queued_cmd_, param_fifo_[0], param_fifo_[1], param_fifo_[2], queued_param_count_);
+                            queued_cmd_, queued_params_[0], queued_params_[1], queued_params_[2], queued_param_count_);
                     }
+                    schedule_command_execution(queued_cmd_, queued_params_, queued_param_count_);
                     queued_cmd_valid_ = 0;
-                    busy_ = 1;
-                    exec_command(queued_cmd_);
-                    busy_ = 0;
                 }
-                else if (!queued_cmd_valid_)
+                else if (!queued_cmd_valid_ && !cmd_exec_valid_)
                 {
                     busy_ = 0;
                 }
@@ -2639,26 +2782,55 @@ void Cdrom::tick(uint32_t cycles)
         cycles_since_irq_ack_ += cycles;
     }
 
-    // Deliver command response IRQ after delay.
-    // Response data is already in the FIFO; this just sets irq_flags.
-    // NOTE: MINIMUM_INTERRUPT_DELAY is only applied to async IRQs (INT2),
-    // not to command responses (INT3). The INT3 can fire based on its own
-    // command delay, but must still wait for irq_flags to be clear.
-    if (cmd_irq_pending_ != 0)
+    // Execute a pending command after its command-event delay.
+    // Unlike the previous model, the response FIFO becomes visible only here,
+    // when the command actually executes, not at command-write time.
+    if (cmd_exec_valid_ != 0)
     {
-        if (cmd_irq_delay_ > 0)
+        if (cmd_exec_delay_ > 0)
         {
-            if (cycles >= cmd_irq_delay_)
-                cmd_irq_delay_ = 0;
+            if (cycles >= cmd_exec_delay_)
+                cmd_exec_delay_ = 0;
             else
-                cmd_irq_delay_ -= cycles;
+                cmd_exec_delay_ -= cycles;
         }
-        // Only deliver when irq_flags are clear (previous IRQ was acked)
-        if (cmd_irq_delay_ == 0 && (irq_flags_ & 0x1Fu) == 0u)
+
+        if (cmd_exec_delay_ == 0 &&
+            (irq_flags_ & 0x1Fu) == 0u &&
+            pending_irq_type_ == 0 &&
+            resp_r_ == resp_w_ &&
+            !read_pending_irq1_ &&
+            !async_stat_pending_)
         {
-            set_irq(cmd_irq_pending_);
-            cmd_irq_pending_ = 0;
+            clear_params();
+            param_count_ = cmd_exec_param_count_;
+            for (uint8_t i = 0; i < param_count_; ++i)
+                param_fifo_[i] = cmd_exec_params_[i];
+
+            const uint8_t exec_cmd = cmd_exec_cmd_;
+            cmd_exec_valid_ = 0;
+            cmd_exec_delay_ = 0;
+
+            exec_command(exec_cmd);
+            if (!queued_cmd_valid_ && !cmd_exec_valid_)
+                busy_ = 0;
         }
+    }
+
+    // A queued command can be left stranded if it was queued while the pipeline
+    // was still busy, then that busy condition was cleared without another MMIO
+    // ACK path to restart it (UE5 hit this with Pause after LBA16).
+    // Restart it here from the regular tick path once the pipeline is truly idle.
+    if (queued_cmd_valid_ &&
+        (irq_flags_ & 0x1Fu) == 0u &&
+        pending_irq_type_ == 0 &&
+        !cmd_exec_valid_ &&
+        resp_r_ == resp_w_ &&
+        !read_pending_irq1_ &&
+        !async_stat_pending_)
+    {
+        schedule_command_execution(queued_cmd_, queued_params_, queued_param_count_);
+        queued_cmd_valid_ = 0;
     }
 
     // Deliver pending async IRQs after delay expires.
@@ -2669,7 +2841,7 @@ void Cdrom::tick(uint32_t cycles)
         // well after the first; counting both delays simultaneously caused
         // INT2 to fire immediately after INT3 was ACK'd, which confused
         // the BIOS state machine (it expects a real gap between the two).
-        if (cmd_irq_pending_ == 0 && pending_irq_delay_ > 0)
+        if (!cmd_exec_valid_ && pending_irq_delay_ > 0)
         {
             if (cycles >= pending_irq_delay_)
                 pending_irq_delay_ = 0;
@@ -2682,49 +2854,84 @@ void Cdrom::tick(uint32_t cycles)
         if (pending_irq_delay_ == 0 && (irq_flags_ & 0x1Fu) == 0u &&
             cycles_since_irq_ack_ >= kMinInterruptDelay)
         {
+            const uint32_t deliver_read_lba = read_lba_;
+            const uint32_t deliver_data_lba = data_lba_;
+            const uint8_t deliver_type = pending_irq_type_;
             // For continuous ReadN/ReadS: advance sector before delivering INT1
             const uint8_t is_read_advance = (pending_irq_reason_ == 0xFFu) ? 1u : 0u;
             if (is_read_advance)
             {
                 // Check if next sector would exceed disc bounds
                 const uint32_t disc_end = disc_ ? disc_->disc_sectors : 0;
-                if (disc_end > 0 && (loc_lba_ + 1) >= disc_end)
+                if (disc_end > 0 && (read_lba_ + 1) >= disc_end)
                 {
                     cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
-                        "ReadN advance STOPPED: LBA=%u+1 >= disc_end=%u", loc_lba_, disc_end);
+                        "ReadN advance STOPPED: LBA=%u+1 >= disc_end=%u", read_lba_, disc_end);
                     stop_reading_with_error(0x80); // ERROR_REASON_NOT_READY
                     return; // Don't deliver INT1, we sent INT5 instead
                 }
 
-                loc_lba_++;
+                read_lba_++;
                 clear_data();
                 want_data_ = 0;
-                data_ready_pending_ = 1;
                 pending_irq_reason_ = 0; // clear marker before pushing resp
                 cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
-                    "ReadN advance -> LBA=%u", loc_lba_);
+                    "ReadN advance -> LBA=%u", read_lba_);
             }
 
-            // Update head position when INT1 (data ready) is delivered
+            if (pending_irq_type_ == 0x02 && seek_in_progress_)
+            {
+                head_lba_ = seek_target_lba_;
+                read_lba_ = seek_target_lba_;
+                seek_pending_ = 0;
+                seek_in_progress_ = 0;
+                set_secondary_idle(true);
+            }
+
+            // Commit data-ready state only when INT1 is actually delivered.
             if (pending_irq_type_ == 0x01)
             {
-                head_lba_ = loc_lba_;
+                data_ready_pending_ = 1;
+                data_lba_ = read_lba_;
+                if (pending_read_seek_commit_)
+                {
+                    seek_pending_ = 0;
+                    pending_read_seek_commit_ = 0;
+                }
+                head_lba_ = read_lba_;
+                try_fill_data_fifo();
             }
 
+            const uint8_t irq_resp = pending_irq_live_status_ ? status_ : pending_irq_resp_;
             clear_resp();
-            push_resp(pending_irq_resp_);
+            push_resp(irq_resp);
             if (pending_irq_reason_ != 0)
                 push_resp(pending_irq_reason_);
             for (uint8_t i = 0; i < pending_irq_extra_len_; ++i)
                 push_resp(pending_irq_extra_[i]);
             pending_irq_extra_len_ = 0;
             set_irq(pending_irq_type_);
+            if (deliver_read_lba == 60643u || deliver_data_lba == 60643u)
+            {
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                    "READN INT1 DELIVER: type=%u read_lba=%u data_lba=%u resp=0x%02X reason=0x%02X want=%d drp=%d fifo=%u/%u",
+                    (unsigned)deliver_type,
+                    (unsigned)deliver_read_lba,
+                    (unsigned)deliver_data_lba,
+                    (unsigned)irq_resp,
+                    (unsigned)pending_irq_reason_,
+                    (int)want_data_,
+                    (int)data_ready_pending_,
+                    (unsigned)data_r_,
+                    (unsigned)data_w_);
+            }
             emu::logf(emu::LogLevel::debug, "CD", "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
-                (unsigned)pending_irq_type_, (unsigned)pending_irq_resp_, (unsigned)pending_irq_reason_);
+                (unsigned)pending_irq_type_, (unsigned)irq_resp, (unsigned)pending_irq_reason_);
             cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::debug,
                 "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
-                (unsigned)pending_irq_type_, (unsigned)pending_irq_resp_, (unsigned)pending_irq_reason_);
+                (unsigned)pending_irq_type_, (unsigned)irq_resp, (unsigned)pending_irq_reason_);
             pending_irq_type_ = 0;
+            pending_irq_live_status_ = 0;
             pending_irq_reason_ = 0;
         }
     }
@@ -2739,6 +2946,7 @@ void Cdrom::tick(uint32_t cycles)
         {
             motor_idle_countdown_ = 0;
             motor_spinning_ = 0;
+            set_secondary_idle(false);
             emu::logf(emu::LogLevel::info, "CD", "Motor spun down (idle)");
         }
         else
@@ -2795,8 +3003,7 @@ void Cdrom::start_cdda_playback()
     audio_fifo_write_ = 0;
     audio_fifo_count_ = 0;
 
-    // Set status: Playing + Motor On
-    status_ = (status_ | 0x80) & ~0x20;  // Set Play bit (7), clear Read bit (5)
+    set_secondary_playing();
 
     emu::logf(emu::LogLevel::info, "CD", "CDDA playback started at LBA=%u", cdda_lba_);
     cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
@@ -2809,7 +3016,7 @@ void Cdrom::stop_cdda_playback()
         return;
 
     playing_cdda_ = 0;
-    status_ &= ~0x80;  // Clear Play bit
+    set_secondary_idle(motor_spinning_ != 0);
 
     emu::logf(emu::LogLevel::info, "CD", "CDDA playback stopped at LBA=%u", cdda_lba_);
     cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,

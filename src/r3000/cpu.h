@@ -448,6 +448,11 @@ class Cpu
     int exc_trace_count_{0};
     int exc_trace_pc_log_{0};
     static constexpr int kExcTraceMax = 2000;
+    uint32_t irq_take_log_count_{0};
+    uint32_t irq_exc_log_count_{0};
+    uint32_t irq_status_write_log_count_{0};
+    uint32_t irq_rfe_log_count_{0};
+    uint32_t bios_cd_pending_log_count_{0};
 
     // HLE BIOS vectors (bring-up): petit état pour quelques services kernel.
     // NOTE: ce n'est pas "PS1-accurate"; objectif = permettre au BIOS d'avancer,

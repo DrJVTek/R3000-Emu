@@ -451,6 +451,25 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
 
     const uint32_t epc = in_delay_slot ? (pc_of_fault - 4u) : pc_of_fault;
 
+    if ((code & 0x1Fu) == EXC_INT)
+    {
+        if (irq_exc_log_count_ < 256u)
+        {
+            ++irq_exc_log_count_;
+            emu::logf(emu::LogLevel::warn, "IRQ",
+                "EXC_INT pc=0x%08X epc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X bd=%d (#%u)",
+                pc_of_fault,
+                epc,
+                cop0_[COP0_CAUSE],
+                cop0_[COP0_STATUS],
+                (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
+                (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
+                (unsigned)(bus_.irq_pending_masked() & 0xFFFFu),
+                in_delay_slot,
+                irq_exc_log_count_);
+        }
+    }
+
     // Trace RI exceptions (limited to first 5 per instance)
     if ((code & 0x1Fu) == EXC_RI)
     {
@@ -822,6 +841,52 @@ Cpu::StepResult Cpu::step()
     maybe_log_camera_candidates();
     ++token_seq_;
 
+    // Debug state for the Tekken EXE loader race:
+    // the problematic case is not a missing scheduler pulse anymore, but a
+    // callback swap that becomes visible while the same CD "ready" pulse is
+    // still active. Reset the per-pulse latch as soon as Ready drops.
+    static uint32_t tekk_ready_dispatch_cb = 0;
+    static uint32_t tekk_last_ready_state = 0;
+    {
+        Bus::MemFault mf{};
+        uint32_t ready_state = 0;
+        (void)bus_.read_u32(0x001CA684u, ready_state, mf);
+        if (ready_state == 0u)
+        {
+            tekk_last_ready_state = 0;
+            tekk_ready_dispatch_cb = 0;
+        }
+    }
+
+    // Older proof guard kept here disabled: the issue is not "enter 0x8015D428
+    // exactly once", but "dispatch a new callback inside the same ready pulse".
+    if (false && pc_ == 0x8015D428u)
+    {
+        Bus::MemFault mf{};
+        uint32_t exe_dst_ptr = 0;
+        uint32_t exe_remain = 0;
+        (void)bus_.read_u32(0x001CB33Cu, exe_dst_ptr, mf);
+        (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+        static uint32_t tekk_early_cb_skips = 0;
+        if (exe_dst_ptr == 0u && exe_remain != 0u && tekk_early_cb_skips < 1u)
+        {
+            ++tekk_early_cb_skips;
+            emu::logf(
+                emu::LogLevel::warn,
+                "TEKK_CB_SKIP_EARLY",
+                "pc=0x%08X ra=0x%08X exe_dst=0x%08X exe_remain=0x%08X skip=%u",
+                pc_,
+                gpr_[31],
+                exe_dst_ptr,
+                exe_remain,
+                tekk_early_cb_skips);
+            pc_ = gpr_[31];
+            r.kind = StepResult::Kind::ok;
+            r.instr = 0;
+            return r;
+        }
+    }
+
     // Arm exception trace when B(0x4B) StartPAD is called (right before the critical exception)
     if (!exc_trace_armed_ && pc_ == 0xB0u && (gpr_[9] & 0xFFu) == 0x4Bu)
     {
@@ -915,8 +980,43 @@ Cpu::StepResult Cpu::step()
         const uint32_t im = status & 0xFF00u;
         const int iec = (status & 0x1u) ? 1 : 0;
 
+        if ((pending & 0x0004u) != 0u &&
+            pc_ >= 0xBFC0'0000u && pc_ < 0xBFC8'0000u &&
+            bios_cd_pending_log_count_ < 256u)
+        {
+            ++bios_cd_pending_log_count_;
+            emu::logf(emu::LogLevel::warn, "IRQ",
+                "BIOS CD pending pc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X ip=0x%04X im=0x%04X iec=%d (#%u)",
+                pc_,
+                cause,
+                status,
+                (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
+                (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
+                (unsigned)(pending & 0xFFFFu),
+                (unsigned)(ip & 0xFFFFu),
+                (unsigned)(im & 0xFFFFu),
+                iec,
+                bios_cd_pending_log_count_);
+        }
+
         if (iec && (ip & im) != 0u)
         {
+            if (irq_take_log_count_ < 256u)
+            {
+                ++irq_take_log_count_;
+                emu::logf(emu::LogLevel::warn, "IRQ",
+                    "TAKE_IRQ pc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X ip=0x%04X im=0x%04X iec=%d (#%u)",
+                    pc_,
+                    cause,
+                    status,
+                    (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
+                    (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
+                    (unsigned)(pending & 0xFFFFu),
+                    (unsigned)(ip & 0xFFFFu),
+                    (unsigned)(im & 0xFFFFu),
+                    iec,
+                    irq_take_log_count_);
+            }
             // Trace SIO0 IRQ delivery to CPU (first 10)
             if (pending & (1u << 7))
             {
@@ -3538,6 +3638,172 @@ Cpu::StepResult Cpu::step()
                 dump_tekk_cdprep_ring("call_FUN_8016AAE0_a0_zero");
         }
     };
+    auto trace_tekk_event3 = [&](uint32_t pc)
+    {
+        static uint32_t tekk_event3_logs = 0;
+        if (tekk_event3_logs >= 64u)
+            return;
+        ++tekk_event3_logs;
+
+        Bus::MemFault mf{};
+        uint32_t cb = 0, exe_stage = 0, exe_dst = 0, exe_remain = 0;
+        (void)bus_.read_u32(0x001EF68Cu, cb, mf);
+        (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
+        (void)bus_.read_u32(0x001CB33Cu, exe_dst, mf);
+        (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+        emu::logf(
+            emu::LogLevel::warn,
+            "TEKK_EVENT3",
+            "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X cb=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
+            pc,
+            instr,
+            gpr_[4],
+            gpr_[5],
+            gpr_[6],
+            gpr_[7],
+            gpr_[31],
+            cb,
+            exe_stage,
+            exe_dst,
+            exe_remain);
+    };
+    auto trace_tekk_dispatch = [&](const char* tag, uint32_t pc)
+    {
+        static uint32_t tekk_dispatch_logs = 0;
+        if (tekk_dispatch_logs >= 128u)
+            return;
+        ++tekk_dispatch_logs;
+
+        Bus::MemFault mf{};
+        uint32_t sync_state = 0, ready_state = 0, cb = 0, exe_stage = 0, exe_dst = 0, exe_remain = 0;
+        (void)bus_.read_u32(0x001CA680u, sync_state, mf);
+        (void)bus_.read_u32(0x001CA684u, ready_state, mf);
+        (void)bus_.read_u32(0x001EF68Cu, cb, mf);
+        (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
+        (void)bus_.read_u32(0x001CB33Cu, exe_dst, mf);
+        (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+        emu::logf(
+            emu::LogLevel::warn,
+            tag ? tag : "TEKK_DISPATCH",
+            "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X ra=0x%08X sync=0x%08X ready=0x%08X cb=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
+            pc,
+            instr,
+            gpr_[4],
+            gpr_[5],
+            gpr_[6],
+            gpr_[7],
+            gpr_[2],
+            gpr_[3],
+            gpr_[31],
+            sync_state,
+            ready_state,
+            cb,
+            exe_stage,
+            exe_dst,
+            exe_remain);
+    };
+    auto trace_tekk_cbset = [&](uint32_t pc)
+    {
+        static uint32_t tekk_cbset_logs = 0;
+        if (tekk_cbset_logs >= 64u)
+            return;
+        ++tekk_cbset_logs;
+
+        Bus::MemFault mf{};
+        uint32_t cb = 0, sync_state = 0, ready_state = 0, exe_stage = 0, exe_dst = 0, exe_remain = 0;
+        (void)bus_.read_u32(0x001EF68Cu, cb, mf);
+        (void)bus_.read_u32(0x001CA680u, sync_state, mf);
+        (void)bus_.read_u32(0x001CA684u, ready_state, mf);
+        (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
+        (void)bus_.read_u32(0x001CB33Cu, exe_dst, mf);
+        (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+        emu::logf(
+            emu::LogLevel::warn,
+            "TEKK_CBSET",
+            "pc=0x%08X instr=0x%08X a0=0x%08X v0=0x%08X ra=0x%08X cb_now=0x%08X sync=0x%08X ready=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
+            pc,
+            instr,
+            gpr_[4],
+            gpr_[2],
+            gpr_[31],
+            cb,
+            sync_state,
+            ready_state,
+            exe_stage,
+            exe_dst,
+            exe_remain);
+    };
+    auto trace_tekk_scheduler_gate = [&](const char* tag, uint32_t pc)
+    {
+        static uint32_t tekk_sched_init_logs = 0;
+        static uint32_t tekk_sched_p10_logs = 0;
+        static uint32_t tekk_sched_p14_logs = 0;
+        static uint32_t tekk_gate4_logs = 0;
+        static uint32_t tekk_gate10_logs = 0;
+        static uint32_t tekk_gate14_logs = 0;
+
+        uint32_t* budget = &tekk_sched_init_logs;
+        if (tag != nullptr)
+        {
+            if (std::strcmp(tag, "TEKK_SCHED_P10") == 0)
+                budget = &tekk_sched_p10_logs;
+            else if (std::strcmp(tag, "TEKK_SCHED_P14") == 0)
+                budget = &tekk_sched_p14_logs;
+            else if (std::strcmp(tag, "TEKK_GATE4") == 0)
+                budget = &tekk_gate4_logs;
+            else if (std::strcmp(tag, "TEKK_GATE10") == 0)
+                budget = &tekk_gate10_logs;
+            else if (std::strcmp(tag, "TEKK_GATE14") == 0)
+                budget = &tekk_gate14_logs;
+        }
+
+        if (*budget >= 128u)
+            return;
+        ++(*budget);
+
+        Bus::MemFault mf{};
+        uint32_t cb = 0, exe_stage = 0, exe_dst = 0, exe_remain = 0;
+        uint32_t sync_state = 0, ready_state = 0;
+        uint32_t table_ptr = 0, gate_p4 = 0, gate_p10 = 0, gate_p14 = 0;
+        (void)bus_.read_u32(0x001EF68Cu, cb, mf);
+        (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
+        (void)bus_.read_u32(0x001CB33Cu, exe_dst, mf);
+        (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+        (void)bus_.read_u32(0x001CA680u, sync_state, mf);
+        (void)bus_.read_u32(0x001CA684u, ready_state, mf);
+        (void)bus_.read_u32(0x001CA7E4u, table_ptr, mf);
+        if (table_ptr != 0u)
+        {
+            Bus::MemFault mf2{};
+            (void)bus_.read_u32(virt_to_phys(table_ptr + 0x04u), gate_p4, mf2);
+            (void)bus_.read_u32(virt_to_phys(table_ptr + 0x10u), gate_p10, mf2);
+            (void)bus_.read_u32(virt_to_phys(table_ptr + 0x14u), gate_p14, mf2);
+        }
+
+        emu::logf(
+            emu::LogLevel::warn,
+            tag ? tag : "TEKK_SCHED",
+            "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X ra=0x%08X sync=0x%08X ready=0x%08X cb=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X table=0x%08X gate4=0x%08X gate10=0x%08X gate14=0x%08X",
+            pc,
+            instr,
+            gpr_[4],
+            gpr_[5],
+            gpr_[6],
+            gpr_[7],
+            gpr_[2],
+            gpr_[3],
+            gpr_[31],
+            sync_state,
+            ready_state,
+            cb,
+            exe_stage,
+            exe_dst,
+            exe_remain,
+            table_ptr,
+            gate_p4,
+            gate_p10,
+            gate_p14);
+    };
     auto decode_face_token_from_tagged_sxy = [&](uint32_t sxy) -> uint32_t
     {
         const uint16_t sx = (uint16_t)(sxy & 0xFFFFu);
@@ -3713,6 +3979,7 @@ Cpu::StepResult Cpu::step()
                             // return = pc_ + 4.
                             const uint32_t s = rs(instr);
                             const uint32_t d = rd(instr);
+                            const uint32_t target = gpr_[s];
                             const uint32_t ra = pc_ + 4;
                             if ((d & 31u) != 0u)
                             {
@@ -3722,9 +3989,57 @@ Cpu::StepResult Cpu::step()
                                 wb_valid = 1;
                             }
                             set_reg(d ? d : 31u, ra);
-                            trace_tekk_dma3_call("JALR", r.pc, gpr_[s]);
-                            callctx_push(r.pc, gpr_[s], ra);
-                            schedule_branch(gpr_[s]);
+
+                            // Tekken proof guard: latch the first callback seen for a contiguous
+                            // Ready=1 window and refuse to consume a *new* callback in that same
+                            // window. Logs show 0x8015D388 runs, installs 0x8015D428, and the
+                            // dispatcher reuses the same Ready pulse immediately.
+                            if (r.pc == 0x8016AC2Cu)
+                            {
+                                Bus::MemFault mf{};
+                                uint32_t ready_state = 0;
+                                uint32_t exe_dst_ptr = 0;
+                                uint32_t exe_remain = 0;
+                                (void)bus_.read_u32(0x001CA684u, ready_state, mf);
+                                (void)bus_.read_u32(0x001CB33Cu, exe_dst_ptr, mf);
+                                (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
+                                if (ready_state != 0u)
+                                {
+                                    if (tekk_last_ready_state == 0u)
+                                    {
+                                        tekk_last_ready_state = ready_state;
+                                        tekk_ready_dispatch_cb = target;
+                                    }
+                                    else if (tekk_ready_dispatch_cb != 0u &&
+                                             tekk_ready_dispatch_cb != target &&
+                                             exe_dst_ptr == 0u &&
+                                             exe_remain != 0u)
+                                    {
+                                        static uint32_t tekk_ready_reuse_holds = 0;
+                                        ++tekk_ready_reuse_holds;
+                                        emu::logf(
+                                            emu::LogLevel::warn,
+                                            "TEKK_READY_REUSE_HOLD",
+                                            "pc=0x%08X first_cb=0x%08X target=0x%08X ra=0x%08X ready=0x%08X exe_dst=0x%08X exe_remain=0x%08X hold=%u",
+                                            r.pc,
+                                            tekk_ready_dispatch_cb,
+                                            target,
+                                            ra,
+                                            ready_state,
+                                            exe_dst_ptr,
+                                            exe_remain,
+                                            tekk_ready_reuse_holds);
+                                        Bus::MemFault mfw{};
+                                        (void)bus_.write_u32(0x001CA684u, 0u, mfw);
+                                        schedule_branch(ra);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            trace_tekk_dma3_call("JALR", r.pc, target);
+                            callctx_push(r.pc, target, ra);
+                            schedule_branch(target);
                             break;
                         }
                     case 0x0C:
@@ -4865,6 +5180,27 @@ Cpu::StepResult Cpu::step()
                             r.pc, cop0_[COP0_STATUS], gpr_[t],
                             (int)(cop0_[COP0_STATUS] & 1), (int)(gpr_[t] & 1));
                     }
+                    if ((d & 31u) == COP0_STATUS)
+                    {
+                        const uint32_t pending = bus_.irq_pending_masked();
+                        if (pending != 0u && irq_status_write_log_count_ < 256u)
+                        {
+                            ++irq_status_write_log_count_;
+                            emu::logf(emu::LogLevel::warn, "IRQ",
+                                "MTC0 Status pc=0x%08X old=0x%08X new=0x%08X pending=0x%04X i_stat=0x%04X i_mask=0x%04X iec=%d->%d im=0x%04X->0x%04X (#%u)",
+                                r.pc,
+                                cop0_[COP0_STATUS],
+                                gpr_[t],
+                                (unsigned)(pending & 0xFFFFu),
+                                (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
+                                (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
+                                (int)(cop0_[COP0_STATUS] & 1u),
+                                (int)(gpr_[t] & 1u),
+                                (unsigned)(cop0_[COP0_STATUS] & 0xFF00u),
+                                (unsigned)(gpr_[t] & 0xFF00u),
+                                irq_status_write_log_count_);
+                        }
+                    }
                     cop0_[d & 31u] = gpr_[t];
                 }
                 else if (rs_field == 0x10)
@@ -4886,6 +5222,26 @@ Cpu::StepResult Cpu::step()
                             emu::logf(emu::LogLevel::debug, "EXC-TRACE",
                                 "RFE PC=0x%08X Status 0x%08X -> 0x%08X (IEc=%d->%d)",
                                 r.pc, st_before, st, (int)(st_before & 1), (int)(st & 1));
+                        }
+                        {
+                            const uint32_t pending = bus_.irq_pending_masked();
+                            if (pending != 0u && irq_rfe_log_count_ < 256u)
+                            {
+                                ++irq_rfe_log_count_;
+                                emu::logf(emu::LogLevel::warn, "IRQ",
+                                    "RFE pc=0x%08X status=0x%08X->0x%08X pending=0x%04X i_stat=0x%04X i_mask=0x%04X iec=%d->%d im=0x%04X->0x%04X (#%u)",
+                                    r.pc,
+                                    st_before,
+                                    st,
+                                    (unsigned)(pending & 0xFFFFu),
+                                    (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
+                                    (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
+                                    (int)(st_before & 1u),
+                                    (int)(st & 1u),
+                                    (unsigned)(st_before & 0xFF00u),
+                                    (unsigned)(st & 0xFF00u),
+                                    irq_rfe_log_count_);
+                            }
                         }
                     }
                     else
@@ -5551,6 +5907,39 @@ Cpu::StepResult Cpu::step()
             }
         }
     }
+
+    if (r.pc >= 0x8016CB14u && r.pc <= 0x8016CB30u)
+        trace_tekk_dispatch("TEKK_EVENT3_DISP", r.pc);
+
+    if (r.pc >= 0x8016CB44u && r.pc <= 0x8016CB58u)
+        trace_tekk_scheduler_gate("TEKK_SCHED_P14", r.pc);
+
+    if (r.pc >= 0x8016CB74u && r.pc <= 0x8016CB88u)
+        trace_tekk_scheduler_gate("TEKK_SCHED_P10", r.pc);
+
+    if (r.pc >= 0x8016CBECu && r.pc <= 0x8016CC98u)
+        trace_tekk_scheduler_gate("TEKK_SCHED_INIT", r.pc);
+
+    if (r.pc >= 0x8016CA40u && r.pc <= 0x8016CAB0u)
+        trace_tekk_scheduler_gate("TEKK_GATE14", r.pc);
+
+    if (r.pc >= 0x8016CFC8u && r.pc <= 0x8016D02Cu)
+        trace_tekk_scheduler_gate("TEKK_GATE10", r.pc);
+
+    if (r.pc >= 0x8016D2BCu && r.pc <= 0x8016D340u)
+        trace_tekk_scheduler_gate("TEKK_GATE4", r.pc);
+
+    if (r.pc >= 0x8016AC1Cu && r.pc <= 0x8016AC30u)
+        trace_tekk_dispatch("TEKK_DISPATCH", r.pc);
+
+    if (r.pc >= 0x8016AC24u && r.pc <= 0x8016AC30u)
+        trace_tekk_dispatch("TEKK_JALR", r.pc);
+
+    if (r.pc >= 0x80168EDCu && r.pc <= 0x80168EECu)
+        trace_tekk_event3(r.pc);
+
+    if (r.pc >= 0x80168AB0u && r.pc <= 0x80168AC4u)
+        trace_tekk_cbset(r.pc);
 
     if (r.pc >= 0x8015D3D8u && r.pc <= 0x8015D41Cu)
     {

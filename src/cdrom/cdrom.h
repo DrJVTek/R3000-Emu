@@ -20,6 +20,18 @@ namespace cdrom
 class Cdrom
 {
   public:
+    enum SecondaryStatusBits : uint8_t
+    {
+        STAT_ERROR = 1u << 0,
+        STAT_MOTOR_ON = 1u << 1,
+        STAT_SEEK_ERROR = 1u << 2,
+        STAT_ID_ERROR = 1u << 3,
+        STAT_SHELL_OPEN = 1u << 4,
+        STAT_READING = 1u << 5,
+        STAT_SEEKING = 1u << 6,
+        STAT_PLAYING_CDDA = 1u << 7,
+    };
+
     explicit Cdrom(rlog::Logger* logger = nullptr);
 
     // Logs dédiés (optionnels).
@@ -47,7 +59,15 @@ class Cdrom
     int irq_line() const;
     uint8_t irq_flags_raw() const { return irq_flags_; }
     uint8_t irq_enable_raw() const { return irq_enable_; }
+    uint8_t debug_index_raw() const { return index_; }
+    uint8_t debug_status_reg() const { return status_reg(); }
+    uint32_t debug_read_lba() const { return read_lba_; }
+    uint32_t debug_data_lba() const { return data_lba_; }
+    uint8_t debug_last_cmd() const { return last_cmd_; }
     void clear_irq_flags() { irq_flags_ = 0; }
+    void debug_log_bus_irq_latched(uint32_t i_stat, uint32_t i_mask);
+    void debug_log_dma3_start(uint32_t madr, uint32_t bcr, uint32_t words);
+    void debug_log_dma3_end(uint32_t madr, uint32_t words, int blocked);
 
     // Tick (called from bus). Handles async IRQ delivery (INT5, INT1 for reads).
     void tick(uint32_t cycles);
@@ -114,6 +134,7 @@ class Cdrom
     void clear_params();
 
     void exec_command(uint8_t cmd);
+    void schedule_command_execution(uint8_t cmd, const uint8_t* params, uint8_t param_count);
     const char* cmd_name(uint8_t cmd) const;
     uint8_t cmd_expected_params(uint8_t cmd) const;
 
@@ -122,6 +143,12 @@ class Cdrom
     void stop_reading_with_error(uint8_t reason);
     uint8_t status_reg() const;
     void try_fill_data_fifo();
+    void clear_secondary_active_bits();
+    void set_secondary_idle(bool motor_on);
+    void set_secondary_seeking();
+    void set_secondary_reading();
+    void set_secondary_playing();
+    void cancel_pending_read_advance();
 
     // CDDA audio processing
     void start_cdda_playback();
@@ -138,6 +165,7 @@ class Cdrom
     // Seek timing: calculate delay in CPU cycles based on LBA distance.
     // Uses logarithmic model like DuckStation for realistic timing.
     uint32_t calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_spinup) const;
+    uint32_t read_sector_ticks() const;
 
     rlog::Logger* logger_{nullptr};
 
@@ -159,7 +187,7 @@ class Cdrom
 
     // Registres CDROM (modèle minimal, mais avec sémantique réelle).
     uint8_t index_{0};   // écrit via 0x1F801800
-    uint8_t status_{0};  // lu via 0x1F801800
+    uint8_t status_{0};  // CDROM secondary status returned by GetStat/command responses
     uint8_t irq_enable_{0x1Fu}; // PSX-SPX: defaults to 1Fh (all INT1-INT5 enabled)
     uint8_t irq_flags_{0};
     uint8_t request_{0}; // 1F801803.Index0 (SMEN/BFRD)
@@ -179,7 +207,9 @@ class Cdrom
 
     // Etat lecture
     uint8_t loc_msf_[3]{};
-    uint32_t loc_lba_{0};
+    uint32_t loc_lba_{0};            // SetLoc target LBA requested by software
+    uint32_t read_lba_{0};           // Sector currently exposed/read by ReadN/ReadS
+    uint32_t data_lba_{0};           // Sector latched by the last delivered INT1/DataReady
     uint8_t want_data_{0};
     uint8_t read_pending_irq1_{0};   // second response INT1 pending (ReadN/ReadS)
     uint8_t data_ready_pending_{0};  // data can be loaded when want_data=1
@@ -196,7 +226,10 @@ class Cdrom
     uint8_t mode_{0};
     uint8_t filter_file_{0};
     uint8_t filter_chan_{0};
-    uint8_t seek_pending_{0};  // SetLoc was called, next read needs seek delay
+    uint8_t seek_pending_{0};          // SetLoc target differs from committed head position
+    uint8_t seek_in_progress_{0};      // explicit SeekL/SeekP mechanical motion in flight
+    uint8_t pending_read_seek_commit_{0}; // first INT1 completes an implicit seek
+    uint32_t seek_target_lba_{0};      // target that will be committed on seek completion
 
     // Motor and head position tracking for realistic seek/spin-up timing.
     // Real PS1: motor spins down after Stop/Pause, spin-up takes ~600ms.
@@ -240,16 +273,19 @@ class Cdrom
     uint32_t pending_irq_delay_{0};  // cycles until pending IRQ fires
     uint8_t pending_irq_type_{0};    // IRQ type to deliver (1-5), 0=none
     uint8_t pending_irq_resp_{0};    // response byte 0 (stat)
+    uint8_t pending_irq_live_status_{0}; // if set, response byte 0 is read from current status_ on delivery
     uint8_t pending_irq_reason_{0};  // response byte 1 (reason code, 0=none)
     uint8_t pending_irq_extra_[16]{};// extra response bytes (for GetID etc.)
     uint8_t pending_irq_extra_len_{0};
 
     // Command response delay: irq_flags set after this delay elapses.
-    // Response data is already in the FIFO (BIOS can poll), but the IRQ
-    // line isn't raised until the delay expires, preventing VBlank handler
-    // from seeing CDROM irq_flags during the probing phase.
-    uint32_t cmd_irq_delay_{0};      // cycles until irq_flags are set
-    uint8_t cmd_irq_pending_{0};     // IRQ type to set when delay expires
+    // Real hardware schedules command execution/ACK, it does not expose the
+    // response bytes immediately on command write.
+    uint32_t cmd_exec_delay_{0};      // cycles until command executes
+    uint8_t cmd_exec_valid_{0};       // delayed command pending
+    uint8_t cmd_exec_cmd_{0};         // command byte to execute
+    uint8_t cmd_exec_params_[16]{};   // latched parameter bytes
+    uint8_t cmd_exec_param_count_{0}; // number of latched parameters
 
     uint8_t last_cmd_{0};             // last command executed (for debug)
 

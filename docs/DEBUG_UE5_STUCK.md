@@ -1771,3 +1771,238 @@ for (const FString& Line : LinesToBroadcast)
 ---
 
 ## RAPPEL : TOUJOURS RELIRE CE FICHIER AVANT DE CONTINUER LE DEBUG !
+
+---
+
+## SESSION 2026-03-22 - État actuel exact (Tekken Europe UE5)
+
+### Correctifs réellement appliqués dans cette phase
+
+1. **IRQ CD matérielle**
+   - push `Cdrom -> Bus`
+   - latch direct de `I_STAT bit 2`
+   - traces ajoutées :
+     - `CDROM IRQ push`
+     - `BUS IRQ2 latch`
+     - `I_STAT ACK CD via SW`
+
+2. **Fiabilité des traces IRQ CPU**
+   - suppression du biais des quotas `static` persistants entre runs PIE
+   - les compteurs de logs IRQ critiques sont maintenant réarmés par instance core
+
+3. **Trace BIOS MMIO CD**
+   - ajout de `CDMMIO BIOS RD/WR`
+   - fenêtre tracée :
+     - `0xBFC04A00 .. 0xBFC05580`
+
+4. **Fix structurel du registre `1F801803` index 1/3**
+   - avant :
+     - le code renvoyait `irq_flags | cmd_ready | 0xE0`
+     - donc `F1/F2/F3`
+   - après :
+     - il renvoie `(irq_flags & 0x1F) | 0xE0`
+     - donc `E1/E2/E3`
+   - bannière :
+     - `CDROM source v18 (irq_flag_reg_fix)`
+
+### Ce qui est maintenant prouvé par logs
+
+- Les bons secteurs sont lus :
+  - `SYSTEM.CNF` (`LBA 60642`)
+  - demande du premier secteur `PS-X EXE` (`LBA 60643`)
+- DMA3 fonctionne.
+- Le BIOS voit l'IRQ CD et l'acquitte.
+- Le fix `v18` est bien chargé en UE5.
+
+### Ce qui échoue encore
+
+Le run retombe toujours sur :
+- `FAULT code=5 (ADES)`
+- `PC=0xBFC03D1C`
+- `BadVAddr=0x3D20544E`
+
+`0x3D20544E` correspond à du texte `SYSTEM.CNF` (`NT =` en little-endian).
+
+### Diagnostic courant le plus probable
+
+Le verrou principal n'est plus :
+- ni un secteur faux
+- ni une IRQ CD perdue
+- ni un DMA3 cassé
+- ni le vieux bug du registre `IRQ Flag`
+
+Le suspect principal est maintenant :
+- **l'arbitrage des commandes CD pendant un `ReadN` encore actif**
+
+Observation clé :
+- pour `LBA 60642`, la séquence est cohérente :
+  - `ReadN`
+  - `INT1`
+  - `DMA3`
+  - `Pause`
+- pour `LBA 60643`, on voit :
+  - `ReadN/S START: LBA=60643`
+  - puis avant une complétion normale du secteur :
+    - `ReadTOC`
+    - `GetID`
+
+Donc le contrôleur accepte encore des commandes BIOS alors qu'une lecture `ReadN` est logiquement vivante.
+
+### Prochaine étape
+
+Durcir le **command gating** dans `src/cdrom/cdrom.cpp` :
+- empêcher `ReadTOC` / `GetID` / autres commandes de s'exécuter au milieu d'un `ReadN` encore actif
+- les mettre en queue proprement ou les rejeter selon le vrai comportement matériel
+
+---
+
+## Update 2026-03-22 (late) - Deferred CD command execution
+
+- `1F801803` index `1/3` bug fixed first:
+  - controller now returns `E1/E2/E3` instead of `F1/F2/F3`
+- this did not unlock the boot by itself
+- stronger divergence vs DuckStation identified:
+  - commands were executed immediately on `CMD_WRITE`
+  - response FIFO bytes became visible immediately
+  - only the matching IRQ was delayed
+- current structural change:
+  - `CDROM source v19 (deferred_command_exec)`
+  - command writes now latch a pending command
+  - command execution itself happens later from `Cdrom::tick()`
+  - queued commands restart through the same deferred pipeline
+- goal:
+  - align the controller with DuckStation's command-event model
+  - remove BIOS-visible impossible states where response bytes appear before the matching command event timing
+## 2026-03-22 late update - UE5 vs CLI divergence after PVD
+
+### Proven with current build markers
+- UE5 current logs show:
+  - `CDROM source v19 (deferred_command_exec)`
+  - `BUS source v28 (session_2026_03_22)`
+- BIOS DMA dump in UE5 is correct for the ISO9660 PVD:
+  - `pc=0xBFC06618`
+  - `madr=0xA000B070`
+  - ASCII `.CD001..PLAYSTAT`
+- Therefore:
+  - PVD payload is correct
+  - DMA3 to BIOS RAM is correct
+  - the blocker is not raw ISO payload corruption
+
+### New comparison: UE5 vs CLI
+A fresh CLI run with the same BIOS/disc and the same current core was executed from:
+- `build/Debug/r3000_emu.exe`
+- BIOS: `SCPH-7502 EU`
+- CD: `Tekken (Europe).cue`
+
+#### CLI behavior (current core)
+From `logs/cdrom.log` after the fresh CLI run:
+- `LBA=16` is read successfully
+- then the flow continues with:
+  - `Async IRQ1 delivered (resp=0x22)`
+  - `FIFO LBA=16 [01434430 30310100]`
+  - `CMD 0x09 (Pause)`
+  - then new reads:
+    - `LBA=18`
+    - `LBA=22`
+    - `LBA=60642` (`SYSTEM.CNF`)
+    - `LBA=60643` (`PS-X EXE`)
+- So the current core can still progress past the PVD under CLI.
+
+#### UE5 behavior (current core)
+From `PSXVR/logs/cdrom.log` and `system.log`:
+- `LBA=16` is read successfully
+- BIOS DMA dump confirms correct PVD bytes in RAM
+- immediately after that, UE5 shows:
+  - `QUEUE CMD 0x09 (Pause): irq=0x00 busy=0 cmd_exec=0 pend_type=1 read_pend=0 async=0`
+  - `Cancelled pending continuous ReadN INT1 advance`
+- and then no follow-up CD requests for:
+  - `LBA=18`
+  - `LBA=22`
+  - `LBA=60642`
+  - `LBA=60643`
+
+### Current best diagnosis
+- The core is now proven capable of progressing past `LBA=16` in CLI.
+- The UE5-specific blocker is therefore a runtime divergence after the PVD read, not a generic CD payload bug.
+- The first useful divergence is:
+  - CLI reaches `Async IRQ1 -> FIFO consume -> Pause -> next SetLoc/ReadN`
+  - UE5 stops right after `LBA16 DMA3 done` and never reaches the later BIOS ISO path.
+
+### Most likely active suspect now
+- UE5 timing/thread/runtime interaction around the post-`INT1` CD path:
+  - `ReadN(LBA16)`
+  - `INT1`
+  - DMA3 completion
+  - `Pause`
+  - delivery/consumption of the next BIOS-visible response/state
+- This is no longer a pure CD content issue.
+- It is also no longer a generic CLI/core issue.
+- It is now specifically an UE5-vs-CLI divergence.
+
+## 2026-03-22 correction - UE5 does consume PVD setup after all
+
+The latest UE5 run with elevated `info` tracing for `LBA=16` shows that UE5 does execute the expected BIOS-side MMIO sequence after `INT1`:
+- clears IRQ1
+- sets Want Data via `WR 0x3 idx=0 val=0x80`
+- fills FIFO:
+  - `FIFO LBA=16 [01434430 30310100]`
+- performs DMA3 from the FIFO to `0xA000B070`
+- then writes `CMD 0x09 (Pause)`
+
+So the earlier conclusion "UE5 stops before consuming the PVD" was too strong.
+What is actually proven now is narrower:
+- UE5 consumes the PVD sector setup correctly up to FIFO+DMA+Pause
+- but unlike CLI, UE5 stops immediately after this `Pause`
+- CLI continues from the same stage toward later BIOS reads (`LBA=18`, `22`, `60642`, `60643`)
+
+Current best diagnosis after this correction:
+- the divergence is not on PVD bytes and not on WantData/FIFO/DMA for `LBA=16`
+- the divergence is specifically on what happens immediately after the BIOS issues `Pause` after the PVD read
+- the active suspect remains UE5 runtime/timing/order interaction around post-`INT1` `Pause` handling
+
+## 2026-03-22 latest update - no longer a pure stall, now a reproducible BIOS crash
+
+The latest UE5 run with the queued-`Pause` restart fix no longer stops only at the old `LBA16` point.
+It now progresses into later BIOS parsing and then crashes deterministically:
+
+- `FAULT code=5(ADES)`
+- `PC=0xBFC03D1C`
+- `BadVAddr=0x3D20544E`
+- `ra=0xBFC0D5F0`
+
+### What is now proven
+
+- The queued `Pause` command was one real issue:
+  - after fixing queued-command restart in `Cdrom::tick()`, UE5 advances further than the previous `LBA16 -> Pause` stop.
+- The BIOS RAM scratch buffer is now observed directly during the failing path.
+- New `CDRAM` traces show the BIOS reading RAM words immediately before the crash:
+  - `pc=0xBFC03CF0 addr=0x0000B88C -> 0x0D303120`
+  - `pc=0xBFC03D04 addr=0x0000B888 -> 0x3D20544E`
+- `0x3D20544E` is little-endian ASCII for `NT =`
+  - this is text from `SYSTEM.CNF`
+- Earlier `CDRAM` byte reads in the same run show the BIOS parsing `BOOT = cdrom:SCES_000.05;1` from RAM.
+
+### Practical reading
+
+- This is no longer just "UE5 stalls after `Pause`".
+- UE5 now reaches the BIOS `SYSTEM.CNF` parsing path.
+- The current failure is:
+  - the BIOS later dereferences / uses a RAM word containing `SYSTEM.CNF` text as if it were structured data or an address
+  - this leads to `BadVAddr=0x3D20544E`
+
+### Current best diagnosis
+
+- The active bug is no longer:
+  - raw IRQ2 loss
+  - raw DMA3 failure
+  - bad PVD payload
+  - bad `WantData`
+- The active bug is now most likely:
+  - wrong post-`Pause` sector/state sequencing in the BIOS scratch buffer area
+  - i.e. a text sector (`SYSTEM.CNF`) is present in RAM in a state/context where the BIOS path at `0xBFC03CF0..0xBFC03D1C` expects something else
+
+### Current target
+
+- Focus on the exact LBA/sector ordering that populates the BIOS scratch region around:
+  - `0xA000B070..0xA000B88F`
+- The next useful correction is in CD state/sequencing after `Pause`, not in raw DMA plumbing.

@@ -171,3 +171,332 @@ Scope: UE5 live, Tekken (Europe), non-HLE, BIOS réel
   - it regresses the game flow earlier, after the PlayStation license screen
   - in that regressed run, the later `DMA3 MADR=0` path no longer reproduces
   - this means the physical cadence is a valuable signal, but not yet a shippable baseline
+
+## 2026-03-22 late update - current callback-order proof
+
+- UE5 live now proves that the CD scheduler itself is not the only remaining suspect:
+  - event class 3 is scheduled (`0x8015D3D8`)
+  - `gate4` dispatch runs
+  - the callback global at `0x801EF68C` is updated from `0x8015D388` to `0x8015D428`
+- Proven callback order:
+  1. callback `0x8015D388` is installed
+  2. during the same `Ready=1` period, callback `0x8015D428` is installed
+  3. `0x8015D428` is then consumed while `EXE_DST_PTR == 0`
+  4. this produces `FUN_8016AAE0(a0=0, a1=0x200)` and then `DMA3.MADR=0`
+- The key direct proof from UE5 detailed logs:
+  - `TEKK_CBSET` shows `cb_now=0x8015D388`, then `cb_now=0x8015D428`
+  - at the second install:
+    - `ready=0x00000001`
+    - `exe_dst=0`
+    - `exe_remain=0x150`
+  - `TEKK_CB_ZERO` immediately follows on `0x8015D428`
+- A more structural proof patch was then tested:
+  - detect a callback swap during one contiguous `Ready=1`
+  - log `TEKK_READY_REUSE_HOLD`
+  - force `Ready=0` at the specific `jalr` point
+- Result:
+  - the hold triggers
+  - but `0x8015D428` still runs immediately after with `EXE_DST_PTR=0`
+  - therefore the current problem is not a single `jalr` site only
+  - the callback is already latched/reconsumed elsewhere in the same flow
+
+## Practical reading of the bug now
+
+- What is proven:
+  - this is not only a raw DMA bug
+  - this is not only a missing event3 dispatch
+  - this is not only the `0x8016AC2C` `jalr`
+- What remains most likely:
+  - a callback/ready consumption ordering issue in the CD BIOS flow
+  - specifically, a new callback becomes visible too early for the same already-active `Ready` condition
+
+## Recommended strategy from here
+
+- Do not continue by instrumenting every byte of the BIOS path in the live branch.
+- Keep two tracks separate:
+  1. `8a4b571` / stable baseline:
+     - the useful state that passes this earlier crash and reaches the later `Now Loading`/Galaga/loading problem
+  2. current heavy callback instrumentation:
+     - only for proving callback-order facts
+- Recommended next debug direction:
+  - go back to the useful baseline that reaches the later lock
+  - compare that state against the current callback-order branch
+  - isolate only the delta that reintroduced the early null-DMA path
+- In plain terms:
+  - the fast way out is not "trace more BIOS"
+  - it is "return to the last state that gets past this crash, then bisect the few deltas that brought it back"
+
+## 2026-03-22 seek timing comparison with DuckStation
+
+- User hypothesis: the remaining ordering bug may originate in seek/read timing rather than the DMA path itself.
+- Local DuckStation source used for comparison:
+  - `E:\Projects\github\Live\duckstation\src\core\cdrom.cpp`
+- Key differences that were found:
+  - our old `calc_seek_time()` was still a 10x-fast hack
+  - our first `ReadN/ReadS` sector used effectively `seek only`
+  - DuckStation schedules the first sector as:
+    - `GetTicksForRead() + GetTicksForSeek(...)`
+    - or only `GetTicksForRead()` when immediately following a completed seek
+  - our continuous read cadence still used the old fast `11000/22000` delays
+
+### Applied correction
+
+In `src/cdrom/cdrom.cpp`:
+
+- replaced the old seek hack with a DuckStation-style distance-based seek model
+- added `read_sector_ticks()`:
+  - single speed: `451584`
+  - double speed: `225792`
+- `SetLoc` now sets `seek_pending_`
+- `SeekL/SeekP` clear `seek_pending_`
+- first `ReadN/ReadS` INT1 now waits:
+  - one sector interval
+  - plus seek/spin-up time if a seek is still pending
+- continuous `ReadN/ReadS` now uses real per-sector cadence
+
+### Why this matters
+
+- If the drive model delivers the first sector too early, software-visible callback order changes.
+- That matches the current Tekken symptom:
+
+## 2026-03-22 latest CD controller review
+
+- Latest proven point:
+  - the current UE5 run loads the new CD code banner
+  - `CDROM source v16 (secondary_status_refactor)`
+- Latest proven disk data point:
+  - `SYSTEM.CNF` and the following `PS-X EXE` sector are read correctly
+  - this removes payload corruption as the main suspect for the current post-logo stall
+- Structural fix kept:
+  - `data_lba_` now latches the sector actually announced by `INT1/DataReady`
+  - FIFO fill no longer reuses a newer `loc_lba_` after `Pause`/`SetLoc`
+- New structural fix applied:
+  - `status_` is now treated explicitly as the CD secondary status
+  - named bits now match DuckStation/PSX-SPX semantics:
+    - motor on
+    - reading
+    - seeking
+    - playing
+    - error bit only in error responses
+  - first/second response ordering was corrected for:
+    - `ReadN`
+    - `SeekL/SeekP`
+    - `Pause`
+    - `Stop`
+    - `Init`
+  - async responses can now use live secondary status at delivery time instead of a stale snapshot
+- Current best hypothesis after this review:
+  - the remaining stall after PlayStation logo is now more likely a controller-state contract issue
+    than a raw sector payload issue
+  - the immediate next validation is UE5 live behavior with `CDROM source v16`
+  - callback `0x8015D428` becomes visible and is consumed while EXE state is still incomplete.
+- This change is intended as a real CD timing correction, not a Tekken-specific workaround.
+
+## 2026-03-22 - `v18` outcome and current blocker
+
+- New CD banner:
+  - `CDROM source v18 (irq_flag_reg_fix)`
+
+- 2026-03-22 late session:
+  - current CDROM build marker:
+    - `CDROM source v19 (deferred_command_exec)`
+  - structural change:
+    - command writes no longer execute `exec_command()` immediately
+    - commands are now latched and executed later from `Cdrom::tick()`
+  - intent:
+    - align our model with DuckStation's command-event behavior
+    - stop exposing response FIFO bytes before the matching command event/IRQ timing
+  - implementation notes:
+    - removed remaining source references to `cmd_irq_pending_` / `cmd_irq_delay_`
+    - command path now uses `schedule_command_execution(...)`
+    - queued commands are restarted through the same deferred pipeline
+  - current expectation for next UE5 validation:
+    - BIOS CD MMIO order around `GetStat/GetID/ReadTOC/ReadN` should change materially
+    - if the stall remains, the logs should now reflect a true deferred command model rather than the old immediate-response model
+
+### Exact fix applied
+
+- corrected `1F801803` index `1/3`:
+  - old behavior: `irq_flags | cmd_ready | 0xE0`
+  - new behavior: `(irq_flags & 0x1F) | 0xE0`
+
+This changed BIOS-observed values from:
+- `F3/F2/F1`
+to:
+- `E3/E2/E1`
+
+### What `v18` proves
+
+- the BIOS sees the corrected IRQ flag register
+- but the run still stalls after the PlayStation logo
+- and still ends with:
+  - `ADES`
+  - `PC=0xBFC03D1C`
+  - `BadVAddr=0x3D20544E`
+
+### Current diagnosis
+
+The current blocker is no longer best explained by:
+- bad payload
+- lost IRQ2
+- DMA3 failure
+- bad IRQ flag register semantics
+
+The best current diagnosis is:
+- **CD command overlap while a `ReadN` is still active**
+
+Observed in current UE5 logs:
+- `LBA 60642` finishes normally
+- `LBA 60643` starts normally
+- then BIOS sends `ReadTOC` and `GetID` before a normal completion path for that read is visible
+
+### Next required work
+
+Review and correct command arbitration in the CD controller:
+- `ReadN`
+- `Pause`
+- `ReadTOC`
+- `GetID`
+- pending async response / pending read completion interaction
+
+The next real fix is now in the CD **state machine**, not in raw IRQ plumbing.
+
+## 2026-03-22 - Command gating fix after v18
+
+- Root cause candidate strengthened:
+  - `mmio_write8()` accepted a new command while a prior CD command still had async work in flight
+  - relevant state at that time was:
+    - `cmd_irq_delay_`
+    - `pending_irq_type_`
+    - `read_pending_irq1_`
+    - `async_stat_pending_`
+- Fix applied in `src/cdrom/cdrom.cpp`:
+  - `CMD_WRITE` now queues instead of executing immediately when any async response is still pending
+  - queued commands now restart only when:
+    - `irq_flags == 0`
+    - `pending_irq_type_ == 0`
+    - `cmd_irq_delay_ == 0`
+    - `read_pending_irq1_ == 0`
+    - `async_stat_pending_ == 0`
+- Goal:
+  - stop `ReadTOC`/`GetID` from overlapping an active `ReadN` path during BIOS boot (`LBA 60643` case)
+
+## 2026-03-22 late update - current UE5 blocker and CLI comparison
+
+### Current proven state in UE5
+- Build markers loaded in UE5:
+  - `CDROM source v19 (deferred_command_exec)`
+  - `BUS source v28 (session_2026_03_22)`
+- BIOS reads `LBA=16` and DMA3 writes the correct PVD bytes to RAM:
+  - `madr=0xA000B070`
+  - ASCII `.CD001..PLAYSTAT`
+- No `SYSTEM.CNF` request follows in UE5.
+- So UE5 is blocked before the BIOS starts the later ISO9660 path.
+
+### Fresh CLI comparison with the same current core
+A fresh standalone CLI run with the same BIOS and Tekken disc shows that the same core does continue after `LBA=16`.
+
+CLI sequence observed:
+- `ReadN/S START: LBA=16`
+- `Async IRQ1 delivered (resp=0x22)`
+- `FIFO LBA=16 [01434430 30310100]`
+- `CMD 0x09 (Pause)`
+- then further reads:
+  - `LBA=18`
+  - `LBA=22`
+  - `LBA=60642` (`SYSTEM.CNF`)
+  - `LBA=60643` (`PS-X EXE`)
+
+UE5 sequence observed:
+- `ReadN/S START: LBA=16`
+- `DMA3 done: madr=0xA000B070`
+- `QUEUE CMD 0x09 (Pause): irq=0x00 busy=0 cmd_exec=0 pend_type=1 read_pend=0 async=0`
+- `Cancelled pending continuous ReadN INT1 advance`
+- then no later `SetLoc/ReadN` for `60642/60643`
+
+### Current diagnosis
+- The current blocker is no longer a generic CDROM content/DMA bug.
+- The current blocker is now best described as:
+  - an UE5-specific runtime divergence after the PVD `INT1/DMA` path,
+  - before the BIOS continues into the `SYSTEM.CNF` lookup sequence.
+
+### Practical meaning
+- CLI and UE5 do not diverge on the PVD bytes.
+- They diverge on what happens immediately after the PVD sector has been delivered.
+- That points to timing/order/runtime interaction rather than ISO9660 payload corruption.
+
+
+
+## 2026-03-22 correction - actual UE5 `LBA16` behavior
+
+The latest UE5 run with promoted `info` logs around `LBA=16` proves the following sequence really happens in UE5:
+- `ReadN/S START: LBA=16`
+- IRQ1 arrives
+- BIOS ACKs IRQ1
+- BIOS performs MMIO writes that request data:
+  - `WR 0x3 idx=0 val=0x80`
+- FIFO is filled:
+  - `FIFO LBA=16 [01434430 30310100]`
+- DMA3 copies the sector to BIOS RAM:
+  - `madr=0xA000B070`
+- BIOS then writes:
+  - `WR 0x1 idx=0 val=0x09`
+  - `QUEUE CMD 0x09 (Pause)`
+- and UE5 stops there.
+
+Therefore the previous statement "UE5 never consumes the PVD" is incorrect.
+The corrected statement is:
+- UE5 consumes the `LBA16` PVD transfer path correctly through FIFO + DMA + `Pause`
+- the divergence versus CLI appears immediately after this `Pause`, not before the PVD DMA
+
+## 2026-03-22 latest update - queued `Pause` fix moved UE5 forward, new BIOS crash exposed
+
+### What changed
+
+- A real bug was fixed in `src/cdrom/cdrom.cpp`:
+  - a queued `Pause` command could stay queued forever in UE5 if the pipeline became idle without another MMIO ACK path to restart it
+  - the restart was moved into `Cdrom::tick()` when the command/IRQ/response pipeline becomes truly idle
+
+### Effect in UE5
+
+- This fix did move UE5 forward.
+- The run no longer stops only at the old `LBA16 -> Pause` point.
+- UE5 now reaches later BIOS RAM parsing and crashes deterministically with:
+  - `ADES`
+  - `PC=0xBFC03D1C`
+  - `BadVAddr=0x3D20544E`
+
+### New hard evidence
+
+From the latest UE5 run:
+- BIOS RAM reads immediately before the crash:
+  - `CDRAM BIOS RD32 pc=0xBFC03CF0 addr=0x0000B88C -> 0x0D303120`
+  - `CDRAM BIOS RD32 pc=0xBFC03D04 addr=0x0000B888 -> 0x3D20544E`
+- `0x3D20544E` is little-endian ASCII `NT =`
+  - therefore the BIOS is reading `SYSTEM.CNF` text from RAM on the crashing path
+- Earlier reads in the same run also show byte-wise parsing of:
+  - `BOOT = cdrom:SCES_000.05;1`
+
+### Current diagnosis
+
+- The blocker is no longer best described as:
+  - PVD transfer failure
+  - IRQ2 loss
+  - DMA3 failure
+  - bad `IRQ Flag Register`
+- The current blocker is now:
+  - a BIOS crash during/after `SYSTEM.CNF` parsing
+  - caused by wrong sector/state sequencing in the BIOS scratch buffer region
+
+### Practical meaning
+
+- The queued-`Pause` restart fix was necessary.
+- It did not solve the boot.
+- It exposed the next real failure:
+  - BIOS scratch RAM contains `SYSTEM.CNF` text when the path at `0xBFC03CF0..0xBFC03D1C` later treats a word from that region as an address/structured value
+
+### Current target
+
+- Debug the sector ordering and buffer state around the BIOS scratch region:
+  - `0xA000B070..0xA000B88F`
+- Do not go back to generic IRQ/DMA theories for this branch.

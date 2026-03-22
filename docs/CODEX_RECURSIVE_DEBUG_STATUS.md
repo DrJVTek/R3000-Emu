@@ -194,3 +194,87 @@ Scope: UE5 live + CLI, Tekken non-HLE, BIOS réel
     (`225792/451584`) prevents reaching the later `DMA3 MADR=0` path
   - but it also regresses the flow earlier, around the Sony -> license -> game transition
   - conclusion: CD speed matters, but another ordering dependency remains unstable
+
+## 2026-03-22 - Additional callback-order proof
+
+- The current heavy instrumentation branch proved all of the following in UE5 live:
+  - event class 3 (`0x8015D3D8`) is scheduled
+  - scheduler `gate4` is reached
+  - callback pointer `0x801EF68C` is first set to `0x8015D388`
+  - then changed to `0x8015D428` while:
+    - `Ready == 1`
+    - `EXE_DST_PTR == 0`
+    - `EXE_REMAIN == 0x150`
+  - then `0x8015D428` runs immediately with `EXE_DST_PTR == 0`
+- Proof patches tested and rejected as insufficient:
+  1. hold the `jalr` at `0x8016AC2C` once
+  2. skip the first direct entry into `0x8015D428`
+  3. detect callback swap inside one `Ready=1` window and force `Ready=0`
+- All three still end with:
+  - `TEKK_CB_ZERO`
+  - `DMA3 MADR=0`
+  - `DMA3 BLOCKED`
+- Therefore:
+  - the bug is broader than one local callsite
+  - the active callback is already consumed or reconsumed elsewhere in the same flow
+
+## Strategy adjustment
+
+- Do not keep spending the main live branch on deeper byte-level BIOS tracing.
+- Use the proven milestones instead:
+  - `stable/2026-03-22-ue5-tekken-baseline`
+  - commit `8a4b571`
+- Working strategy now recommended:
+  1. return to the useful baseline that gets past this early crash
+  2. reproduce the later `Now Loading` lock again
+  3. compare only the minimal deltas that brought back the early null-DMA path
+- Reason:
+  - this branch already proved the callback-order facts we needed
+  - more local guards are no longer the shortest path to progress
+
+## 2026-03-22 - Seek timing reset against DuckStation
+
+- New working hypothesis from user review:
+  - the callback-order failure may come from bad seek/read timing rather than the callback code itself
+- Compared local DuckStation source:
+  - `E:\Projects\github\Live\duckstation\src\core\cdrom.cpp`
+- Important deltas found in our old code:
+  - seek model still used a 10x-fast approximation
+  - first `ReadN/ReadS` data-ready was effectively scheduled as `seek only`
+  - continuous sector cadence still used `11000/22000`
+- Realigned in `src/cdrom/cdrom.cpp`:
+  - DuckStation-style distance-based `calc_seek_time()`
+  - real sector cadence:
+    - single speed `451584`
+    - double speed `225792`
+  - `SetLoc` now marks `seek_pending_`
+  - first `ReadN/ReadS` waits `read_sector_ticks() + seek_time` when needed
+  - continuous reads now use real per-sector cadence
+- This is a structural CD fix attempt, not a Tekken-specific guard.
+
+## 2026-03-22 - Current CD controller refactor baseline
+
+- Current CD version marker:
+  - `CDROM source v16 (secondary_status_refactor)`
+- Additional structural fix already kept:
+  - `data_lba_` latches the sector announced by `INT1`
+  - FIFO fill no longer depends on a later `loc_lba_`
+- Latest controller refactor:
+  - `status_` is now handled as a real secondary status byte, not a generic scratch status
+  - named status bits added:
+    - error
+    - motor on
+    - reading
+    - seeking
+    - playing
+  - helper transitions added for idle/seeking/reading/playing
+  - async second responses can now use live status at delivery time
+- Response ordering corrected:
+  - `ReadN`: ACK with pre-read status, then drive enters reading state
+  - `SeekL/SeekP`: ACK first, then drive enters seeking state, seek-complete INT2 reports live status
+  - `Pause`/`Stop`: first response reflects the active state, second response reflects the cleared state
+  - `Init`: first response reflects pre-init state, second response reflects post-init state
+- Current reasoning:
+  - sector contents for `SYSTEM.CNF` and the first `PS-X EXE` sector are correct
+  - if UE5 still stalls after PlayStation logo, the next suspect is the remaining CD state/IRQ contract,
+    not raw payload corruption
