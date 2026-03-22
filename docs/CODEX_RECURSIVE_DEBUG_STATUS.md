@@ -105,6 +105,19 @@ Scope: UE5 live + CLI, Tekken non-HLE, BIOS réel
 - New minimal change applied:
   - demote those polling logs out of `info`
   - keep command-level logs visible
+- New timing finding:
+  - the restored continuous `ReadN/ReadS` requeue was still using `10x fast` sector delays (`11000/22000`)
+  - logs show this produces rapid `ReadN advance -> LBA=...` bursts every ~2ms
+  - this is a plausible generic cause for the extra Tekken DMA path: CD sector-ready IRQs outrun the game-side DMA/pause logic
+- Current fix under test:
+  - keep fast seek/spin-up for BIOS compatibility
+  - use the previously documented compromise for steady continuous sector delivery (`56000/112000`)
+  - rationale: old `11000/22000` is too aggressive, `110000/220000` moved behavior too far the other way
+- Important side observation from user testing:
+  - after this timing change, the BIOS/license path visibly changed again
+  - text around the PlayStation license screen appears differently than before
+  - this means continuous CD timing affects not only late Tekken DMA behavior, but also earlier Sony -> PlayStation license progression
+  - keep this observation for later; it must be understood, not discarded
 
 ## Reverted Changes
 - Reverted the whole recent CD continuous-read scheduling experiment:
@@ -138,9 +151,45 @@ Scope: UE5 live + CLI, Tekken non-HLE, BIOS réel
    - `ReadN`
    - `Pause`
 4. Verify whether restoring the `ReadN continuous` requeue block is enough to recover the earlier better baseline.
+5. DMA3-null path instrumentation now keeps a short ring buffer for the raw caller block `0x8016A6C0..0x8016A714`:
+   - tags: `TEKK_CDPREP`, `TEKK_CDPREP_HIST`
+   - it dumps automatically on `FUN_8016AAE0(a0=0)` and on `DMA3.MADR=0`
 
 ## Baseline Requirement Before Push
 - Do not push until UE5 is back at least to:
   - normal boot
   - no BIOS CD loop
   - ideally Galaga visible again
+## 2026-03-22 - Tekken DMA3 null destination, current proven state
+
+- Git milestones pushed:
+  - stable temporary baseline: branch `stable/2026-03-22-ue5-tekken-baseline` -> commit `8a4b571`
+  - current callback-order checkpoint: branch `checkpoint/2026-03-22-tekken-dma3-callback-order` -> commit `4962887`
+- Current UE5 baseline to preserve:
+  - Sony boot OK
+  - `Licensed by PlayStation` text visible
+  - regression is later, not boot
+- New split established during this session:
+  - the older useful baseline is still commit `8a4b571`
+  - a newer debug-only state exists locally with heavier Tekken callback instrumentation
+  - that newer state also tested physical continuous CD cadence and regressed the post-license progression
+- Important correction:
+  - previous debug note used wrong EXE global addresses in the `0x8015D428` callback path
+  - correct addresses are `0x801CB324/33C/334`, not `0x801DB324/33C/334`
+- Current proven failure:
+  - callback block `0x8015D428` runs after CD `remain` already reached `0`
+  - it reads `EXE_DST_PTR` (`0x801CB33C`)
+  - then calls down to `FUN_8016AAE0(a0=0, a1=0x200, ...)`
+  - which writes `DMA3.MADR=0`
+- Important negative result:
+  - CD prep block `0x8016A6D8..0x8016A714` is not generating the zero destination
+  - it completes the last valid DMA, advances `dst_cur`, then sets `remain=0`
+- Active hypothesis:
+  - this is a higher-level callback/order/init issue
+  - not a raw DMA engine bug
+  - not a `dst_cur` corruption bug
+- Important regression to keep in history:
+  - switching continuous sector timing from the old fast compromise to physical cadence
+    (`225792/451584`) prevents reaching the later `DMA3 MADR=0` path
+  - but it also regresses the flow earlier, around the Sony -> license -> game transition
+  - conclusion: CD speed matters, but another ordering dependency remains unstable
