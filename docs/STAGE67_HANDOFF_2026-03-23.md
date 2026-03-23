@@ -119,10 +119,30 @@ Le stall persiste MALGRÉ GPUSTAT correct. La cause est probablement:
 2. Ou une condition spécifique dans la boucle `0x80054B38` (le VSync/draw loop avec 50 passes)
 3. Ou un problème dans `0x8003D908` (appelé depuis `0x80054A90` après VSync)
 
+### DÉCOUVERTE CRITIQUE (session soir 2026-03-23)
+
+**L'entry point de TEKKEN.EXE (`0x80165398`) n'est JAMAIS atteint !**
+
+Le BIOS shell charge le header EXE (LBA 60643) mais ne jump pas à PC0. Le shell
+exécute ses routines (fade PlayStation logo, etc.) puis retourne à `0x8003009C`
+qui a été **écrasé** par les données du jeu → NOP → données ASCII → crash.
+
+Header EXE analysé :
+- PC0 = 0x80165398 (entry point)
+- text_dest = 0x0007B800 (pas une adresse RAM KSEG0 !)
+- text_size = 0 (bootstrap EXE, pas de section text)
+- SP = 0x801FFFF0
+
+Le `text_size = 0` est normal pour Tekken — c'est un bootstrap. Le vrai code
+est chargé par le loader à 0x80165398. Mais le BIOS doit quand même jump à PC0.
+
 ### Prochaine étape recommandée
-- Instrumenter DuckStation regtest pour tracer l'état exact au moment où Tekken passe stage67
-- Comparer GPUSTAT, TMR1, ACFC, I_STAT, I_MASK à chaque itération de la boucle 0x80054B38
-- Trouver quelle valeur diverge entre notre CLI et DuckStation
+1. Comprendre POURQUOI le BIOS shell ne jump pas à PC0 = 0x80165398
+2. Vérifier le flow Exec() du BIOS SCPH-7502 dans le code ROM
+3. Possibilité : text_dest = 0x0007B800 (KUSEG, pas KSEG0) cause un problème
+   dans le chargement — le BIOS pourrait rejeter l'adresse
+4. Ou : text_size = 0 fait que le BIOS skip entièrement l'exec
+5. Comparer avec DuckStation : est-ce que le regtest atteint 0x80165398 ?
 
 ## Fichiers et logs à utiliser
 
