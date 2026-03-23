@@ -48,6 +48,21 @@ static uint32 EffectiveBusTickBatch(bool bThreadedMode, int32 RequestedBusTickBa
     return bThreadedMode ? 1u : static_cast<uint32>(FMath::Clamp(RequestedBusTickBatch, 1, 128));
 }
 
+static int EffectiveCdTimingMode(ECDTimingMode Mode)
+{
+    return (Mode == ECDTimingMode::Realistic) ? 0 : 1;
+}
+
+static const TCHAR* LexToString(ECDTimingMode Mode)
+{
+    switch (Mode)
+    {
+    case ECDTimingMode::Realistic: return TEXT("realistic");
+    case ECDTimingMode::CompatibilityFast: return TEXT("compatibility-fast");
+    default: return TEXT("compatibility-fast");
+    }
+}
+
 //=============================================================================
 // FR3000EmuWorker: Worker thread for emulation with precise timing
 //=============================================================================
@@ -454,6 +469,7 @@ bool UR3000EmuComponent::BootBiosInternal()
     Opt.hle_vectors = bHleVectors ? 1 : 0;
     Opt.loop_detectors = bLoopDetectors ? 1 : 0;
     Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
+    Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
     if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
     {
         UE_LOG(LogR3000Emu, Error, TEXT("Core init (BIOS) failed: %hs"), err[0] ? err : "unknown error");
@@ -464,9 +480,12 @@ bool UR3000EmuComponent::BootBiosInternal()
     // Apply cycle multiplier for timing accuracy
     Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
 
-    UE_LOG(LogR3000Emu, Log, TEXT("BIOS boot initialized. PC=0x%08X CycleMult=%d Timing=WallClock"), Core_->pc(), CycleMultiplier);
-    emu::logf(emu::LogLevel::info, "CORE", "UE BIOS init OK pc=0x%08X hle_vectors=%d bus_tick_batch=%u cycle_mult=%u threaded=%d timing=wallclock",
-        (unsigned)Core_->pc(), Opt.hle_vectors, (unsigned)Opt.bus_tick_batch, (unsigned)CycleMultiplier, bThreadedMode ? 1 : 0);
+    UE_LOG(LogR3000Emu, Log, TEXT("BIOS boot initialized. PC=0x%08X CycleMult=%d Timing=WallClock CDTiming=%s"),
+        Core_->pc(), CycleMultiplier, LexToString(CDTimingMode));
+    emu::logf(emu::LogLevel::info, "CORE",
+        "UE BIOS init OK pc=0x%08X hle_vectors=%d bus_tick_batch=%u cycle_mult=%u threaded=%d timing=wallclock cd_timing=%s",
+        (unsigned)Core_->pc(), Opt.hle_vectors, (unsigned)Opt.bus_tick_batch, (unsigned)CycleMultiplier, bThreadedMode ? 1 : 0,
+        (CDTimingMode == ECDTimingMode::Realistic) ? "realistic" : "compatibility-fast");
     StepsExecuted_.Store(0);
     TotalCyclesExecuted_.Store(0);
     LastAudioSamplesConsumed_.Store(0);
@@ -610,6 +629,7 @@ void UR3000EmuComponent::InitEmulator()
         Opt.hle_vectors = 1; // Dev kit always uses HLE
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
+        Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
             UE_LOG(LogR3000Emu, Error, TEXT("Core init (devkit) failed: %hs"), err[0] ? err : "unknown error");
@@ -638,7 +658,7 @@ void UR3000EmuComponent::InitEmulator()
         }
 
         Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
-        UE_LOG(LogR3000Emu, Log, TEXT("Dev kit boot OK: %s → PC=0x%08X"), *ExePath, Core_->pc());
+        UE_LOG(LogR3000Emu, Log, TEXT("Dev kit boot OK: %s → PC=0x%08X CDTiming=%s"), *ExePath, Core_->pc(), LexToString(CDTimingMode));
     }
     else if (bFastBoot)
     {
@@ -655,6 +675,7 @@ void UR3000EmuComponent::InitEmulator()
         Opt.hle_vectors = 0; // fastboot will enable HLE vectors internally after loading EXE
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
+        Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
             UE_LOG(LogR3000Emu, Error, TEXT("Core init (fastboot) failed: %hs"), err[0] ? err : "unknown error");
@@ -662,7 +683,9 @@ void UR3000EmuComponent::InitEmulator()
             return;
         }
         Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
-        emu::logf(emu::LogLevel::info, "CORE", "UE fastboot init: BIOS skipped pc=0x%08X cycle_mult=%u", (unsigned)Core_->pc(), (unsigned)CycleMultiplier);
+        emu::logf(emu::LogLevel::info, "CORE", "UE fastboot init: BIOS skipped pc=0x%08X cycle_mult=%u cd_timing=%s",
+            (unsigned)Core_->pc(), (unsigned)CycleMultiplier,
+            (CDTimingMode == ECDTimingMode::Realistic) ? "realistic" : "compatibility-fast");
     }
     else
     {

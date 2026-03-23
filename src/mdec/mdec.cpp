@@ -131,12 +131,26 @@ void Mdec::write_reg(uint32_t addr, uint32_t val)
 // ---------------------------------------------------------------------------
 void Mdec::dma_write(const uint32_t* words, uint32_t count)
 {
+    static uint32_t dma_in_log = 0;
+    if (dma_in_log < 10)
+    {
+        ++dma_in_log;
+        emu::logf(emu::LogLevel::warn, "MDEC",
+            "DMA_IN: %u words, state=%d, fifo_in=%zu, fifo_out=%zu (#%u)",
+            count, (int)state_, fifo_in_.size(), fifo_out_.size(), dma_in_log);
+    }
     for (uint32_t i = 0; i < count; ++i)
     {
         fifo_in_.push_back((uint16_t)(words[i] & 0xFFFF));
         fifo_in_.push_back((uint16_t)(words[i] >> 16));
     }
     execute();
+    if (dma_in_log <= 10)
+    {
+        emu::logf(emu::LogLevel::warn, "MDEC",
+            "DMA_IN done: state=%d, fifo_in=%zu/%zu, fifo_out=%zu",
+            (int)state_, fifo_in_pos_, fifo_in_.size(), fifo_out_.size());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +158,14 @@ void Mdec::dma_write(const uint32_t* words, uint32_t count)
 // ---------------------------------------------------------------------------
 void Mdec::dma_read(uint32_t* words, uint32_t count)
 {
+    static uint32_t dma_out_log = 0;
+    if (dma_out_log < 10)
+    {
+        ++dma_out_log;
+        emu::logf(emu::LogLevel::warn, "MDEC",
+            "DMA_OUT: %u words requested, fifo_out=%zu/%zu (#%u)",
+            count, fifo_out_pos_, fifo_out_.size(), dma_out_log);
+    }
     for (uint32_t i = 0; i < count; ++i)
     {
         if (fifo_out_pos_ < fifo_out_.size())
@@ -189,6 +211,18 @@ void Mdec::execute()
 
             fifo_out_.clear();
             fifo_out_pos_ = 0;
+
+            {
+                static uint32_t cmd_log = 0;
+                if (cmd_log < 20)
+                {
+                    ++cmd_log;
+                    emu::logf(emu::LogLevel::warn, "MDEC",
+                        "CMD %u (cw=0x%08X) depth=%u signed=%d words=%u (#%u)",
+                        cmd, cw, output_depth_, output_signed_ ? 1 : 0,
+                        cw & 0xFFFF, cmd_log);
+                }
+            }
 
             switch (cmd)
             {

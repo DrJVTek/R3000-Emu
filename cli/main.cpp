@@ -765,6 +765,7 @@ static void print_usage(void)
         "  --trace-io            Verbose MMIO logging\n"
         "  --pc-sample=N         Print PC every N steps\n"
         "  --bus-tick-batch=N    Tick HW every N CPU steps (1=accurate, 32=fast)\n"
+        "  --cd-timing=MODE      CD seek/spin-up timing: realistic|compat\n"
         "  --stop-on-pc=ADDR     Stop when PC hits ADDR (hex ok)\n"
         "  --emu-log-level=LVL   Set emu log level (error|warn|info|debug|trace)\n"
         "  --watch-addr=ADDR     Watch RAM address (physical, hex ok) — log changes each VBlank\n"
@@ -941,8 +942,22 @@ int main(int argc, char** argv)
     const uint64_t max_time_s = (max_time_raw != 0) ? max_time_raw : 300; // default 5 min
     const uint64_t pc_sample = parse_u64_or_zero(arg_value(argc, argv, "--pc-sample="));
     const uint64_t stop_on_pc = parse_u64_or_zero(arg_value(argc, argv, "--stop-on-pc="));
+    const char* cd_timing_s = arg_value(argc, argv, "--cd-timing=");
     const char* bus_tick_batch_s = arg_value(argc, argv, "--bus-tick-batch=");
     uint32_t bus_tick_batch = 0;
+    int cd_timing_mode = 1;
+    if (cd_timing_s)
+    {
+        if (std::strcmp(cd_timing_s, "realistic") == 0 || std::strcmp(cd_timing_s, "real") == 0)
+            cd_timing_mode = 0;
+        else if (std::strcmp(cd_timing_s, "compat") == 0 || std::strcmp(cd_timing_s, "compatibility-fast") == 0)
+            cd_timing_mode = 1;
+        else
+        {
+            emu::logf(emu::LogLevel::error, "MAIN", "Unknown --cd-timing=%s (use realistic|compat)", cd_timing_s);
+            return 1;
+        }
+    }
     if (bus_tick_batch_s)
     {
         uint64_t v = parse_u64_or_zero(bus_tick_batch_s);
@@ -1167,6 +1182,7 @@ int main(int argc, char** argv)
     core_opt.pretty = has_flag(argc, argv, "--pretty") ? 1 : 0;
     core_opt.trace_io = trace_io ? 1 : 0;
     core_opt.hle_vectors = has_flag(argc, argv, "--hle") ? 1 : 0;
+    core_opt.cd_timing_mode = cd_timing_mode;
     if (bus_tick_batch != 0)
         core_opt.bus_tick_batch = bus_tick_batch;
     if (stop_on_pc != 0)

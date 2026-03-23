@@ -6095,6 +6095,16 @@ Cpu::StepResult Cpu::step()
                     "wrote logs/stage67_ram_80040000.bin size=0x%X",
                     0x00010000u);
             }
+            if (std::FILE* f = std::fopen("logs/stage67_ram_80030000.bin", "wb"))
+            {
+                std::fwrite(ram + 0x00030000u, 1u, 0x00010000u, f);
+                std::fclose(f);
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "GAMEDUMP",
+                    "wrote logs/stage67_ram_80030000.bin size=0x%X",
+                    0x00010000u);
+            }
         }
     }
 

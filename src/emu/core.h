@@ -50,6 +50,7 @@ class Core
 
         int loop_detectors{1}; // enable one-shot loop debug dumps (default: on)
         uint32_t bus_tick_batch{1}; // bus tick batching (1=accurate, 32=fast)
+        int cd_timing_mode{1}; // 0=realistic, 1=compatibility-fast
     };
 
     Core(rlog::Logger* logger);

@@ -46,6 +46,13 @@ enum class EPsx3dRefreshScope : uint8
     CurrentOtWindow UMETA(DisplayName = "Current OT Window")
 };
 
+UENUM(BlueprintType)
+enum class ECDTimingMode : uint8
+{
+    Realistic UMETA(DisplayName = "Realistic"),
+    CompatibilityFast UMETA(DisplayName = "Compatibility Fast")
+};
+
 UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
 class UR3000EmuComponent : public UActorComponent
 {
@@ -189,6 +196,14 @@ class UR3000EmuComponent : public UActorComponent
     // close as possible to CLI and avoid host-dependent CD/IRQ divergence.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu", meta = (ClampMin = "1", ClampMax = "128"))
     int32 BusTickBatch{1};
+
+    // CD seek/spin-up timing model.
+    // Realistic is the fidelity target and matches the user's current preference.
+    // CompatibilityFast preserves the old "10x faster seek/spin-up" fallback for
+    // compatibility while the remaining event/timing issues are still being fixed.
+    // Do not treat CompatibilityFast as the desired final hardware model.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|CD")
+    ECDTimingMode CDTimingMode{ECDTimingMode::CompatibilityFast};
 
     // Cycle multiplier: cycles counted per CPU instruction.
     // Real R3000A averages ~2-3 CPI. With CycleMultiplier=1, each instruction =

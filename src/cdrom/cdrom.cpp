@@ -1084,14 +1084,24 @@ uint32_t Cdrom::msf_to_lba(uint8_t m, uint8_t s, uint8_t f) const
 
 uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_spinup) const
 {
-    // Based on DuckStation's PS1 drive model:
-    // - small forward moves can be satisfied by waiting for the sector to rotate in
-    // - medium moves use a fixed short/long seek
-    // - large moves use a sled seek curve
-    // - spin-up is roughly one second when the motor is idle
-    // Spin-up: reduced for compatibility. Real PS1 takes ~1s but our
-    // BIOS boot flow times out with realistic delays. 60ms works.
-    constexpr uint32_t kSpinUpDelay = 2032128u; // ~60ms (real: ~1s)
+    // IMPORTANT:
+    // We intentionally keep two seek/spin-up models side by side.
+    //
+    // - Realistic:
+    //   Matches the real-drive/DuckStation-style timing model as closely as our
+    //   current event pipeline allows. This is the fidelity target and the user
+    //   explicitly asked that "x10 fast" must not become the normal behavior.
+    //
+    // - CompatibilityFast:
+    //   Preserves the old "10x faster seek/spin-up" behavior because some boot
+    //   flows on our current CD pipeline still depend on it. This is a fallback
+    //   compatibility mode only. It is NOT the target hardware model.
+    //
+    // Continuous sector cadence still comes from read_sector_ticks() below, so
+    // this switch only affects seek/spin-up latency and the time to first sector
+    // after a reposition.
+    const bool compatibility_fast = (timing_mode_ == TimingMode::CompatibilityFast);
+    const uint32_t kSpinUpDelay = compatibility_fast ? 2032128u : kPsxMasterClock;
     uint32_t total = 0;
 
     if (include_spinup && !motor_spinning_)
@@ -1148,13 +1158,15 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
             std::clamp(static_cast<float>(from_lba) / static_cast<float>(kFramesPerMinute), 1.0f, 72.0f);
         const uint32_t switch_point =
             static_cast<uint32_t>(330.0f + (-63.1333f * std::log(current_minute)));
-        const float seconds = (dist < switch_point) ? 0.005f : 0.01f; // 10x fast
+        const float seconds = compatibility_fast
+            ? ((dist < switch_point) ? 0.005f : 0.01f)
+            : ((dist < switch_point) ? 0.05f : 0.1f);
         total += static_cast<uint32_t>(seconds * static_cast<float>(kPsxMasterClock));
     }
     else
     {
-        constexpr float kSledFixedCost = 0.005f;   // 10x fast
-        constexpr float kSledVariableCost = 0.085f; // 10x fast
+        const float kSledFixedCost = compatibility_fast ? 0.005f : 0.05f;
+        const float kSledVariableCost = compatibility_fast ? 0.085f : 0.85f;
         constexpr float kLogWeight = 0.4f;
         constexpr float kMaxSledLba = static_cast<float>(72u * kFramesPerMinute);
         const float lba_diff_f = static_cast<float>(dist);
@@ -1165,7 +1177,8 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
         total += static_cast<uint32_t>(seconds * static_cast<float>(kPsxMasterClock));
     }
 
-    emu::logf(emu::LogLevel::info, "CD", "Seek %u->%u (%u LBA): %u ticks (~%.1f ms)%s",
+    emu::logf(emu::LogLevel::info, "CD", "Seek[%s] %u->%u (%u LBA): %u ticks (~%.1f ms)%s",
+        compatibility_fast ? "compat" : "real",
         from_lba, to_lba, dist, total, (double)total / 33868.0,
         (include_spinup && !motor_spinning_) ? " (includes spin-up)" : "");
 

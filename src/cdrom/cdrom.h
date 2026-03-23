@@ -20,6 +20,20 @@ namespace cdrom
 class Cdrom
 {
   public:
+    enum class TimingMode : uint8_t
+    {
+        // Preferred long-term target: closest to real hardware behavior.
+        // This uses realistic spin-up/seek delays and is the mode to validate
+        // against reference emulators/hardware.
+        Realistic = 0,
+
+        // Compatibility fallback: preserves the historical "10x fast" seek/spin-up
+        // behavior that currently lets some BIOS/game flows progress in this core.
+        // This is NOT the target model for accuracy; it only exists so we can keep
+        // booting/debugging while the event/timing model is being corrected.
+        CompatibilityFast = 1,
+    };
+
     enum SecondaryStatusBits : uint8_t
     {
         STAT_ERROR = 1u << 0,
@@ -34,6 +48,8 @@ class Cdrom
 
     explicit Cdrom(rlog::Logger* logger = nullptr);
     ~Cdrom();
+    void set_timing_mode(TimingMode mode) { timing_mode_ = mode; }
+    TimingMode timing_mode() const { return timing_mode_; }
 
     // Logs dédiés (optionnels).
     // - cd_only: logs CDROM uniquement
@@ -168,6 +184,13 @@ class Cdrom
 
     // Seek timing: calculate delay in CPU cycles based on LBA distance.
     // Uses logarithmic model like DuckStation for realistic timing.
+    //
+    // IMPORTANT:
+    // - `TimingMode::Realistic` is the fidelity target.
+    // - `TimingMode::CompatibilityFast` keeps the old 10x-fast seek/spin-up path
+    //   as an explicit compatibility mode.
+    // - The user preference is to move toward real timing, not to normalize on
+    //   the 10x-fast behavior forever.
     uint32_t calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_spinup) const;
     uint32_t read_sector_ticks() const;
 
@@ -188,6 +211,8 @@ class Cdrom
     // IRQ callback for push-model notification
     IrqCallback irq_callback_{nullptr};
     void* irq_callback_user_{nullptr};
+
+    TimingMode timing_mode_{TimingMode::CompatibilityFast};
 
     // Registres CDROM (modèle minimal, mais avec sémantique réelle).
     uint8_t index_{0};   // écrit via 0x1F801800

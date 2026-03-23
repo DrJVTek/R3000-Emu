@@ -16,7 +16,24 @@
 
 ---
 
-## 📌 ÉTAT ACTUEL (2026-03-23) - TEKKEN stage67, plus un bug BIOS/CD
+## 📌 ÉTAT ACTUEL (2026-03-23) - TEKKEN stage67, plus un bug BIOS/CD brut
+
+### Politique CD timing (2026-03-23)
+
+- Le core expose maintenant deux modes de timing CD pour `seek/spin-up`:
+  - `realistic`
+  - `compatibility-fast`
+- `realistic` est la cible de fidélité actuelle.
+- L'utilisateur a explicitement demandé qu'on reste au plus proche du réel pour le moment.
+- Le mode `compatibility-fast` correspond au vieux comportement "x10 fast" sur seek/spin-up:
+  - il existe uniquement comme fallback de compatibilité/debug
+  - il ne doit pas être traité comme le modèle final
+- Important:
+  - la cadence continue par secteur reste réelle via `read_sector_ticks()`
+  - le switch porte surtout sur la latence de repositionnement et de premier secteur
+- Sélection:
+  - CLI: `--cd-timing=realistic` ou `--cd-timing=compat`
+  - UE5: propriété `CDTimingMode` sur `UR3000EmuComponent`
 
 ### Ce qui est acquis
 
@@ -27,13 +44,18 @@
   - `LBA 22`
   - `LBA 60642` = `SYSTEM.CNF`
   - `LBA 60643` = `PS-X EXE`
-- UE5 sort du BIOS et atteint le code jeu :
+- UE5 sort du boot BIOS/CD et atteint le shell/runtime :
   - `GAMEPC Reached stage57 pc=0x80057484`
   - `GAMEPC Reached stage67 pc=0x80067800`
 
+Important:
+- cela ne veut PAS dire que le gameplay est lancé
+- cela veut seulement dire que le blocage n'est plus dans la lecture disque BIOS de base
+- le stall peut encore être dans le shell/firmware/runtime avant le vrai lancement jouable
+
 ### Blocage réel courant
 
-- Le blocage courant n'est plus dans le BIOS/CD.
+- Le blocage courant n'est plus dans le BIOS/CD bas niveau (lecture PVD/SYSTEM.CNF/PS-X EXE).
 - Le blocage courant est la boucle jeu autour de `0x8006771C / 0x80067800 / 0x800679xx`.
 - Point critique validé le `2026-03-23`:
   - le code **runtime RAM** autour de `0x80054A90` et `0x800677E0` ne matche pas le contenu statique de `TEKKEN.EXE`
@@ -105,6 +127,150 @@
   que DuckStation fournit et pas nous
 - Prochaine étape : instrumenter DuckStation regtest pour comparer l'état exact
   au moment du stall dans la boucle 0x80054B38
+
+### Point de reprise si la session s'arrête
+
+- Ne pas repartir sur le boot BIOS/CD pour cette branche.
+- Reprendre d'abord en CLI, puis revalider sous UE5.
+- Fichiers de vérité à relire avant toute reprise:
+  - `docs/DEBUG_UE5_STUCK.md`
+  - `docs/STAGE67_HANDOFF_2026-03-23.md`
+- Cibles runtime à reprendre:
+  - `logs/stage67_ram_80040000.bin`
+  - `logs/stage67_ram_80050000.bin`
+- Callpath courant à réinspecter:
+  - `0x8004E360 -> 0x8004E9C0 -> 0x8004EEA8`
+  - puis `0x80054A90`
+  - puis `0x80054B38..0x80054C70`
+  - puis `0x800677F0..0x80067910`
+- Ghidra:
+  - BIOS utilisable en analyse ponctuelle à `0xBFC00000`
+  - dumps runtime prioritaires pour la zone stall
+  - ne pas confondre BIOS / shell / runtime RAM
+
+### Validation rapide CLI (2026-03-23, modes CD)
+
+- Deux runs CLI de 45s ont été refaits avec:
+  - `--cd-timing=compat`
+  - `--cd-timing=realistic`
+- Résultat:
+  - les deux modes convergent vers le même stall `stage67`
+  - les traces `STAGE67MMIO`, `STAGE67FN`, `STAGE67POST` apparaissent dans les deux cas
+  - `mode=0 / gate=0 / state=0 / done=0` reste visible dans les deux cas
+- Conclusion:
+  - le switch `compatibility-fast` vs `realistic` n'explique pas le blocage runtime `stage67` à lui seul
+  - il reste important pour le comportement de seek/spin-up, mais ce n'est pas le suspect principal du stall courant
+
+### Stop-on-PC utiles refaits (CLI, 2026-03-23)
+
+- `--stop-on-pc=0x8004E358`
+  - on retombe bien dans le callpath documenté:
+    - `0x8004E358 -> jal 0x80054B38`
+    - puis `0x8004E394 -> jal 0x8004E9C0`
+  - registres observés:
+    - `a0=0x80120998`
+    - `a1=0x80068A9C`
+    - `a2=0x000000B4`
+    - `ra=0x8004E308`
+
+- `--stop-on-pc=0x800678C0`
+  - on retombe dans l'init locale `stage67`
+  - état observé:
+    - `state=0`
+    - `sub=0`
+    - `f68=0`
+    - `b4=0`
+    - `m248=0x0000`
+    - `done=0`
+    - `gate=0`
+    - `mode=0`
+  - le contexte IRQ est neutre à ce point:
+    - `I_STAT=0`
+    - `I_MASK=0x007D`
+
+### Correction importante sur les adresses stage67 (2026-03-23 nuit)
+
+- Plusieurs anciennes adresses suspectes n'ont pas été retouchées sur les runs CLI récents:
+  - `0x8006771C`
+  - `0x800679E4`
+  - `0x8006297C`
+- En revanche, le hot path réellement observé passe par:
+  - `0x80067D70`
+  - `0x80067E08`
+  - `0x80068150`
+
+- `0x80067D70`
+  - écrit `0x8011:418C`-gated state vers `0x8008ACAC`
+  - puis lit `0x8008ACB4`
+- `0x80067E08`
+  - écrit une valeur 16-bit dérivée de la boucle courante
+- `0x80068150`
+  - incrémente `0x8008ACFC`
+
+- Conclusion:
+  - une partie du vieux ciblage d'adresses `stage67` était stale
+  - le prochain debug doit suivre ce hot path réel, pas les adresses seulement supposées par les anciennes décompilations
+
+### Réduction runtime supplémentaire (2026-03-23 fin de session)
+
+- Le hot path observé n'est pas seulement un wait VBlank.
+- La branche d'init locale `0x80067E8C` installe deux callbacks dans la structure `0x8008AC60`:
+  - `0x8008AC74 = 0x8006816C`
+  - `0x8008AC64 = 0x800683B4`
+- `0x800683B4(a0=2, a1=0x8005E91C)` est bien appelé pendant l'init.
+- `0x8006827C` existe comme dispatcher secondaire, mais n'a pas encore été observé comme chemin actif sur ce run.
+
+#### Ce que fait `0x8005E91C`
+
+- `0x8005E91C` est bien appelé en runtime.
+- Cette fonction n'est pas un simple wait software:
+  - elle gère une file circulaire de 64 entrées à `0x80112118`
+  - elle attend une condition de disponibilité basée sur:
+    - `GPUSTAT` via un pointeur runtime (`0x1F801814`)
+    - `DMA2 CHCR` / état DMA GPU (`0x1F8010A8`)
+  - puis elle dépile une entrée et appelle le callback stocké dans la file
+
+Entrée observée:
+- `entry[0] = 0x8005E698`
+- `entry[4] = 0x801209B4`
+- `entry[8] = 0x00000000`
+
+#### Ce que fait `0x8005E698`
+
+- `0x8005E698` est bien appelé par `0x8005E91C`.
+- Cette fonction programme explicitement le chemin GPU DMA:
+  - écrit `GP1 DMA direction = 2`
+  - programme `DMA2 MADR`
+  - programme `DMA2 BCR`
+  - programme `DMA2 CHCR = 0x01000401`
+- Donc le runtime stage67 soumet bien des linked-lists GPU par DMA2.
+
+#### Conséquence importante
+
+- Le stall courant n'est plus compatible avec le diagnostic:
+  - "pas d'IRQ"
+  - ou "pas de DMA2"
+  - ou "pas de soumission GPU"
+- Le runtime fait déjà:
+  - dispatch IRQ jeu
+  - incrément `0x8008ACFC`
+  - queue GPU
+  - lancement DMA2 linked-list
+
+Le prochain suspect utile est donc:
+- le contenu des linked-lists GPU
+- ou leur consommation/effet côté GPU
+- pas le boot CD/BIOS brut
+
+#### Preuve runtime complémentaire
+
+- Les logs CLI montrent des soumissions DMA2 linked-list répétées:
+  - petites listes:
+    - `madr=0x801209B4` / `0x80121DD4`, `nodes=1 words=6`
+  - grandes listes:
+    - `madr=0x800A4A70` / `0x80094A70`
+    - `nodes=1025 words=5`, puis `nodes=1028 words=25`
+- Ce point doit être comparé à DuckStation avant toute nouvelle hypothèse "timer/IRQ seulement".
 
 ### Ajouts de cette session
 - MDEC decoder implémenté (`src/mdec/mdec.h`, `src/mdec/mdec.cpp`)
@@ -2260,4 +2426,3 @@ The previous reproducible BIOS crash on `SYSTEM.CNF` is no longer the current fa
 
 CLI with the same core also reaches 0x00000CA8 immediately after successful LBA 60643 delivery, then later advances into game code ( x80057xxx, then  x800679xx).
 So  x00000CA8 is now treated as a transient BIOS handoff step, not the root failure by itself.
-

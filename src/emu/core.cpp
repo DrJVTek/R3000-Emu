@@ -391,6 +391,16 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
 
     // Set up CDROM garbage SetLoc callback for debugging
     cdrom_.set_garbage_setloc_callback(on_garbage_setloc, this);
+    const auto cd_timing_mode =
+        (opt.cd_timing_mode == 0)
+            ? cdrom::Cdrom::TimingMode::Realistic
+            : cdrom::Cdrom::TimingMode::CompatibilityFast;
+    cdrom_.set_timing_mode(cd_timing_mode);
+    emu::logf(
+        emu::LogLevel::warn,
+        "CORE",
+        "CD timing mode: %s (realistic = fidelity target, compatibility-fast = temporary fallback)",
+        (cd_timing_mode == cdrom::Cdrom::TimingMode::Realistic) ? "realistic" : "compatibility-fast");
 
     // Apply initial registers (loader-provided).
     if (img.has_gp)
