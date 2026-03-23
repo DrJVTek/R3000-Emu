@@ -567,17 +567,22 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
             uint32_t display_line_lsb = 0u;
             if (display_.interlace && display_.v_res)
             {
-                // 480i mode: report the parity of the raster line currently being
-                // displayed. During VBlank, drop the field offset so games polling
-                // GPUSTAT together with TMR1 see the field contribution disappear.
-                const uint32_t active_field = in_vblank_ ? 0u : (even_odd_field_ ? 1u : 0u);
+                // 480i mode (DuckStation-matching):
+                // display_line_lsb = (display_y + (!in_vblank & interlaced_display_field)) & 1
+                // The field toggles once per frame at VBlank. During VBlank the
+                // field contribution is suppressed. Games like Tekken spin-loop
+                // reading GPUSTAT and XOR bit31 to detect the field change.
+                const uint32_t field = even_odd_field_ ? 1u : 0u;
+                const uint32_t field_contrib = in_vblank_ ? 0u : field;
                 display_line_lsb =
-                    (uint32_t)((display_.display_y + scanline + active_field) & 1u);
+                    (uint32_t)((display_.display_y + field_contrib) & 1u);
             }
             else
             {
-                // Non-480i: simple per-frame toggle. Games detect VSync by
-                // waiting for this bit to change between frames.
+                // Non-480i: DuckStation uses (display_y + current_scanline) & 1,
+                // updated at each CRTC tick. We don't have per-scanline ticks,
+                // so we use the per-frame toggle which works for VSync detection.
+                // TODO: implement CRTC scanline tick events for full accuracy.
                 display_line_lsb = even_odd_field_ ? 1u : 0u;
             }
 
@@ -604,6 +609,52 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
         }
     }
     return 0;
+}
+
+Stage67GpuDebug Gpu::stage67_debug() const
+{
+    Stage67GpuDebug d{};
+    const uint32_t scanline = current_scanline();
+    uint32_t display_line_lsb = 0u;
+    if (display_.interlace && display_.v_res)
+    {
+        const uint32_t active_field = in_vblank_ ? 0u : (even_odd_field_ ? 1u : 0u);
+        display_line_lsb = (uint32_t)((display_.display_y + scanline + active_field) & 1u);
+    }
+    else
+    {
+        display_line_lsb = even_odd_field_ ? 1u : 0u;
+    }
+
+    uint32_t v = status_;
+    const uint32_t ready_cmd = (gp0_state_ == Gp0State::idle) ? 1u : 0u;
+    const uint32_t ready_dma = ready_cmd;
+    const uint32_t ready_v2c = vram_to_cpu_active_ ? 1u : 0u;
+    v &= ~((1u << 26) | (1u << 28) | (1u << 27));
+    if (ready_cmd) v |= (1u << 26);
+    if (ready_dma) v |= (1u << 28);
+    if (ready_v2c) v |= (1u << 27);
+    v &= ~(3u << 29);
+    v |= (dma_dir_ & 3u) << 29;
+    v &= ~(1u << 25);
+    if ((dma_dir_ & 3u) == 1u && ready_dma) v |= (1u << 25);
+    else if ((dma_dir_ & 3u) == 2u && ready_dma) v |= (1u << 25);
+    else if ((dma_dir_ & 3u) == 3u && ready_v2c) v |= (1u << 25);
+    v &= ~(1u << 31);
+    if (display_line_lsb) v |= (1u << 31);
+
+    d.gpustat = v;
+    d.scanline = scanline;
+    d.display_line_lsb = display_line_lsb;
+    d.display_y = display_.display_y;
+    d.h_res = display_.h_res;
+    d.v_res = display_.v_res;
+    d.is_pal = display_.is_pal ? 1u : 0u;
+    d.interlace = display_.interlace ? 1u : 0u;
+    d.in_vblank = in_vblank_ ? 1u : 0u;
+    d.even_odd_field = even_odd_field_ ? 1u : 0u;
+    d.frame_count = frame_count_;
+    return d;
 }
 
 // ---------------------------------------------------------------------------

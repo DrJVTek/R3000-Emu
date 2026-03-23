@@ -4,8 +4,221 @@
 >
 > 1. **`CLAUDE.md`** (racine projet) - Config, chemins, préférences
 > 2. **Ce fichier** (`docs/DEBUG_UE5_STUCK.md`) - Historique debug complet
+> 3. **`docs/STAGE67_HANDOFF_2026-03-23.md`** - Handoff court pour reprendre vite le debug stage67
 >
 > **L'utilisateur préfère le mode NON-HLE (bHleVectors=false).**
+>
+> **Règle de session:**
+> - relire ce document au début de chaque session
+> - corriger ce document dès qu'un diagnostic change
+> - ajouter les nouvelles preuves runtime avant de repartir en debug
+> - ne pas continuer sur une hypothèse invalidée sans mettre ce document à jour
+
+---
+
+## 📌 ÉTAT ACTUEL (2026-03-23) - TEKKEN stage67, plus un bug BIOS/CD
+
+### Ce qui est acquis
+
+- UE5 monte bien le disque (`UE insert_disc OK`)
+- UE5 lit bien :
+  - `LBA 16` PVD
+  - `LBA 18`
+  - `LBA 22`
+  - `LBA 60642` = `SYSTEM.CNF`
+  - `LBA 60643` = `PS-X EXE`
+- UE5 sort du BIOS et atteint le code jeu :
+  - `GAMEPC Reached stage57 pc=0x80057484`
+  - `GAMEPC Reached stage67 pc=0x80067800`
+
+### Blocage réel courant
+
+- Le blocage courant n'est plus dans le BIOS/CD.
+- Le blocage courant est la boucle jeu autour de `0x8006771C / 0x80067800 / 0x800679xx`.
+- Point critique validé le `2026-03-23`:
+  - le code **runtime RAM** autour de `0x80054A90` et `0x800677E0` ne matche pas le contenu statique de `TEKKEN.EXE`
+  - dump runtime écrit par le core:
+    - `logs/stage67_ram_80050000.bin`
+  - comparaison directe:
+    - `TEKKEN.EXE` à `0x80054A90` ≠ RAM runtime à `0x80054A90`
+    - `TEKKEN.EXE` à `0x800677E0` ≠ RAM runtime à `0x800677E0`
+  - conséquence:
+    - les décompilations Ghidra basées uniquement sur `TEKKEN.EXE` sont **non fiables** pour cette zone
+    - pour analyser le stall `stage67`, il faut utiliser le dump runtime ou retrouver l’overlay/source qui a produit ce code
+
+### Résultat des traces runtime directes (CLI + UE5 même zone)
+
+- Les lectures RAM directes sur les globals de `stage67` restent réellement à `0` :
+  - `DAT_800B7BC8` (`gate`) = 0
+  - `DAT_800B7BD8` (`mode`) = 0
+  - `DAT_80127068/69` = 0
+  - `DAT_801270B4/B6` = 0
+  - `DAT_8012713C` (`done`) = 0
+  - `DAT_80126248/4A` = 0
+- Ce n'est donc pas un bug de trace MMIO/bus : les valeurs sont vraiment nulles en RAM.
+- Attention: les anciens champs de debug `*abdc` / `*abe0` étaient trompeurs:
+  - `abdc=0x1F801814`
+  - `abe0=0x1F801110`
+  - donc ces champs étaient des **pointeurs MMIO**, pas des globals RAM utiles
+  - la vérité runtime pour `stage67` est maintenant dans `STAGE67MMIO`
+
+### Résultat des traces `STAGE67MMIO` (CLI, 2026-03-23)
+
+- La boucle `stage67` lit bien les MMIO réels:
+  - `GPUSTAT` via `0x1F801814`
+  - `TMR1_COUNT` via `0x1F801110`
+- `0x8008ACFC` n'est pas mort:
+  - il monte (`0x16`, `0x17`, `0x18`, ...)
+- `GPUSTAT bit31` n'est pas bloqué à une seule valeur:
+  - en début de phase:
+    - `pc=0x80067804` / `0x80067934`
+    - `GPUSTAT=0x945E220A`
+    - `bit31=1`
+    - `scan=301`
+    - `interlace=1`
+    - `vblank=1`
+    - `field=1`
+  - plus tard dans la boucle:
+    - `pc=0x8006794C`
+    - `GPUSTAT=0x565E220A`
+    - `bit31=0`
+    - `scan=1`
+    - `interlace=1`
+    - `vblank=0`
+    - `field=1`
+- Donc:
+  - la transition de `bit31` existe bien dans notre core CLI
+  - le shell ne semble pas bloqué par une absence brute de front `GPUSTAT bit31`
+
+### Conclusion utile actuelle (mise à jour 2026-03-23 soir)
+
+- **GPUSTAT bit31 ÉLIMINÉ comme cause** : matchée exactement avec DuckStation, stall persiste
+- **Boucle fade 0x8004E360 ÉLIMINÉE** : elle sort OK, retourne au shell BIOS
+- **Fonctions 0x8004E9C0 et 0x8004EEA8 désassemblées** : transition wipe + palette CLUT fade, fonctionnent
+- **Ridge Racer 3D : cassé AVANT ce refactory** (0 origin_3d sur commit stable f976306)
+- Le blocage `stage67` n'est pas expliqué par:
+  - un `ACFC` mort (il monte)
+  - un `GPUSTAT` illisible (il alterne)
+  - un `bit31` figé (il toggle, matchée DuckStation)
+  - la boucle fade (elle sort)
+- La cause est plus profonde : probablement un état hardware (timer/DMA/IRQ timing)
+  que DuckStation fournit et pas nous
+- Prochaine étape : instrumenter DuckStation regtest pour comparer l'état exact
+  au moment du stall dans la boucle 0x80054B38
+
+### Ajouts de cette session
+- MDEC decoder implémenté (`src/mdec/mdec.h`, `src/mdec/mdec.cpp`)
+- Guard DMA3 kernel area (bloque writes < 0x200)
+- CD timing ajusté (continuous read 4x au lieu de 10x)
+- GPUSTAT bit31 aligné sur DuckStation (480i et non-480i)
+- Diagnostic FAULT logging dans raise_exception
+
+### Correction importante (2026-03-23, caller runtime réel)
+
+- La boucle runtime `0x80054B38..0x80054C70` n'est pas figée.
+- Nouvelle trace CLI:
+  - `logs/tekken_cli_stage67_loop_2026-03-23.err.txt`
+- Résultat:
+  - `s0 = 50`
+  - `s5` progresse normalement (`0 -> 1 -> 2 -> ... -> 32` observé avant coupure du quota)
+  - `0x80054C58` appelle `0x80054A90`
+  - `0x80054A90` appelle ensuite:
+    - `0x8004C920`
+    - `0x800677F0`
+    - `0x8003D908`
+- Conséquence:
+  - le stall n'est probablement **pas** un blocage interne de cette boucle locale
+  - la cible utile remonte maintenant au caller au-dessus (`ra=0x8004E360`)
+  - il faut vérifier:
+    - si la boucle complète ses `50` passes puis retourne
+    - ou si le caller la ré-appelle indéfiniment
+
+### Correction importante (2026-03-23, caller au-dessus de stage67)
+
+- Dump runtime ajouté:
+  - `logs/stage67_ram_80040000.bin`
+- Désassemblage runtime réel autour de `0x8004E320..0x8004E3BC`:
+  - `0x8004E358 -> jal 0x80054B38`
+  - `0x8004E394 -> jal 0x8004E9C0`
+  - `0x8004E39C -> jal 0x8004EEA8`
+- Le caller `0x8004E320` prépare ces paramètres pour `0x80054B38`:
+  - `a0 = 0x80120998`
+  - `a1 = 0x80068A9C`
+  - `a2 = 0xB4`
+  - `a3 = 0xB4`
+  - `[sp+0x10] = 0xB4`
+  - `[sp+0x14] = 0x32` (50)
+- La trace runtime `STAGE67UP` montre ensuite un retour normal à `0x8004E360`.
+- Conséquence:
+  - `0x80054B38` n'est pas le point de blocage principal
+  - la prochaine cible utile est le chemin qui suit son retour:
+    - `0x8004E9C0`
+    - `0x8004EEA8`
+  - et l'état lu via `0x8009AD40`
+
+### Correction importante (2026-03-23, runtime dump)
+
+- Les anciens labels utilisés autour de `0x800678C0 / 0x800679E4` étaient faux pour cette zone.
+- La désassemblage du dump runtime `logs/stage67_ram_80050000.bin` montre que:
+  - `0x800677F0..0x80067910` est une routine de synchro runtime sur des pointeurs MMIO/état:
+    - `0x8008ABDC` -> pointeur lu à `0x1F801814`
+    - `0x8008ABE0` -> pointeur lu à `0x1F801110`
+    - `0x8008ABE4` -> cache dernière valeur de `*ABE0`
+    - `0x8008ABE8` -> cache dernière valeur de `ACFC`
+    - `0x8008ACFC` -> compteur/état runtime qui monte (`0x16`, `0x17`, `0x18`, ...)
+  - `0x80067914` n'est pas un "tick slot"; c'est une attente locale avec timeout stack (`0x8000`) qui poll `DAT_8008ACFC`
+  - `0x800678C0` n'est pas une entrée de fonction; c'est l'intérieur d'une boucle d'attente sur un changement de bit du mot lu via `DAT_8008ABDC`
+- Conséquence:
+  - les traces `STAGE67FN` qui annonçaient `init_slot` à `0x800678C0` ne doivent plus être utilisées comme vérité sur cette zone
+  - le stall ne doit plus être interprété comme une simple machine d'état "slot 0/slot 1" basée sur ces labels statiques
+
+### Ce que montrent les vraies traces mémoire runtime (`STAGE67MEM`)
+
+- La boucle `0x800677F0..0x80067980` touche surtout:
+  - `0x8008ABDC`
+  - `0x8008ABE0`
+  - `0x8008ACFC`
+  - des temporaires stack:
+    - `sp+0x18`
+    - `sp+0x1C`
+- Elle ne touche pas directement les globals supposés `gate/mode/b4/b6` pendant cette fenêtre.
+- Le sous-bloc `0x80067914` décrémente explicitement un compteur stack local (`sp+0x1C`) et repolle `DAT_8008ACFC` jusqu'à atteindre une cible.
+- Donc la cible de debug doit remonter:
+  - vers le caller runtime `0x80054A90..0x80054AB0`
+  - et non rester bloquée sur les anciens labels `0x800678C0 / 0x800679E4`
+
+### Résultat Ghidra / traces CPU
+
+- `FUN_8006771C` :
+  - si `DAT_800B7BC8 == 0` :
+    - init
+    - `FUN_800678C0(0)`
+    - `FUN_800678C0(1)`
+    - puis `DAT_800B7BC8++`
+  - si `DAT_800B7BC8 == 1` :
+    - appelle `FUN_800679E4(0/1)`
+- En pratique, la trace runtime ne montre pas de progression vers `FUN_800679E4`.
+- La trace montre surtout :
+  - `STAGE67FN pc=0x800678C0 fn=init_slot ... gate=0 mode=0`
+  - en boucle, slot 0 puis slot 1
+
+### Point d'attention
+
+- `0x800678C0` est appelée depuis `FUN_800679E4`, mais aussi depuis `FUN_8006771C`.
+- Les traces actuelles montrent une ré-initialisation répétée des slots sans montée des flags `b4/b6`.
+- Le prochain vrai suspect est le chemin qui devrait faire passer `DAT_801270B4/B6` à non-zéro.
+- `FUN_8006297C()` est un gate très faible :
+  - il ne fait quelque chose que si `DAT_801271BC & 0x30 != 0`
+  - sinon il retourne sans effet
+
+### Cible prochaine
+
+- Tracer précisément :
+  - `FUN_8006297C`
+  - `DAT_801271BC`
+  - les écritures de `DAT_801270B4/B6`
+- Objectif :
+  - prouver pourquoi la boucle reste dans la phase init au lieu de passer au tick de slot normal
 
 ---
 
@@ -1960,52 +2173,46 @@ Current best diagnosis after this correction:
 - the divergence is specifically on what happens immediately after the BIOS issues `Pause` after the PVD read
 - the active suspect remains UE5 runtime/timing/order interaction around post-`INT1` `Pause` handling
 
-## 2026-03-22 latest update - no longer a pure stall, now a reproducible BIOS crash
+## 2026-03-22 latest update - old BIOS crash fixed, UE5 now reaches `PS-X EXE`
 
-The latest UE5 run with the queued-`Pause` restart fix no longer stops only at the old `LBA16` point.
-It now progresses into later BIOS parsing and then crashes deterministically:
-
-- `FAULT code=5(ADES)`
-- `PC=0xBFC03D1C`
-- `BadVAddr=0x3D20544E`
-- `ra=0xBFC0D5F0`
+The previous reproducible BIOS crash on `SYSTEM.CNF` is no longer the current failure.
 
 ### What is now proven
 
-- The queued `Pause` command was one real issue:
-  - after fixing queued-command restart in `Cdrom::tick()`, UE5 advances further than the previous `LBA16 -> Pause` stop.
-- The BIOS RAM scratch buffer is now observed directly during the failing path.
-- New `CDRAM` traces show the BIOS reading RAM words immediately before the crash:
-  - `pc=0xBFC03CF0 addr=0x0000B88C -> 0x0D303120`
-  - `pc=0xBFC03D04 addr=0x0000B888 -> 0x3D20544E`
-- `0x3D20544E` is little-endian ASCII for `NT =`
-  - this is text from `SYSTEM.CNF`
-- Earlier `CDRAM` byte reads in the same run show the BIOS parsing `BOOT = cdrom:SCES_000.05;1` from RAM.
+- UE5 now reads and DMA-transfers all expected BIOS boot sectors in order:
+  - `LBA 16` = PVD (`.CD001..PLAYSTAT`)
+  - `LBA 18`
+  - `LBA 22`
+  - `LBA 60642` = `SYSTEM.CNF`
+  - `LBA 60643` = `PS-X EXE`
+- The queued-`Pause` restart fix and the absolute-cycle CD timing refactor were both real fixes.
+- The old `ADES` crash:
+  - `PC=0xBFC03D1C`
+  - `BadVAddr=0x3D20544E`
+  is not the active failure anymore in the latest UE5 run.
 
-### Practical reading
+### Current practical reading
 
-- This is no longer just "UE5 stalls after `Pause`".
-- UE5 now reaches the BIOS `SYSTEM.CNF` parsing path.
-- The current failure is:
-  - the BIOS later dereferences / uses a RAM word containing `SYSTEM.CNF` text as if it were structured data or an address
-  - this leads to `BadVAddr=0x3D20544E`
+- UE5 is no longer failing on:
+  - PVD delivery
+  - `SYSTEM.CNF` delivery
+  - first `PS-X EXE` sector delivery
+- The current blocker is later:
+  - after `LBA 60643` has already been DMA-ed correctly to BIOS scratch RAM
+  - but before we clearly observe a stable handoff from BIOS code to game code
 
 ### Current best diagnosis
 
-- The active bug is no longer:
-  - raw IRQ2 loss
-  - raw DMA3 failure
-  - bad PVD payload
-  - bad `WantData`
-- The active bug is now most likely:
-  - wrong post-`Pause` sector/state sequencing in the BIOS scratch buffer area
-  - i.e. a text sector (`SYSTEM.CNF`) is present in RAM in a state/context where the BIOS path at `0xBFC03CF0..0xBFC03D1C` expects something else
+- The old "UE5 still has `SYSTEM.CNF` in scratch instead of `PS-X EXE`" diagnosis is obsolete.
+- The active question is now:
+  - does the BIOS actually hand off after `60643`, and if not, where does it loop next?
+- This is now a BIOS-handoff / post-boot transition issue, not the old sector ordering failure.
 
 ### Current target
 
-- Focus on the exact LBA/sector ordering that populates the BIOS scratch region around:
-  - `0xA000B070..0xA000B88F`
-- The next useful correction is in CD state/sequencing after `Pause`, not in raw DMA plumbing.
+- Trace the first non-BIOS PC after `LBA 60643` DMA.
+- If no non-BIOS PC appears, the BIOS is still looping after successful `PS-X EXE` delivery.
+- If a non-BIOS PC appears, the next blocker is in the game-side startup path rather than BIOS CD boot.
 
 ## 2026-03-22 timing/thread review
 
@@ -2048,3 +2255,9 @@ It now progresses into later BIOS parsing and then crashes deterministically:
 - Goal:
   - make CD command/IRQ ordering invariant to host wakeup granularity
   - reduce the remaining UE5-vs-CLI divergence without relying on host timer behavior
+
+## 2026-03-22 correction - 0x00000CA8 is not itself the bug
+
+CLI with the same core also reaches 0x00000CA8 immediately after successful LBA 60643 delivery, then later advances into game code ( x80057xxx, then  x800679xx).
+So  x00000CA8 is now treated as a transient BIOS handoff step, not the root failure by itself.
+

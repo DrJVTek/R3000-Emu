@@ -22,6 +22,158 @@ static std::atomic<uint16_t> g_pad_buttons{0xFFFFu};
 namespace r3000
 {
 
+static bool stage67_watch_pc(uint32_t pc)
+{
+    return pc >= 0x80065400u && pc <= 0x8006A800u;
+}
+
+static const char* stage67_watch_name(uint32_t phys)
+{
+    if (phys >= 0x0008ABDCu && phys <= 0x0008ACFFu) return "DAT_8008ABDC..ACFF";
+    if (phys >= 0x00126240u && phys <= 0x0012624Bu) return "DAT_80126240..4B";
+    if (phys >= 0x00127068u && phys <= 0x00127069u) return "DAT_80127068..69";
+    if (phys >= 0x001270B4u && phys <= 0x001270B7u) return "DAT_801270B4..B7";
+    if (phys >= 0x0012713Cu && phys <= 0x0012713Fu) return "DAT_8012713C..3F";
+    if (phys >= 0x000E57D4u && phys <= 0x000E57DFu) return "DAT_800E57D4..DF";
+    return nullptr;
+}
+
+static void log_stage67_watch(
+    uint32_t& log_count,
+    const char* op,
+    uint32_t pc,
+    uint32_t addr,
+    uint32_t phys,
+    uint32_t value,
+    uint32_t size
+)
+{
+    const char* name = stage67_watch_name(phys);
+    if (!name || !stage67_watch_pc(pc) || log_count >= 300u)
+        return;
+    ++log_count;
+    emu::logf(
+        emu::LogLevel::warn,
+        "STAGE67",
+        "%s pc=0x%08X addr=0x%08X phys=0x%08X size=%u val=0x%08X %s (#%u)",
+        op,
+        pc,
+        addr,
+        phys,
+        size,
+        value,
+        name,
+        log_count);
+}
+
+static bool stage67_global_name(uint32_t phys, const char** out_name)
+{
+    switch (phys)
+    {
+    case 0x0008ABDCu: *out_name = "DAT_8008ABDC"; return true;
+    case 0x0008ABE0u: *out_name = "DAT_8008ABE0"; return true;
+    case 0x0008ABE4u: *out_name = "DAT_8008ABE4"; return true;
+    case 0x0008ABE8u: *out_name = "DAT_8008ABE8"; return true;
+    case 0x0008ABECu: *out_name = "DAT_8008ABEC"; return true;
+    case 0x0008ACFCu: *out_name = "DAT_8008ACFC"; return true;
+    case 0x000B7BB0u: *out_name = "DAT_800B7BB0"; return true;
+    case 0x000B7BC8u: *out_name = "DAT_800B7BC8"; return true;
+    case 0x000B7BD0u: *out_name = "DAT_800B7BD0"; return true;
+    case 0x00127068u: *out_name = "DAT_80127068"; return true;
+    case 0x00127069u: *out_name = "DAT_80127069"; return true;
+    case 0x001270B4u: *out_name = "DAT_801270B4"; return true;
+    case 0x001270B6u: *out_name = "DAT_801270B6"; return true;
+    case 0x0012713Cu: *out_name = "DAT_8012713C"; return true;
+    default: return false;
+    }
+}
+
+static uint32_t stage67_ram_rd32(const uint8_t* ram, uint32_t ram_size, uint32_t phys)
+{
+    if (!ram || phys + 3u >= ram_size)
+        return 0u;
+    return (uint32_t)ram[phys] |
+           ((uint32_t)ram[phys + 1u] << 8) |
+           ((uint32_t)ram[phys + 2u] << 16) |
+           ((uint32_t)ram[phys + 3u] << 24);
+}
+
+void Bus::log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size)
+{
+    if (!stage67_watch_pc(cpu_pc_) || stage67_mmio_log_count_ >= 256u)
+        return;
+
+    if (!(phys == 0x1F801814u ||
+          phys == 0x1F801110u ||
+          phys == 0x1F801114u ||
+          phys == 0x1F801118u ||
+          phys == 0x1F801070u ||
+          phys == 0x1F801074u))
+    {
+        return;
+    }
+
+    const uint32_t abdc = stage67_ram_rd32(ram_, ram_size_, 0x0008ABDCu);
+    const uint32_t abe0 = stage67_ram_rd32(ram_, ram_size_, 0x0008ABE0u);
+    const uint32_t abe4 = stage67_ram_rd32(ram_, ram_size_, 0x0008ABE4u);
+    const uint32_t abe8 = stage67_ram_rd32(ram_, ram_size_, 0x0008ABE8u);
+    const uint32_t abec = stage67_ram_rd32(ram_, ram_size_, 0x0008ABECu);
+    const uint32_t acfc = stage67_ram_rd32(ram_, ram_size_, 0x0008ACFCu);
+
+    ++stage67_mmio_log_count_;
+    if (phys == 0x1F801814u && gpu_)
+    {
+        const gpu::Stage67GpuDebug gd = gpu_->stage67_debug();
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67MMIO",
+            "RD%u pc=0x%08X phys=0x%08X -> 0x%08X bit31=%u scan=%u line_lsb=%u dy=%u hres=%u vres=%u pal=%u interlace=%u vblank=%u field=%u frame=%u abdc=0x%08X abe0=0x%08X abe4=0x%08X abe8=0x%08X abec=0x%08X acfc=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
+            size * 8u,
+            cpu_pc_,
+            phys,
+            value,
+            (unsigned)((gd.gpustat >> 31) & 1u),
+            (unsigned)gd.scanline,
+            (unsigned)gd.display_line_lsb,
+            (unsigned)gd.display_y,
+            (unsigned)gd.h_res,
+            (unsigned)gd.v_res,
+            (unsigned)gd.is_pal,
+            (unsigned)gd.interlace,
+            (unsigned)gd.in_vblank,
+            (unsigned)gd.even_odd_field,
+            (unsigned)gd.frame_count,
+            abdc,
+            abe0,
+            abe4,
+            abe8,
+            abec,
+            acfc,
+            (unsigned)i_stat_,
+            (unsigned)i_mask_,
+            stage67_mmio_log_count_);
+        return;
+    }
+
+    emu::logf(
+        emu::LogLevel::warn,
+        "STAGE67MMIO",
+        "RD%u pc=0x%08X phys=0x%08X -> 0x%08X abdc=0x%08X abe0=0x%08X abe4=0x%08X abe8=0x%08X abec=0x%08X acfc=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
+        size * 8u,
+        cpu_pc_,
+        phys,
+        value,
+        abdc,
+        abe0,
+        abe4,
+        abe8,
+        abec,
+        acfc,
+        (unsigned)i_stat_,
+        (unsigned)i_mask_,
+        stage67_mmio_log_count_);
+}
+
 void Bus::set_pad_buttons(uint16_t v) { g_pad_buttons.store(v, std::memory_order_relaxed); }
 uint16_t Bus::pad_buttons() const    { return g_pad_buttons.load(std::memory_order_relaxed); }
 
@@ -637,6 +789,7 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
     if (phys < kRamWindow)
     {
         out = ram_[phys & (ram_size_ - 1)];
+        log_stage67_watch(stage67_watch_log_count_, "RD8", cpu_pc_, addr, phys & (ram_size_ - 1), out, 1);
         if (cpu_pc_ >= 0xBFC03000u && cpu_pc_ <= 0xBFC07000u &&
             phys >= 0x0000B000u && phys < 0x0000B900u &&
             bios_cd_ram_log_count_ < 256u)
@@ -774,6 +927,7 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
         const uint32_t mp0 = phys & rm;
         const uint32_t mp1 = (phys + 1u) & rm;
         out = (uint16_t)ram_[mp0] | ((uint16_t)ram_[mp1] << 8);
+        log_stage67_watch(stage67_watch_log_count_, "RD16", cpu_pc_, addr, mp0, out, 2);
         if (cpu_pc_ >= 0xBFC03000u && cpu_pc_ <= 0xBFC07000u &&
             phys >= 0x0000B000u && phys < 0x0000B900u &&
             bios_cd_ram_log_count_ < 256u)
@@ -888,6 +1042,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         const uint32_t mp3 = (phys + 3u) & rm;
         out = (uint32_t)ram_[mp0] | ((uint32_t)ram_[mp1] << 8) |
               ((uint32_t)ram_[mp2] << 16) | ((uint32_t)ram_[mp3] << 24);
+        log_stage67_watch(stage67_watch_log_count_, "RD32", cpu_pc_, addr, mp0, out, 4);
         if (cpu_pc_ >= 0xBFC03000u && cpu_pc_ <= 0xBFC07000u &&
             phys >= 0x0000B000u && phys < 0x0000B900u &&
             bios_cd_ram_log_count_ < 256u)
@@ -921,11 +1076,13 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
     if (phys == kIrqStatAddr)
     {
         out = i_stat_;
+        log_stage67_mmio_read(phys, out, 4);
         return true;
     }
     if (phys == kIrqMaskAddr)
     {
         out = i_mask_;
+        log_stage67_mmio_read(phys, out, 4);
         return true;
     }
 
@@ -964,6 +1121,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
     if (phys == kGpuBase || phys == kGpuBase + 4)
     {
         out = gpu_ ? gpu_->mmio_read32(phys) : 0x14802000u;
+        log_stage67_mmio_read(phys, out, 4);
         return true;
     }
 
@@ -1010,6 +1168,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
             case 2: out = timers_[ch].target; break;
             default: out = 0; break;
             }
+            log_stage67_mmio_read(phys, out, 4);
             return true;
         }
     }
@@ -1061,6 +1220,78 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     {
         const uint32_t mp = phys & (ram_size_ - 1);
         ram_[mp] = v;
+        if (mp >= 0x00050000u && mp < 0x00070000u && code_overlay_log_count_ < 256u)
+        {
+            ++code_overlay_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODEOVL",
+                "WR8 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%02X (#%u)",
+                cpu_pc_, addr, mp, (unsigned)v, code_overlay_log_count_);
+        }
+        if (mp >= 0x00054A80u && mp < 0x00054AC0u && code_stage54_log_count_ < 128u)
+        {
+            ++code_stage54_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODE54",
+                "WR8 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%02X (#%u)",
+                cpu_pc_, addr, mp, (unsigned)v, code_stage54_log_count_);
+        }
+        if (mp >= 0x000677D0u && mp < 0x00067820u && code_stage67win_log_count_ < 128u)
+        {
+            ++code_stage67win_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODE67",
+                "WR8 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%02X (#%u)",
+                cpu_pc_, addr, mp, (unsigned)v, code_stage67win_log_count_);
+        }
+        if (!runtime_loader_dumped_ &&
+            (mp >= 0x00054A80u && mp < 0x00054AC0u || mp >= 0x000677D0u && mp < 0x00067820u) &&
+            cpu_pc_ >= 0x801C0000u && cpu_pc_ < 0x801D0000u)
+        {
+            runtime_loader_dumped_ = 1;
+            const uint32_t dump_base = 0x001C0D00u;
+            if (dump_base + 0x200u <= ram_size_)
+            {
+                if (std::FILE* f = std::fopen("logs/runtime_loader_801C0D00.bin", "wb"))
+                {
+                    std::fwrite(ram_ + dump_base, 1, 0x200u, f);
+                    std::fclose(f);
+                }
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "LOADERDUMP",
+                    "pc=0x%08X dumped logs/runtime_loader_801C0D00.bin base=0x801C0D00",
+                    cpu_pc_);
+                for (uint32_t off = 0; off < 0x80u; off += 4u)
+                {
+                    const uint32_t o = dump_base + off;
+                    const uint32_t w = (uint32_t)ram_[o] |
+                                       ((uint32_t)ram_[o + 1] << 8) |
+                                       ((uint32_t)ram_[o + 2] << 16) |
+                                       ((uint32_t)ram_[o + 3] << 24);
+                    emu::logf(
+                        emu::LogLevel::warn,
+                        "LOADERDUMP",
+                        "0x%08X: 0x%08X",
+                        0x801C0D00u + off,
+                        w);
+                }
+            }
+        }
+        log_stage67_watch(stage67_watch_log_count_, "WR8", cpu_pc_, addr, mp, v, 1);
+        {
+            const char* gname = nullptr;
+            if (stage67_global_name(mp, &gname) && stage67_watch_log_count_ < 340u)
+            {
+                ++stage67_watch_log_count_;
+                emu::logf(emu::LogLevel::warn, "STAGE67",
+                    "GWR8 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%02X %s (#%u)",
+                    cpu_pc_, addr, mp, (unsigned)v, gname, stage67_watch_log_count_);
+            }
+        }
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1220,6 +1451,44 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         const uint32_t mp1 = (phys + 1u) & rm;
         ram_[mp0] = (uint8_t)(v & 0xFF);
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
+        if (mp0 >= 0x00050000u && mp0 < 0x00070000u && code_overlay_log_count_ < 256u)
+        {
+            ++code_overlay_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODEOVL",
+                "WR16 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%04X (#%u)",
+                cpu_pc_, addr, mp0, (unsigned)v, code_overlay_log_count_);
+        }
+        if (mp0 >= 0x00054A80u && mp0 < 0x00054AC0u && code_stage54_log_count_ < 128u)
+        {
+            ++code_stage54_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODE54",
+                "WR16 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%04X (#%u)",
+                cpu_pc_, addr, mp0, (unsigned)v, code_stage54_log_count_);
+        }
+        if (mp0 >= 0x000677D0u && mp0 < 0x00067820u && code_stage67win_log_count_ < 128u)
+        {
+            ++code_stage67win_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODE67",
+                "WR16 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%04X (#%u)",
+                cpu_pc_, addr, mp0, (unsigned)v, code_stage67win_log_count_);
+        }
+        log_stage67_watch(stage67_watch_log_count_, "WR16", cpu_pc_, addr, mp0, v, 2);
+        {
+            const char* gname = nullptr;
+            if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 340u)
+            {
+                ++stage67_watch_log_count_;
+                emu::logf(emu::LogLevel::warn, "STAGE67",
+                    "GWR16 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%04X %s (#%u)",
+                    cpu_pc_, addr, mp0, (unsigned)v, gname, stage67_watch_log_count_);
+            }
+        }
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1404,6 +1673,44 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
         ram_[mp2] = (uint8_t)((v >> 16) & 0xFF);
         ram_[mp3] = (uint8_t)((v >> 24) & 0xFF);
+        if (mp0 >= 0x00050000u && mp0 < 0x00070000u && code_overlay_log_count_ < 256u)
+        {
+            ++code_overlay_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODEOVL",
+                "WR32 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%08X (#%u)",
+                cpu_pc_, addr, mp0, (unsigned)v, code_overlay_log_count_);
+        }
+        if (mp0 >= 0x00054A80u && mp0 < 0x00054AC0u && code_stage54_log_count_ < 128u)
+        {
+            ++code_stage54_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODE54",
+                "WR32 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%08X (#%u)",
+                cpu_pc_, addr, mp0, (unsigned)v, code_stage54_log_count_);
+        }
+        if (mp0 >= 0x000677D0u && mp0 < 0x00067820u && code_stage67win_log_count_ < 128u)
+        {
+            ++code_stage67win_log_count_;
+            emu::logf(
+                emu::LogLevel::warn,
+                "CODE67",
+                "WR32 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%08X (#%u)",
+                cpu_pc_, addr, mp0, (unsigned)v, code_stage67win_log_count_);
+        }
+        log_stage67_watch(stage67_watch_log_count_, "WR32", cpu_pc_, addr, mp0, v, 4);
+        {
+            const char* gname = nullptr;
+            if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 340u)
+            {
+                ++stage67_watch_log_count_;
+                emu::logf(emu::LogLevel::warn, "STAGE67",
+                    "GWR32 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%08X %s (#%u)",
+                    cpu_pc_, addr, mp0, v, gname, stage67_watch_log_count_);
+            }
+        }
 
         // Fire write hooks (zero-cost when no hooks registered)
         if (hooks_ && hooks_->has_write())
@@ -1757,6 +2064,16 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             ++bios_cd_dma_dump_count_;
                             bios_pvd_post_pc_trace_count_ = 512u;
                             bios_pvd_post_last_pc_ = 0xFFFFFFFFu;
+                            if (cdrom_)
+                            {
+                                const uint32_t read_lba = cdrom_->debug_read_lba();
+                                const uint32_t data_lba = cdrom_->debug_data_lba();
+                                if (read_lba == 60643u || data_lba == 60643u)
+                                {
+                                    bios_post_60643_trace_active_ = 1u;
+                                    bios_post_60643_exit_logged_ = 0u;
+                                }
+                            }
 
                             char hexbuf[3 * 16 + 1]{};
                             char asciibuf[16 + 1]{};
@@ -2159,6 +2476,20 @@ void Bus::check_cdrom_irq_edge()
 
 void Bus::tick(uint32_t cycles)
 {
+    if (bios_post_60643_trace_active_ &&
+        !bios_post_60643_exit_logged_ &&
+        cpu_pc_ < 0xBFC00000u)
+    {
+        bios_post_60643_exit_logged_ = 1u;
+        emu::logf(
+            emu::LogLevel::warn,
+            "BIOSXFER",
+            "First non-BIOS PC after LBA60643 DMA: pc=0x%08X i_stat=0x%04X i_mask=0x%04X",
+            cpu_pc_,
+            (unsigned)i_stat_,
+            (unsigned)i_mask_);
+    }
+
     if (bios_pvd_post_pc_trace_count_ != 0u &&
         cpu_pc_ >= 0xBFC00000u && cpu_pc_ < 0xBFC80000u &&
         cpu_pc_ != bios_pvd_post_last_pc_)

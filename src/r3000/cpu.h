@@ -451,6 +451,27 @@ class Cpu
     uint32_t irq_take_log_count_{0};
     uint32_t irq_exc_log_count_{0};
     uint32_t irq_status_write_log_count_{0};
+    uint32_t bios_handoff_log_count_{0};
+    uint8_t game_boot_stage57_logged_{0};
+    uint8_t game_boot_stage67_logged_{0};
+    uint32_t stage67_cpu_log_count_{0};
+    uint32_t stage67_entry_log_count_{0};
+    uint32_t stage67_gate_log_count_{0};
+    uint32_t stage67_queue_log_count_{0};
+    uint32_t stage67_slot_log_count_{0};
+    uint32_t stage67_write_log_count_{0};
+    uint32_t stage67_pre_log_count_{0};
+    uint32_t stage67_hit6742_log_count_{0};
+    uint32_t stage67_hit6766_log_count_{0};
+    uint32_t stage67_hit676e_log_count_{0};
+    uint32_t stage67_hit691e_log_count_{0};
+    uint32_t stage67_hit69f1_log_count_{0};
+    uint32_t stage67_main_log_count_{0};
+    uint32_t stage67_call54_log_count_{0};
+    uint32_t stage67_memop_log_count_{0};
+    uint32_t stage67_loop_log_count_{0};
+    uint32_t stage67_caller_log_count_{0};
+    uint32_t stage67_post_log_count_{0};
     uint32_t irq_rfe_log_count_{0};
     uint32_t bios_cd_pending_log_count_{0};
 

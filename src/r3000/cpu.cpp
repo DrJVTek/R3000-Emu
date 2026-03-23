@@ -3287,6 +3287,38 @@ Cpu::StepResult Cpu::step()
         remember_callctx_face(face_token);
         return 1;
     };
+    auto trace_stage67_memop = [&](const char* op, uint32_t vaddr, uint32_t value, uint32_t size) -> void
+    {
+        if (stage67_memop_log_count_ >= 1024u)
+            return;
+        if (!((r.pc >= 0x80044B54u && r.pc <= 0x80044B90u) ||
+              (r.pc >= 0x80054A90u && r.pc <= 0x80054AB0u) ||
+              (r.pc >= 0x8006771Cu && r.pc < 0x80067A20u)))
+        {
+            return;
+        }
+
+        const uint32_t phys = virt_to_phys(vaddr);
+        if (phys >= 0x1F000000u)
+            return;
+
+        ++stage67_memop_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67MEM",
+            "op=%s pc=0x%08X addr=0x%08X phys=0x%08X size=%u val=0x%08X ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X (#%u)",
+            op,
+            r.pc,
+            vaddr,
+            phys,
+            size,
+            value,
+            gpr_[31],
+            gpr_[29],
+            gpr_[4],
+            gpr_[5],
+            stage67_memop_log_count_);
+    };
     auto infer_store_token_from_reg = [&](uint32_t reg_idx, uint32_t face_token) -> uint32_t
     {
         const uint32_t r = reg_idx & 31u;
@@ -4625,6 +4657,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LW";
                 mem_addr = addr;
                 mem_val = v;
+                trace_stage67_memop("LW", addr, v, 4);
                 trace_tekk_dma3_ptr_slot("LW", r.pc, addr, t, v, true);
                 trace_tekk_cd_buffers("LW", r.pc, addr, t, v, true);
                 // Load delay slot: pas de writeback immédiat.
@@ -4654,6 +4687,17 @@ Cpu::StepResult Cpu::step()
                 trace_dma3_program("SW", r.pc, addr, s, off, t);
                 trace_tekk_dma3_ptr_slot("SW", r.pc, addr, t, gpr_[t], false);
                 trace_tekk_cd_buffers("SW", r.pc, addr, t, gpr_[t], false);
+                trace_stage67_memop("SW", addr, gpr_[t], 4);
+                if (stage67_write_log_count_ < 512u &&
+                    (addr == 0x801271BCu || addr == 0x80126248u || addr == 0x8012624Au ||
+                     addr == 0x8012624Cu || addr == 0x801270C8u ||
+                     addr == 0x80127144u || addr == 0x80127174u))
+                {
+                    ++stage67_write_log_count_;
+                    emu::logf(emu::LogLevel::warn, "STAGE67W",
+                        "SW pc=0x%08X addr=0x%08X val=0x%08X ra=0x%08X",
+                        r.pc, addr, gpr_[t], gpr_[31]);
+                }
                 if (!store_u32(addr, gpr_[t], store_tok))
                 {
                     // Exception déjà déclenchée (ADES). On sort.
@@ -4869,6 +4913,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LB";
                 mem_addr = addr;
                 mem_val = b;
+                trace_stage67_memop("LB", addr, v, 1);
                 trace_tekk_cd_buffers("LB", r.pc, addr, t, v, true);
                 // Load delay slot: pas de writeback immédiat.
                 next_pending_load.valid = 1;
@@ -4897,6 +4942,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LBU";
                 mem_addr = addr;
                 mem_val = b;
+                trace_stage67_memop("LBU", addr, v, 1);
                 trace_tekk_cd_buffers("LBU", r.pc, addr, t, v, true);
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
@@ -4924,6 +4970,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LH";
                 mem_addr = addr;
                 mem_val = h;
+                trace_stage67_memop("LH", addr, v, 2);
                 trace_tekk_cd_buffers("LH", r.pc, addr, t, v, true);
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
@@ -4951,6 +4998,7 @@ Cpu::StepResult Cpu::step()
                 mem_op = "LHU";
                 mem_addr = addr;
                 mem_val = h;
+                trace_stage67_memop("LHU", addr, v, 2);
                 trace_tekk_cd_buffers("LHU", r.pc, addr, t, v, true);
                 next_pending_load.valid = 1;
                 next_pending_load.reg = t;
@@ -4970,15 +5018,30 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
+                const uint8_t sbv = (uint8_t)(gpr_[t] & 0xFFu);
                 const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
                 trace_hotspot_store("SB", r.pc, addr, t, store_tok);
-                trace_tekk_cd_buffers("SB", r.pc, addr, t, gpr_[t] & 0xFFu, false);
-                if (!store_u8(addr, (uint8_t)(gpr_[t] & 0xFFu), store_tok))
+                trace_tekk_cd_buffers("SB", r.pc, addr, t, sbv, false);
+                trace_stage67_memop("SB", addr, sbv, 1);
+                if (stage67_write_log_count_ < 512u &&
+                    (addr == 0x80127068u || addr == 0x80127069u ||
+                     addr == 0x801270C8u ||
+                     addr == 0x80127024u || addr == 0x80127070u ||
+                     addr == 0x801270B4u || addr == 0x801270B6u ||
+                     addr == 0x8012713Cu || addr == 0x80127144u ||
+                     addr == 0x80127174u || addr == 0x801271BCu || addr == 0x801271BDu))
+                {
+                    ++stage67_write_log_count_;
+                    emu::logf(emu::LogLevel::warn, "STAGE67W",
+                        "SB pc=0x%08X addr=0x%08X val=0x%02X ra=0x%08X",
+                        r.pc, addr, (unsigned)sbv, gpr_[31]);
+                }
+                if (!store_u8(addr, sbv, store_tok))
                     break;
                 mem_valid = 1;
                 mem_op = "SB";
                 mem_addr = addr;
-                mem_val = gpr_[t] & 0xFFu;
+                mem_val = sbv;
                 break;
             }
         case 0x29:
@@ -4987,15 +5050,27 @@ Cpu::StepResult Cpu::step()
                 const uint32_t t = rt(instr);
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
+                const uint16_t shv = (uint16_t)(gpr_[t] & 0xFFFFu);
                 const uint32_t store_tok = infer_store_token_from_reg(t, gpr_face_token_[t & 31u]);
                 trace_hotspot_store("SH", r.pc, addr, t, store_tok);
-                trace_tekk_cd_buffers("SH", r.pc, addr, t, gpr_[t] & 0xFFFFu, false);
-                if (!store_u16(addr, (uint16_t)(gpr_[t] & 0xFFFFu), store_tok))
+                trace_tekk_cd_buffers("SH", r.pc, addr, t, shv, false);
+                trace_stage67_memop("SH", addr, shv, 2);
+                if (stage67_write_log_count_ < 512u &&
+                    (addr == 0x801271BCu || addr == 0x80126248u || addr == 0x8012624Au ||
+                     addr == 0x80126250u || addr == 0x801270C8u ||
+                     addr == 0x80127144u || addr == 0x80127174u))
+                {
+                    ++stage67_write_log_count_;
+                    emu::logf(emu::LogLevel::warn, "STAGE67W",
+                        "SH pc=0x%08X addr=0x%08X val=0x%04X ra=0x%08X",
+                        r.pc, addr, (unsigned)shv, gpr_[31]);
+                }
+                if (!store_u16(addr, shv, store_tok))
                     break;
                 mem_valid = 1;
                 mem_op = "SH";
                 mem_addr = addr;
-                mem_val = gpr_[t] & 0xFFFFu;
+                mem_val = shv;
                 break;
             }
         case 0x22:
@@ -5906,6 +5981,547 @@ Cpu::StepResult Cpu::step()
                     gpr_[4]);
             }
         }
+    }
+
+    if ((pc_ == 0x00000CA8u || pc_ == 0x00000CACu || pc_ == 0x00000CB0u) && bios_handoff_log_count_ < 16u)
+    {
+        ++bios_handoff_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "BIOSJUMP",
+            "pc=0x%08X ra=0x%08X sp=0x%08X gp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X t0=0x%08X t1=0x%08X s0=0x%08X s1=0x%08X status=0x%08X cause=0x%08X epc=0x%08X",
+            pc_,
+            gpr_[31],
+            gpr_[29],
+            gpr_[28],
+            gpr_[4],
+            gpr_[5],
+            gpr_[6],
+            gpr_[7],
+            gpr_[2],
+            gpr_[3],
+            gpr_[8],
+            gpr_[9],
+            gpr_[16],
+            gpr_[17],
+            cop0_[COP0_STATUS],
+            cop0_[COP0_CAUSE],
+            cop0_[COP0_EPC]);
+    }
+
+    if (!game_boot_stage57_logged_ && pc_ >= 0x80057000u && pc_ < 0x80058000u)
+    {
+        game_boot_stage57_logged_ = 1u;
+        emu::logf(
+            emu::LogLevel::warn,
+            "GAMEPC",
+            "Reached stage57 pc=0x%08X ra=0x%08X sp=0x%08X status=0x%08X cause=0x%08X",
+            pc_, gpr_[31], gpr_[29], cop0_[COP0_STATUS], cop0_[COP0_CAUSE]);
+    }
+
+    if (!game_boot_stage67_logged_ && pc_ >= 0x80067800u && pc_ < 0x80067A00u)
+    {
+        game_boot_stage67_logged_ = 1u;
+        emu::logf(
+            emu::LogLevel::warn,
+            "GAMEPC",
+            "Reached stage67 pc=0x%08X ra=0x%08X sp=0x%08X status=0x%08X cause=0x%08X",
+            pc_, gpr_[31], gpr_[29], cop0_[COP0_STATUS], cop0_[COP0_CAUSE]);
+        for (uint32_t i = 0; i < 32u; ++i)
+        {
+            const uint32_t idx = (recent_pos_ - 1u - i) & 0xFFu;
+            emu::logf(
+                emu::LogLevel::warn,
+                "GAMEPATH",
+                "hist[%u] pc=0x%08X instr=0x%08X",
+                i,
+                recent_pc_[idx],
+                recent_instr_[idx]);
+        }
+        auto dump_code = [&](uint32_t base) {
+            for (uint32_t off = 0; off < 0x40u; off += 4u)
+            {
+                Bus::MemFault fault{};
+                uint32_t instr = 0;
+                if (bus_.read_u32(base + off, instr, fault))
+                {
+                    emu::logf(
+                        emu::LogLevel::warn,
+                        "GAMEDUMP",
+                        "pc=0x%08X instr=0x%08X",
+                        base + off,
+                        instr);
+                }
+            }
+        };
+        dump_code(0x80054A90u);
+        dump_code(0x800677E0u);
+        if (uint8_t* ram = bus_.ram_ptr())
+        {
+            if (std::FILE* f = std::fopen("logs/stage67_ram_80050000.bin", "wb"))
+            {
+                std::fwrite(ram + 0x00050000u, 1u, 0x00020000u, f);
+                std::fclose(f);
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "GAMEDUMP",
+                    "wrote logs/stage67_ram_80050000.bin size=0x%X",
+                    0x00020000u);
+            }
+            if (std::FILE* f = std::fopen("logs/stage67_ram_80040000.bin", "wb"))
+            {
+                std::fwrite(ram + 0x00040000u, 1u, 0x00010000u, f);
+                std::fclose(f);
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "GAMEDUMP",
+                    "wrote logs/stage67_ram_80040000.bin size=0x%X",
+                    0x00010000u);
+            }
+        }
+    }
+
+    if ((pc_ >= 0x8004E360u && pc_ <= 0x8004E3C0u) && stage67_caller_log_count_ < 64u)
+    {
+        ++stage67_caller_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67UP",
+            "pc=0x%08X instr=0x%08X ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s5=0x%08X",
+            pc_,
+            instr,
+            gpr_[31],
+            gpr_[29],
+            gpr_[4],
+            gpr_[5],
+            gpr_[6],
+            gpr_[7],
+            gpr_[2],
+            gpr_[3],
+            gpr_[16],
+            gpr_[17],
+            gpr_[18],
+            gpr_[19],
+            gpr_[20],
+            gpr_[21]);
+    }
+
+    if (((pc_ >= 0x8004E9C0u && pc_ <= 0x8004EA40u) ||
+         (pc_ >= 0x8004EEA8u && pc_ <= 0x8004EF20u)) &&
+        stage67_post_log_count_ < 128u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        auto rd32 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] |
+                   ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8) |
+                   ((uint32_t)ram[(phys + 2u) & 0x1FFFFFu] << 16) |
+                   ((uint32_t)ram[(phys + 3u) & 0x1FFFFFu] << 24);
+        };
+        ++stage67_post_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67POST",
+            "pc=0x%08X instr=0x%08X ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X ad40=0x%08X 8714=%d 8718=%d c8220=0x%08X c8224=0x%08X",
+            pc_,
+            instr,
+            gpr_[31],
+            gpr_[29],
+            gpr_[4],
+            gpr_[5],
+            gpr_[6],
+            gpr_[7],
+            gpr_[2],
+            gpr_[3],
+            rd32(0x8009AD40u),
+            (int16_t)rd16(0x80088714u),
+            (int16_t)rd16(0x80088718u),
+            rd32(0x800C8220u),
+            rd32(0x800C8224u));
+    }
+
+    if ((pc_ >= 0x80054B38u && pc_ <= 0x80054C70u) && stage67_main_log_count_ < 24u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        ++stage67_main_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67MAIN",
+            "pc=0x%08X instr=0x%08X ra=0x%08X s0=%d s5=%d s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s6=0x%08X s7=0x%08X fp=0x%08X phase=%u flags=0x%02X f68=%u f69=%u b4=%u b6=%u gate=%u mode=%u",
+            pc_,
+            instr,
+            gpr_[31],
+            (int16_t)gpr_[16],
+            (int32_t)gpr_[21],
+            gpr_[17],
+            gpr_[18],
+            gpr_[19],
+            gpr_[20],
+            gpr_[22],
+            gpr_[23],
+            gpr_[30],
+            (unsigned)rd16(0x801270C8u),
+            (unsigned)(rd16(0x801271BCu) & 0xFFu),
+            (unsigned)rd8(0x80127068u),
+            (unsigned)rd8(0x80127069u),
+            (unsigned)rd8(0x801270B4u),
+            (unsigned)rd8(0x801270B6u),
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u));
+    }
+
+    if ((pc_ == 0x80054C54u || pc_ == 0x80054C5Cu || pc_ == 0x80054C6Cu) &&
+        stage67_loop_log_count_ < 24u)
+    {
+        ++stage67_loop_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67LOOP",
+            "pc=0x%08X instr=0x%08X ra=0x%08X s0=%d s5=%d s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s6=0x%08X s7=0x%08X fp=0x%08X",
+            pc_,
+            instr,
+            gpr_[31],
+            (int16_t)gpr_[16],
+            (int32_t)gpr_[21],
+            gpr_[17],
+            gpr_[18],
+            gpr_[19],
+            gpr_[20],
+            gpr_[22],
+            gpr_[23],
+            gpr_[30]);
+    }
+
+    if ((pc_ >= 0x80054A90u && pc_ <= 0x80054AB0u) && stage67_call54_log_count_ < 24u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        ++stage67_call54_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67CALL54",
+            "pc=0x%08X instr=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X phase=%u state=0x%04X flags=0x%02X f68=%u f69=%u b4=%u b6=%u gate=%u mode=%u",
+            pc_,
+            instr,
+            gpr_[31],
+            gpr_[4],
+            gpr_[5],
+            (unsigned)rd16(0x801270C8u),
+            (unsigned)rd16(0x80127174u),
+            (unsigned)(rd16(0x801271BCu) & 0xFFu),
+            (unsigned)rd8(0x80127068u),
+            (unsigned)rd8(0x80127069u),
+            (unsigned)rd8(0x801270B4u),
+            (unsigned)rd8(0x801270B6u),
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u));
+    }
+
+    if (pc_ >= 0x8006771Cu && pc_ < 0x80067A20u && stage67_cpu_log_count_ < 256u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        auto rd32 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] |
+                   ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8) |
+                   ((uint32_t)ram[(phys + 2u) & 0x1FFFFFu] << 16) |
+                   ((uint32_t)ram[(phys + 3u) & 0x1FFFFFu] << 24);
+        };
+        const uint32_t abdc = rd32(0x8008ABDCu);
+        const uint32_t abe0 = rd32(0x8008ABE0u);
+        const uint32_t abe4 = rd32(0x8008ABE4u);
+        const uint32_t abe8 = rd32(0x8008ABE8u);
+        const uint32_t abec = rd32(0x8008ABECu);
+        const uint32_t acfc = rd32(0x8008ACFCu);
+        const uint32_t cur_abe0 = (abe0 != 0u) ? rd32(abe0) : 0u;
+        const uint32_t cur_abdc = (abdc != 0u) ? rd32(abdc) : 0u;
+
+        ++stage67_cpu_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67CPU",
+            "pc=0x%08X st0=%u st1=%u sub0=%u sub1=%u abdc=0x%08X *abdc=0x%08X abe0=0x%08X *abe0=0x%08X abe4=0x%08X abe8=0x%08X abec=0x%08X acfc=0x%08X timeout=%u gate=%u mode=%u",
+            pc_,
+            (unsigned)rd8(0x800E57D4u),
+            (unsigned)rd8(0x800E57DCu),
+            (unsigned)rd8(0x800E57D9u),
+            (unsigned)rd8(0x800E57E1u),
+            abdc,
+            cur_abdc,
+            abe0,
+            cur_abe0,
+            abe4,
+            abe8,
+            abec,
+            acfc,
+            (unsigned)rd16(0x800B7BB0u),
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u));
+    }
+
+    if ((pc_ == 0x80065484u || pc_ == 0x800678C0u || pc_ == 0x800679E4u) && stage67_entry_log_count_ < 96u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        const uint32_t slot = gpr_[4] & 1u;
+        const uint32_t slot_base = 0x800E57D4u + slot * 8u;
+        ++stage67_entry_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67FN",
+            "pc=0x%08X fn=%s slot=%u ra=0x%08X state=%u sub=%u f68=%u b4=%u m248=0x%04X done=%u gate=%u mode=%u",
+            pc_,
+            (pc_ == 0x80065484u) ? "start_slot" : ((pc_ == 0x800678C0u) ? "init_slot" : "tick_slot"),
+            slot,
+            gpr_[31],
+            (unsigned)rd8(slot_base + 0u),
+            (unsigned)rd8(slot_base + 5u),
+            (unsigned)rd8(0x80127068u + slot),
+            (unsigned)rd8((slot == 0u) ? 0x801270B4u : 0x801270B6u),
+            (unsigned)rd16(0x80126248u + slot * 2u),
+            (unsigned)rd8(0x8012713Cu),
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u));
+    }
+
+    if (pc_ == 0x8006742Cu || pc_ == 0x8006766Cu || pc_ == 0x800676E0u ||
+        pc_ == 0x800691ECu || pc_ == 0x80069F1Cu)
+    {
+        uint32_t* counter = nullptr;
+        const char* label = nullptr;
+        if (pc_ == 0x8006742Cu) { counter = &stage67_hit6742_log_count_; label = "hit6742"; }
+        else if (pc_ == 0x8006766Cu) { counter = &stage67_hit6766_log_count_; label = "hit6766"; }
+        else if (pc_ == 0x800676E0u) { counter = &stage67_hit676e_log_count_; label = "hit676e"; }
+        else if (pc_ == 0x800691ECu) { counter = &stage67_hit691e_log_count_; label = "hit691e"; }
+        else if (pc_ == 0x80069F1Cu) { counter = &stage67_hit69f1_log_count_; label = "hit69f1"; }
+        if (counter && *counter < 32u)
+        {
+            uint8_t* ram = bus_.ram_ptr();
+            auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+                const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+                return ram ? ram[phys] : 0u;
+            };
+            auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+                const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+                if (!ram)
+                    return 0u;
+                return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+            };
+            ++(*counter);
+            emu::logf(
+                emu::LogLevel::warn,
+                "STAGE67HIT",
+                "tag=%s pc=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X phase=%u state=0x%04X flags=0x%02X f68=%u f69=%u b4=%u b6=%u gate=%u mode=%u s26250=%u s27144=%u s27024=%u s27070=%u",
+                label,
+                pc_,
+                gpr_[31],
+                gpr_[4],
+                gpr_[5],
+                (unsigned)rd16(0x801270C8u),
+                (unsigned)rd16(0x80127174u),
+                (unsigned)(rd16(0x801271BCu) & 0xFFu),
+                (unsigned)rd8(0x80127068u),
+                (unsigned)rd8(0x80127069u),
+                (unsigned)rd8(0x801270B4u),
+                (unsigned)rd8(0x801270B6u),
+                (unsigned)rd8(0x800B7BC8u),
+                (unsigned)rd8(0x800B7BD8u),
+                (unsigned)rd16(0x80126250u),
+                (unsigned)rd16(0x80127144u),
+                (unsigned)rd8(0x80127024u),
+                (unsigned)rd8(0x80127070u));
+        }
+    }
+
+    if ((((pc_ >= 0x800463B8u && pc_ <= 0x80046590u) ||
+          (pc_ >= 0x80067150u && pc_ <= 0x80067190u) ||
+          (pc_ >= 0x8006742Cu && pc_ <= 0x80067670u) ||
+          (pc_ >= 0x8006766Cu && pc_ <= 0x80067710u) ||
+          (pc_ >= 0x800691ECu && pc_ <= 0x8006A080u)) &&
+         stage67_pre_log_count_ < 96u))
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        ++stage67_pre_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67PRE",
+            "pc=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X state=0x%04X flags=0x%02X f68=%u f69=%u b4=%u b6=%u gate=%u mode=%u s27174=%u s26250=%u s27144=%u s27024=%u s27070=%u",
+            pc_,
+            gpr_[31],
+            gpr_[4],
+            gpr_[5],
+            (unsigned)rd16(0x80127174u),
+            (unsigned)(rd16(0x801271BCu) & 0xFFu),
+            (unsigned)rd8(0x80127068u),
+            (unsigned)rd8(0x80127069u),
+            (unsigned)rd8(0x801270B4u),
+            (unsigned)rd8(0x801270B6u),
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u),
+            (unsigned)rd16(0x80127174u),
+            (unsigned)rd16(0x80126250u),
+            (unsigned)rd16(0x80127144u),
+            (unsigned)rd8(0x80127024u),
+            (unsigned)rd8(0x80127070u));
+    }
+
+    if ((pc_ == 0x8006771Cu || pc_ == 0x8006775Cu || pc_ == 0x800677C8u || pc_ == 0x800677D4u) &&
+        stage67_gate_log_count_ < 64u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        ++stage67_gate_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67GATE",
+            "pc=0x%08X phase=%s ra=0x%08X a0=%u gate=%u mode=%u tick=%u timeout=%u done=%u",
+            pc_,
+            (pc_ == 0x8006771Cu) ? "entry" :
+            (pc_ == 0x8006775Cu) ? "init_begin" :
+            (pc_ == 0x800677C8u) ? "gate_store" : "active_begin",
+            gpr_[31],
+            gpr_[4] & 1u,
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u),
+            (unsigned)rd8(0x800B7BD0u),
+            (unsigned)rd16(0x800B7BB0u),
+            (unsigned)rd8(0x8012713Cu));
+    }
+
+    if (pc_ == 0x8006297Cu && stage67_queue_log_count_ < 64u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        const uint32_t ctl = rd16(0x801271BCu);
+        ++stage67_queue_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67Q",
+            "pc=0x%08X a0=%u a1=0x%X a2=0x%X ctl=0x%04X ctl30=0x%02X b4=%u b6=%u gate=%u mode=%u",
+            pc_,
+            gpr_[4] & 0xFFu,
+            gpr_[5] & 0xFFFFu,
+            gpr_[6] & 0xFFFFu,
+            (unsigned)ctl,
+            (unsigned)(ctl & 0x30u),
+            (unsigned)rd8(0x801270B4u),
+            (unsigned)rd8(0x801270B6u),
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u));
+    }
+
+    if (pc_ == 0x800679E4u && stage67_slot_log_count_ < 96u)
+    {
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd8 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            return ram ? ram[phys] : 0u;
+        };
+        auto rd16 = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram)
+                return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        const uint32_t s0_base = 0x800E57D4u;
+        const uint32_t s1_base = 0x800E57DCu;
+        ++stage67_slot_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67SLOTS",
+            "pc=0x%08X a0=%u s0={st=%u sub=%u f68=%u b4=%u m248=0x%04X} s1={st=%u sub=%u f69=%u b6=%u m24a=0x%04X} done=%u timeout=%u gate=%u mode=%u",
+            pc_,
+            gpr_[4] & 1u,
+            (unsigned)rd8(s0_base + 0u),
+            (unsigned)rd8(s0_base + 5u),
+            (unsigned)rd8(0x80127068u),
+            (unsigned)rd8(0x801270B4u),
+            (unsigned)rd16(0x80126248u),
+            (unsigned)rd8(s1_base + 0u),
+            (unsigned)rd8(s1_base + 5u),
+            (unsigned)rd8(0x80127069u),
+            (unsigned)rd8(0x801270B6u),
+            (unsigned)rd16(0x8012624Au),
+            (unsigned)rd8(0x8012713Cu),
+            (unsigned)rd16(0x800B7BB0u),
+            (unsigned)rd8(0x800B7BC8u),
+            (unsigned)rd8(0x800B7BD8u));
     }
 
     if (r.pc >= 0x8016CB14u && r.pc <= 0x8016CB30u)

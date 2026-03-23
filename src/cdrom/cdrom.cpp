@@ -552,6 +552,11 @@ Cdrom::Cdrom(rlog::Logger* logger) : logger_(logger)
     shell_close_sent_ = 0;
 }
 
+Cdrom::~Cdrom()
+{
+    eject_disc();
+}
+
 void Cdrom::clear_secondary_active_bits()
 {
     status_ &= (uint8_t)~(STAT_SEEKING | STAT_READING | STAT_PLAYING_CDDA);

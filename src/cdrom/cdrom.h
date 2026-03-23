@@ -33,6 +33,7 @@ class Cdrom
     };
 
     explicit Cdrom(rlog::Logger* logger = nullptr);
+    ~Cdrom();
 
     // Logs dédiés (optionnels).
     // - cd_only: logs CDROM uniquement

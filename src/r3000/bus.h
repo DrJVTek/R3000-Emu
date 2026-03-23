@@ -258,6 +258,7 @@ class Bus
     void timer_check_irq(int ch, uint32_t old_count);
     void timer_write_mode(int ch, uint16_t v);
     void timer_update_counting(int ch);
+    void log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size);
 
     uint8_t scratch_[kScratchSize]{};
     uint8_t io_[kIoSize]{};
@@ -379,6 +380,14 @@ class Bus
     uint32_t bios_cd_ram_log_count_{0};
     uint32_t bios_pvd_post_pc_trace_count_{0};
     uint32_t bios_pvd_post_last_pc_{0xFFFFFFFFu};
+    uint8_t bios_post_60643_trace_active_{0};
+    uint8_t bios_post_60643_exit_logged_{0};
+    uint32_t stage67_watch_log_count_{0};
+    uint32_t stage67_mmio_log_count_{0};
+    uint32_t code_overlay_log_count_{0};
+    uint32_t code_stage54_log_count_{0};
+    uint32_t code_stage67win_log_count_{0};
+    uint8_t runtime_loader_dumped_{0};
 };
 
 } // namespace r3000

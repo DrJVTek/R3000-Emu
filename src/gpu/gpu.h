@@ -52,6 +52,21 @@ struct DisplayConfig
     }
 };
 
+struct Stage67GpuDebug
+{
+    uint32_t gpustat{0};
+    uint32_t scanline{0};
+    uint32_t display_line_lsb{0};
+    uint32_t display_y{0};
+    uint32_t h_res{0};
+    uint32_t v_res{0};
+    uint32_t is_pal{0};
+    uint32_t interlace{0};
+    uint32_t in_vblank{0};
+    uint32_t even_odd_field{0};
+    uint32_t frame_count{0};
+};
+
 // Draw command vertex for UE5 rendering bridge
 struct DrawVertex
 {
@@ -178,6 +193,7 @@ class Gpu
     // MMIO 32-bit (absolute addresses)
     uint32_t mmio_read32(uint32_t addr);
     void mmio_write32(uint32_t addr, uint32_t v);
+    Stage67GpuDebug stage67_debug() const;
 
     void set_dump_file(const char* path);
 

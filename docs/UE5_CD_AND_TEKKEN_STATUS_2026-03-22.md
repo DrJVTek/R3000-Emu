@@ -449,7 +449,7 @@ The corrected statement is:
 - UE5 consumes the `LBA16` PVD transfer path correctly through FIFO + DMA + `Pause`
 - the divergence versus CLI appears immediately after this `Pause`, not before the PVD DMA
 
-## 2026-03-22 latest update - queued `Pause` fix moved UE5 forward, new BIOS crash exposed
+## 2026-03-22 latest update - queued `Pause` fix and absolute-time CD timing moved UE5 past the old BIOS crash
 
 ### What changed
 
@@ -459,23 +459,24 @@ The corrected statement is:
 
 ### Effect in UE5
 
-- This fix did move UE5 forward.
+- These fixes did move UE5 forward.
 - The run no longer stops only at the old `LBA16 -> Pause` point.
-- UE5 now reaches later BIOS RAM parsing and crashes deterministically with:
-  - `ADES`
-  - `PC=0xBFC03D1C`
-  - `BadVAddr=0x3D20544E`
+- The latest UE5 run now reaches all of:
+  - `LBA 16`
+  - `LBA 18`
+  - `LBA 22`
+  - `LBA 60642` (`SYSTEM.CNF`)
+  - `LBA 60643` (`PS-X EXE`)
+- The old BIOS `ADES` at `0xBFC03D1C` is no longer the active failure in the latest run.
 
 ### New hard evidence
 
 From the latest UE5 run:
-- BIOS RAM reads immediately before the crash:
-  - `CDRAM BIOS RD32 pc=0xBFC03CF0 addr=0x0000B88C -> 0x0D303120`
-  - `CDRAM BIOS RD32 pc=0xBFC03D04 addr=0x0000B888 -> 0x3D20544E`
-- `0x3D20544E` is little-endian ASCII `NT =`
-  - therefore the BIOS is reading `SYSTEM.CNF` text from RAM on the crashing path
-- Earlier reads in the same run also show byte-wise parsing of:
-  - `BOOT = cdrom:SCES_000.05;1`
+- BIOS DMA scratch dumps show:
+  - `read_lba=16` with `.CD001..PLAYSTAT`
+  - `read_lba=60642` with `BOOT = cdrom:SCE`
+  - `read_lba=60643` with `PS-X EXE........`
+- So the BIOS is now receiving the correct `PS-X EXE` sector in UE5, not stale `SYSTEM.CNF`.
 
 ### Current diagnosis
 
@@ -483,20 +484,21 @@ From the latest UE5 run:
   - PVD transfer failure
   - IRQ2 loss
   - DMA3 failure
-  - bad `IRQ Flag Register`
+  - stale `SYSTEM.CNF` still present when `PS-X EXE` should have arrived
 - The current blocker is now:
-  - a BIOS crash during/after `SYSTEM.CNF` parsing
-  - caused by wrong sector/state sequencing in the BIOS scratch buffer region
+  - BIOS handoff / post-boot transition after successful `PS-X EXE` delivery
+  - or the first post-BIOS execution step after that handoff
 
 ### Practical meaning
 
-- The queued-`Pause` restart fix was necessary.
-- It did not solve the boot.
-- It exposed the next real failure:
-  - BIOS scratch RAM contains `SYSTEM.CNF` text when the path at `0xBFC03CF0..0xBFC03D1C` later treats a word from that region as an address/structured value
+- The queued-`Pause` restart fix and deadline-based CD timing were necessary.
+- They did not finish the boot.
+- They moved the failure later:
+  - from BIOS scratch-buffer corruption
+  - to BIOS exit / post-`PS-X EXE` startup behavior
 
 ### Current target
 
-- Debug the sector ordering and buffer state around the BIOS scratch region:
-  - `0xA000B070..0xA000B88F`
-- Do not go back to generic IRQ/DMA theories for this branch.
+- Trace the first non-BIOS PC after `LBA 60643` DMA.
+- If no non-BIOS PC appears, debug the BIOS loop after successful `PS-X EXE` delivery.
+- If a non-BIOS PC appears, move the investigation to the game-side startup path.
