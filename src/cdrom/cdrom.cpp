@@ -1089,7 +1089,9 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
     // - medium moves use a fixed short/long seek
     // - large moves use a sled seek curve
     // - spin-up is roughly one second when the motor is idle
-    constexpr uint32_t kSpinUpDelay = kPsxMasterClock;
+    // Spin-up: reduced for compatibility. Real PS1 takes ~1s but our
+    // BIOS boot flow times out with realistic delays. 60ms works.
+    constexpr uint32_t kSpinUpDelay = 2032128u; // ~60ms (real: ~1s)
     uint32_t total = 0;
 
     if (include_spinup && !motor_spinning_)
@@ -1146,13 +1148,13 @@ uint32_t Cdrom::calc_seek_time(uint32_t from_lba, uint32_t to_lba, bool include_
             std::clamp(static_cast<float>(from_lba) / static_cast<float>(kFramesPerMinute), 1.0f, 72.0f);
         const uint32_t switch_point =
             static_cast<uint32_t>(330.0f + (-63.1333f * std::log(current_minute)));
-        const float seconds = (dist < switch_point) ? 0.05f : 0.1f;
+        const float seconds = (dist < switch_point) ? 0.005f : 0.01f; // 10x fast
         total += static_cast<uint32_t>(seconds * static_cast<float>(kPsxMasterClock));
     }
     else
     {
-        constexpr float kSledFixedCost = 0.05f;
-        constexpr float kSledVariableCost = 0.85f;
+        constexpr float kSledFixedCost = 0.005f;   // 10x fast
+        constexpr float kSledVariableCost = 0.085f; // 10x fast
         constexpr float kLogWeight = 0.4f;
         constexpr float kMaxSledLba = static_cast<float>(72u * kFramesPerMinute);
         const float lba_diff_f = static_cast<float>(dist);

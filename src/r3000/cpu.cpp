@@ -919,6 +919,23 @@ Cpu::StepResult Cpu::step()
         ++exc_trace_pc_log_;
     }
 
+    // Always trace critical BIOS calls: Exec, LoadExeFile, LoadAndExec
+    if (pc_ == 0xA0u)
+    {
+        const uint32_t fn = gpr_[9] & 0xFFu;
+        if (fn == 0x42u || fn == 0x43u || fn == 0x44u || fn == 0x51u)
+        {
+            emu::logf(emu::LogLevel::warn, "BIOS",
+                "A(0x%02X) %s ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X",
+                fn,
+                fn == 0x42u ? "LoadExeFile" :
+                fn == 0x43u ? "Exec" :
+                fn == 0x44u ? "FlushCache" :
+                fn == 0x51u ? "LoadAndExec" : "?",
+                gpr_[31], gpr_[4], gpr_[5], gpr_[6]);
+        }
+    }
+
     // Trace BIOS vector calls (A0/B0/C0) after arming - exclude putchar B(0x3D)
     if (exc_trace_armed_ && exc_trace_count_ < kExcTraceMax &&
         (pc_ == 0xA0u || pc_ == 0xB0u || pc_ == 0xC0u))
