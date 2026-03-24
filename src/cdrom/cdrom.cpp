@@ -1825,10 +1825,18 @@ void Cdrom::exec_command(uint8_t cmd)
         }
         case 0x0A: // Init
         {
+            // If Init's second response (INT2) is already pending, silently discard
+            // the new Init command. This prevents BIOS Init spam from resetting the
+            // timer and losing the completion INT2.
+            if (pending_irq_type_ == 0x02 && pending_irq_reason_ == 0xAAu)
+                break;
+
+            // Set idle state (motor_on=1) BEFORE pushing the response byte so that
+            // the first INT3 response already shows motor_on=1.  If we pushed the
+            // old status_ first the BIOS could see motor_off and keep retrying Init.
+            set_secondary_idle(true);
             push_resp(status_);
             queue_cmd_irq(0x03);
-
-            set_secondary_idle(true);
             mode_ = 0x20; // default mode: double speed
             // Init starts motor spin-up, but doesn't complete immediately
             motor_spinning_ = 0; // Will need spin-up on first read
@@ -1840,11 +1848,14 @@ void Cdrom::exec_command(uint8_t cmd)
             seek_pending_ = 0;
             pending_read_seek_commit_ = 0;
             seek_target_lba_ = 0;
-            // Queue second response INT2 (Init complete) after first is acked
+            // Queue second response INT2 (Init complete) after first INT3 is acked.
+            // BIOS dispatch: INT2 → handler 0xBFC05558, which writes *0xA00091C4=1
+            // (CdInit success flag) when state=0xCCC. INT3 goes to a different handler
+            // that does NOT write the success flag for state=0xCCC.
             pending_irq_type_ = 0x02;
             pending_irq_resp_ = status_;
             pending_irq_live_status_ = 1;
-            pending_irq_reason_ = 0;
+            pending_irq_reason_ = 0xAAu; // Sentinel: marks Init second response as queued
             arm_pending_irq_after(80000);
             pending_irq_extra_len_ = 0; // Clear leftover extra bytes from previous cmd (e.g. GetID)
             break;
@@ -2794,6 +2805,9 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 }
                 else if (!queued_cmd_valid_ && !cmd_exec_valid_)
                 {
+                    // Clear busy_ unconditionally (DuckStation EndCommand pattern).
+                    // Init spam prevention is handled at delivery time: when Init's
+                    // second INT2 fires, any queued command is cancelled there.
                     busy_ = 0;
                 }
             }
@@ -2819,6 +2833,28 @@ void Cdrom::tick(uint32_t cycles)
     // when the command actually executes, not at command-write time.
     if (cmd_exec_valid_ != 0)
     {
+        // Diagnostic: log when command is ready but blocked by gate conditions
+        if (now_cycles_ >= cmd_exec_due_cycle_)
+        {
+            const bool gate_irq = (irq_flags_ & 0x1Fu) != 0u;
+            const bool gate_pend = pending_irq_type_ != 0;
+            const bool gate_resp = resp_r_ != resp_w_;
+            const bool gate_read = read_pending_irq1_ != 0;
+            const bool gate_async = async_stat_pending_ != 0;
+            if (gate_irq || gate_pend || gate_resp || gate_read || gate_async)
+            {
+                static uint32_t gate_log = 0;
+                if (gate_log < 20)
+                {
+                    ++gate_log;
+                    emu::logf(emu::LogLevel::warn, "CD_GATE",
+                        "CMD 0x%02X BLOCKED: irq=0x%02X pend_type=%u resp=%u/%u read_pend=%d async=%d (#%u)",
+                        cmd_exec_cmd_, irq_flags_, pending_irq_type_,
+                        resp_r_, resp_w_, (int)read_pending_irq1_, (int)async_stat_pending_, gate_log);
+                }
+            }
+        }
+
         if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&
             pending_irq_type_ == 0 &&
@@ -2837,7 +2873,12 @@ void Cdrom::tick(uint32_t cycles)
 
             exec_command(exec_cmd);
             if (!queued_cmd_valid_ && !cmd_exec_valid_)
+            {
+                // Clear busy_ unconditionally — matches DuckStation's EndCommand().
+                // BUSYSTS goes low after the first INT3 fires, even while Init's
+                // second async INT2 is still pending.
                 busy_ = 0;
+            }
         }
     }
 
@@ -2913,10 +2954,24 @@ void Cdrom::tick(uint32_t cycles)
                 try_fill_data_fifo();
             }
 
+            // DuckStation Init second-response handler: cancel any queued command
+            // so a spammed Init doesn't re-run after completion (OpenBIOS pattern).
+            const bool is_init_completion =
+                (pending_irq_type_ == 0x02 && pending_irq_reason_ == 0xAAu);
+            if (is_init_completion && queued_cmd_valid_)
+            {
+                emu::logf(emu::LogLevel::warn, "CD",
+                    "Init completion: cancelling queued cmd 0x%02X", queued_cmd_);
+                queued_cmd_valid_ = 0;
+                busy_ = 0;
+            }
+
             const uint8_t irq_resp = pending_irq_live_status_ ? status_ : pending_irq_resp_;
             clear_resp();
             push_resp(irq_resp);
-            if (pending_irq_reason_ != 0)
+            // 0xAAu is the Init-completion sentinel, not an actual response byte.
+            // Only push reason when it carries real data (e.g. error codes).
+            if (pending_irq_reason_ != 0 && pending_irq_reason_ != 0xAAu)
                 push_resp(pending_irq_reason_);
             for (uint8_t i = 0; i < pending_irq_extra_len_; ++i)
                 push_resp(pending_irq_extra_[i]);
