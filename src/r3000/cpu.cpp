@@ -577,6 +577,9 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
     const int bev = (st & (1u << 22)) ? 1 : 0;
     pc_ = bev ? 0xBFC0'0180u : 0x8000'0080u;
 
+    // Track last exception for stuck-detection dump in Bus
+    bus_.set_cpu_exc_state(epc, cop0_[COP0_CAUSE]);
+
     if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exc))
     {
         rlog::logger_logf(
@@ -934,6 +937,161 @@ Cpu::StepResult Cpu::step()
                 fn == 0x51u ? "LoadAndExec" : "?",
                 gpr_[31], gpr_[4], gpr_[5], gpr_[6]);
         }
+        // Log A(0xA1) panic loop detection (SCPH-7502: self-referential loop)
+        if (fn == 0xA1u)
+        {
+            static uint32_t a1_count = 0;
+            if (a1_count < 3)
+            {
+                emu::logf(emu::LogLevel::warn, "BIOS",
+                    "A(0xA1) PANIC LOOP! ra=0x%08X a0=0x%08X(errcode) a1=0x%08X(line)",
+                    gpr_[31], gpr_[4], gpr_[5]);
+            }
+            ++a1_count;
+        }
+    }
+
+    // Trace BIOS boot sequence key addresses (SCPH-7502)
+    // These fire once each to diagnose the ReadTOC/GetID/Exec flow
+    {
+        static uint32_t boot_trace_mask = 0;
+        // bit0 = 0xBFC0D72C ReadTOC-wait entry
+        // bit1 = 0xBFC0D7BC GetID-wait entry
+        // bit2 = 0xBFC0D5E8 about-to-call-Exec
+        // bit3 = 0xBFC0D5AC panic from ReadTOC fail
+        // bit4 = 0xBFC0D5C8 panic from GetID fail
+        // bit5 = 0xBFC0D688 wait-irq entry (repeated: only first few)
+        static uint32_t wait_irq_count = 0;
+        if (pc_ == 0xBFC0D72Cu && !(boot_trace_mask & 1))
+        {
+            boot_trace_mask |= 1;
+            emu::logf(emu::LogLevel::warn, "BIOS", "boot: ReadTOC check entry ra=0x%08X", gpr_[31]);
+        }
+        if (pc_ == 0xBFC0D7BCu && !(boot_trace_mask & 2))
+        {
+            boot_trace_mask |= 2;
+            emu::logf(emu::LogLevel::warn, "BIOS", "boot: GetID check entry ra=0x%08X", gpr_[31]);
+        }
+        if (pc_ == 0xBFC0D5E8u && !(boot_trace_mask & 4))
+        {
+            boot_trace_mask |= 4;
+            emu::logf(emu::LogLevel::warn, "BIOS",
+                "boot: Exec() call r4(hdr)=0x%08X r5(stk)=0x%08X r6=0x%08X",
+                gpr_[4], gpr_[5], gpr_[6]);
+        }
+        // LoadAndExec / LoadExeFile internal Exec call sites
+        // BIOS copies kernel code from ROM to RAM: BFC0xxxx → 0x0000xxxx (KUSEG)
+        // So these match BOTH ROM and RAM addresses.
+        static const struct { uint32_t rom, ram; const char* name; } exec_sites[] = {
+            { 0xBFC03BDCu, 0x00003BDCu, "LoadAndExec→Exec" },
+            { 0xBFC03C54u, 0x00003C54u, "LoadExeFile→Exec" },
+            { 0xBFC03CF0u, 0x00003CF0u, "Exec-entry" },
+        };
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            const uint32_t bit = 32u << i;
+            if ((pc_ == exec_sites[i].rom || pc_ == exec_sites[i].ram) && !(boot_trace_mask & bit))
+            {
+                boot_trace_mask |= bit;
+                emu::logf(emu::LogLevel::warn, "BIOS",
+                    "boot: %s pc=0x%08X r4(hdr)=0x%08X r5=0x%08X ra=0x%08X",
+                    exec_sites[i].name, pc_, gpr_[4], gpr_[5], gpr_[31]);
+            }
+        }
+        if (pc_ == 0xBFC0D5ACu && !(boot_trace_mask & 8))
+        {
+            boot_trace_mask |= 8;
+            emu::logf(emu::LogLevel::warn, "BIOS",
+                "boot: PANIC after ReadTOC fail r2=0x%08X ra=0x%08X", gpr_[2], gpr_[31]);
+        }
+        if (pc_ == 0xBFC0D5C8u && !(boot_trace_mask & 16))
+        {
+            boot_trace_mask |= 16;
+            emu::logf(emu::LogLevel::warn, "BIOS",
+                "boot: PANIC after GetID fail r2=0x%08X ra=0x%08X", gpr_[2], gpr_[31]);
+        }
+        if (pc_ == 0xBFC0D688u && wait_irq_count < 4)
+        {
+            ++wait_irq_count;
+            emu::logf(emu::LogLevel::warn, "BIOS",
+                "boot: wait_cdirq #%u entry ra=0x%08X", wait_irq_count, gpr_[31]);
+        }
+        // ISO-9660 / file loading panics at 0xBFC07xxx
+        static uint32_t iso_panic_mask = 0;
+        const uint32_t iso_panic_sites[] = {
+            0xBFC07DBCu, 0xBFC07E0Cu, 0xBFC07E64u, 0xBFC07EBCu, 0xBFC07EE4u,
+            0xBFC07F7Cu, 0xBFC07FE4u, 0xBFC08624u, 0xBFC0867Cu
+        };
+        for (uint32_t i = 0; i < 9; ++i)
+        {
+            if (pc_ == iso_panic_sites[i] && !(iso_panic_mask & (1u << i)))
+            {
+                iso_panic_mask |= (1u << i);
+                emu::logf(emu::LogLevel::warn, "BIOS",
+                    "boot: ISO panic at 0x%08X r4=0x%08X r5=0x%08X", pc_, gpr_[4], gpr_[5]);
+            }
+        }
+
+        // Trace real DeliverEvent at 0xBFC0472C entry: class=a0, spec=a1.
+        if (pc_ == 0xBFC0472Cu)
+        {
+            static uint32_t deliver_count = 0;
+            if (deliver_count < 128u)
+            {
+                ++deliver_count;
+                emu::logf(emu::LogLevel::warn, "BIOS",
+                    "DeliverEvent[%u] cls=0x%08X spec=0x%04X ra=0x%08X",
+                    deliver_count, gpr_[4], gpr_[5], gpr_[31]);
+            }
+        }
+
+        // Trace at 0xBFC04820 where status=0x4000 (READY) is written to event slot.
+        // At this point: s0=gpr_[16]=spec, s1=gpr_[17]=class, a3=gpr_[7]=event_ptr.
+        // Saved ra is on stack at sp+36; read it to find ultimate caller.
+        if (pc_ == 0xBFC04820u)
+        {
+            static uint32_t ready_count = 0;
+            if (ready_count < 64u)
+            {
+                ++ready_count;
+                // Read saved ra from stack (saved at sp+36 by function prologue)
+                const uint32_t sp = gpr_[29];
+                uint32_t saved_ra = 0;
+                Bus::MemFault mf2{};
+                bus_.read_u32(sp + 36u, saved_ra, mf2);
+                emu::logf(emu::LogLevel::warn, "BIOS",
+                    "SetReady[%u] cls=0x%08X spec=0x%04X evt_ptr=0x%08X saved_ra=0x%08X",
+                    ready_count, gpr_[17], gpr_[16], gpr_[7], saved_ra);
+            }
+        }
+
+        // Trace INT4 handler entry (0xBFC05A44): disc-end / error path.
+        // Should NEVER fire during data loading — if it does, that's the bug.
+        if (pc_ == 0xBFC05A44u)
+        {
+            static uint32_t int4_count = 0;
+            if (int4_count < 16u)
+            {
+                ++int4_count;
+                emu::logf(emu::LogLevel::warn, "BIOS",
+                    "INT4-handler[%u] entry ra=0x%08X a0=0x%08X a3=0x%08X",
+                    int4_count, gpr_[31], gpr_[4], gpr_[7]);
+            }
+        }
+
+        // Trace CDROM IRQ dispatch entry (0xBFC04F00): shows INT type being dispatched.
+        // a3 = INT_FLAG value (1=INT1..5=INT5)
+        if (pc_ == 0xBFC04F00u)
+        {
+            static uint32_t disp_count = 0;
+            if (disp_count < 32u)
+            {
+                ++disp_count;
+                emu::logf(emu::LogLevel::warn, "BIOS",
+                    "CDROM-dispatch[%u] INT_TYPE=a3=0x%08X ra=0x%08X",
+                    disp_count, gpr_[7], gpr_[31]);
+            }
+        }
     }
 
     // Trace BIOS vector calls (A0/B0/C0) after arming - exclude putchar B(0x3D)
@@ -950,6 +1108,28 @@ Cpu::StepResult Cpu::step()
                 (pc_ == 0xA0u ? 'A' : (pc_ == 0xB0u ? 'B' : 'C')),
                 fn, gpr_[31], cop0_[COP0_STATUS],
                 gpr_[4], gpr_[5]);
+        }
+    }
+
+    // TEKKEN_BCALL: log all B/C BIOS calls in the critical window (vblank 2440-2560).
+    // Captures ResetCallback, VSyncCallback, InitHeap etc. that TEKKEN.EXE makes
+    // during PSYQ re-initialization — helps understand why VSync counter freezes.
+    if ((pc_ == 0xB0u || pc_ == 0xC0u))
+    {
+        const uint32_t vbl = bus_.vblank_count();
+        if (vbl >= 2440u && vbl <= 2560u)
+        {
+            static uint32_t tekk_bcall_n = 0;
+            if (tekk_bcall_n < 500u)
+            {
+                ++tekk_bcall_n;
+                const uint32_t fn = gpr_[9] & 0xFFu;
+                emu::logf(emu::LogLevel::warn, "TEKK_BCALL",
+                    "vblank=%u %c(0x%02X) ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+                    vbl,
+                    (pc_ == 0xB0u ? 'B' : 'C'),
+                    fn, gpr_[31], gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
+            }
         }
     }
 
@@ -2561,9 +2741,6 @@ Cpu::StepResult Cpu::step()
                 pc_phys
             );
         }
-        // Pour le boot BIOS, un IFETCH hors mapping est un signe fort qu'on est "sorti"
-        // de la zone de code valide (bug CPU/delay slot ou hardware manquant).
-        // On arrête ici pour garder un signal clair dans le log.
         if (logger_)
         {
             // Dump des dernières instructions connues (ring buffer)
@@ -2580,8 +2757,23 @@ Cpu::StepResult Cpu::step()
                 );
             }
         }
-        r.kind = StepResult::Kind::mem_fault;
-        r.mem_fault = fault;
+        // Misaligned PC (kind=unaligned): raise ADEL exception so the BIOS
+        // exception handler at 0x80000080 can process it — mirrors the behaviour
+        // of data-load ADEL faults (see LW/LH handlers below).  This handles the
+        // dual-EXE ISR transition in Tekken (attract mode / Galaga init) where a
+        // transient bad PC is caught and recovered by the BIOS.
+        // Out-of-range PC: genuinely outside any mapped region — halt so we keep
+        // a clear diagnostic signal for hardware-missing bugs.
+        if (fault.kind == Bus::MemFault::Kind::unaligned)
+        {
+            raise_exception(EXC_ADEL, pc_, pc_);
+            r.kind = StepResult::Kind::ok;
+        }
+        else
+        {
+            r.kind = StepResult::Kind::mem_fault;
+            r.mem_fault = fault;
+        }
         return r;
     }
     r.instr = instr;
@@ -3025,6 +3217,7 @@ Cpu::StepResult Cpu::step()
     bus_tick_accum_ += instr_cycles;
     if (bus_tick_accum_ >= bus_tick_batch_)
     {
+        bus_.set_cpu_pc(pc_); // live PC for diagnostics (not just last-store PC)
         bus_.tick(bus_tick_accum_);
         bus_tick_accum_ = 0;
     }
@@ -3538,6 +3731,8 @@ Cpu::StepResult Cpu::step()
             case 0x001CB33Cu: field = "EXE_DST_PTR"; break;
             case 0x001CB334u: field = "EXE_REMAIN_SECTORS"; break;
             case 0x001EF68Cu: field = "CALLBACK_PTR"; break;
+            case 0x001CB3D4u: field = "LDSTATE"; break;
+            case 0x001CB3DCu: field = "LDSUB"; break;
             default: break;
         }
         if (!field)
@@ -3546,8 +3741,10 @@ Cpu::StepResult Cpu::step()
         static uint32_t log_count = 0;
         const bool suspicious =
             ((phys == 0x001CB404u || phys == 0x001CB40Cu || phys == 0x001CA690u || phys == 0x001CA694u ||
-              phys == 0x001CB33Cu || phys == 0x001EF68Cu) &&
-             value == 0u);
+              phys == 0x001CB33Cu || phys == 0x001EF68Cu || phys == 0x001CB334u) &&
+             value == 0u) ||
+            (phys == 0x001CB3D4u) ||   // any write to LDSTATE
+            (phys == 0x001CB3DCu);     // any write to LDSUB
         const bool should_log = suspicious || (log_count < 128u);
         if (!should_log)
             return;
@@ -3806,7 +4003,7 @@ Cpu::StepResult Cpu::step()
                 budget = &tekk_gate14_logs;
         }
 
-        if (*budget >= 128u)
+        if (*budget >= 200u)
             return;
         ++(*budget);
 
@@ -4705,6 +4902,24 @@ Cpu::StepResult Cpu::step()
                 trace_tekk_dma3_ptr_slot("SW", r.pc, addr, t, gpr_[t], false);
                 trace_tekk_cd_buffers("SW", r.pc, addr, t, gpr_[t], false);
                 trace_stage67_memop("SW", addr, gpr_[t], 4);
+                // GP1_WRITE probe: capture every write to the GPU GP1 port (0x1F801814).
+                // Tekken stage67 loader at 0x8016D590 checks GPUSTAT bit 19 (v_res=1).
+                // We need to know if/when GP1(08h) with v_res=1 is ever sent.
+                if ((addr & 0x1FFFFFFFu) == 0x1F801814u)
+                {
+                    static uint32_t gp1_write_cnt = 0;
+                    if (gp1_write_cnt < 50u)
+                    {
+                        ++gp1_write_cnt;
+                        Bus::MemFault mf{};
+                        uint32_t ldst_v2 = 0;
+                        (void)bus_.read_u32(0x001CB3D4u, ldst_v2, mf);
+                        emu::logf(emu::LogLevel::warn, "GP1_WRITE",
+                            "pc=0x%08X cmd=0x%02X val=0x%08X vblank=%u ldst=%d (#%u)",
+                            r.pc, (unsigned)(gpr_[t] >> 24), gpr_[t],
+                            bus_.vblank_count(), (int32_t)ldst_v2, gp1_write_cnt);
+                    }
+                }
                 if (stage67_write_log_count_ < 512u &&
                     (addr == 0x801271BCu || addr == 0x80126248u || addr == 0x8012624Au ||
                      addr == 0x8012624Cu || addr == 0x801270C8u ||
@@ -6000,6 +6215,190 @@ Cpu::StepResult Cpu::step()
         }
     }
 
+    // Lightweight EXE sector progress: fires at entry of per-sector loader 0x8015D428.
+    // High budget (2048) to capture all 335 sectors without flooding other traces.
+    if (r.pc == 0x8015D428u)
+    {
+        static uint32_t tekk_exe_progress = 0;
+        if (tekk_exe_progress < 2048u)
+        {
+            ++tekk_exe_progress;
+            Bus::MemFault mf{};
+            uint32_t exe_dst_p = 0, exe_remain_p = 0;
+            (void)bus_.read_u32(0x001CB33Cu, exe_dst_p, mf);
+            (void)bus_.read_u32(0x001CB334u, exe_remain_p, mf);
+            emu::logf(
+                emu::LogLevel::warn,
+                "EXE_PROGRESS",
+                "[%u] exe_dst=0x%08X exe_remain=%u",
+                tekk_exe_progress,
+                exe_dst_p,
+                exe_remain_p);
+        }
+    }
+
+    // EXE completion path: trace what happens AFTER exe_remain=0 is stored at 0x8015D464.
+    // Also covers 0x8015D370-0x8015D388 (exe_remain polling function near D37C).
+    // Guard: only trace when exe_remain<=10 (near completion) or ldst>=3 to avoid early exhaustion.
+    if ((r.pc >= 0x8015D360u && r.pc <= 0x8015D390u) ||
+        (r.pc >= 0x8015D460u && r.pc <= 0x8015D4C0u))
+    {
+        Bus::MemFault mf{};
+        uint32_t exe_dst_d = 0, exe_remain_d = 0, ldst_d = 0;
+        (void)bus_.read_u32(0x001CB33Cu, exe_dst_d, mf);
+        (void)bus_.read_u32(0x001CB334u, exe_remain_d, mf);
+        (void)bus_.read_u32(0x001CB3D4u, ldst_d, mf);
+        if (exe_remain_d <= 10u || ldst_d >= 3u)
+        {
+            static uint32_t tekk_exe_done = 0;
+            if (tekk_exe_done < 512u)
+            {
+                ++tekk_exe_done;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "EXE_DONE",
+                    "pc=0x%08X instr=0x%08X a0=0x%08X v0=0x%08X v1=0x%08X ra=0x%08X exe_dst=0x%08X exe_remain=%u ldst=%d",
+                    r.pc, instr,
+                    gpr_[4], gpr_[2], gpr_[3], gpr_[31],
+                    exe_dst_d, exe_remain_d, (int32_t)ldst_d);
+            }
+        }
+    }
+
+    // Outer loader code (0x8016D500-0x8016D63F): trace every instruction when ldst>=3.
+    // We SKIP the inner WaitVSync loop (0x8016D640+) — already decoded.
+    if (r.pc >= 0x8016D500u && r.pc < 0x8016D640u)
+    {
+        Bus::MemFault mf{};
+        uint32_t ldst_v = 0;
+        (void)bus_.read_u32(0x001CB3D4u, ldst_v, mf);
+        if (ldst_v >= 3u)
+        {
+            static uint32_t tekk_outer_logs = 0;
+            if (tekk_outer_logs < 2048u)
+            {
+                ++tekk_outer_logs;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "LDST3_OUT",
+                    "pc=0x%08X instr=0x%08X a0=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X ra=0x%08X ldst=%d",
+                    r.pc, instr,
+                    gpr_[4], gpr_[2], gpr_[3], gpr_[16], gpr_[17], gpr_[31],
+                    (int32_t)ldst_v);
+            }
+        }
+    }
+
+    // WaitVSync target capture: fires at SLT comparison (0x8016D698) during ldst>=2.
+    // Captures a0 (vsync target) and current vsync_ctr to understand the wait duration.
+    // Budget: 5 entries — one per WaitVSync call to track target changes.
+    if (r.pc == 0x8016D698u)
+    {
+        Bus::MemFault mf{};
+        uint32_t ldst_v = 0, vsync_ctr_v = 0;
+        (void)bus_.read_u32(0x001CB3D4u, ldst_v, mf);
+        (void)bus_.read_u32(0x001CA7C8u, vsync_ctr_v, mf);
+        if (ldst_v >= 2u)
+        {
+            static uint32_t vsync_tgt_cnt = 0;
+            static uint32_t prev_a0 = 0xFFFFFFFFu;
+            if (vsync_tgt_cnt < 5u && gpr_[4] != prev_a0)
+            {
+                prev_a0 = gpr_[4];
+                ++vsync_tgt_cnt;
+                emu::logf(emu::LogLevel::warn, "VSYNC_TGT",
+                    "vsync_ctr=%u a0(target)=%u ldst=%u vblank=%u (#%u)",
+                    vsync_ctr_v, gpr_[4], ldst_v,
+                    bus_.vblank_count(), vsync_tgt_cnt);
+            }
+        }
+    }
+
+    // Capture missing instructions at 0x8016D660-0x8016D688 (between spin-expire and vsync check).
+    // These execute when the spin counter hits -1. Budget: 20 entries to decode the path.
+    if (r.pc >= 0x8016D660u && r.pc <= 0x8016D688u)
+    {
+        static uint32_t miss_range_cnt = 0;
+        if (miss_range_cnt < 20u)
+        {
+            ++miss_range_cnt;
+            Bus::MemFault mf{};
+            uint32_t vsync_ctr_v = 0;
+            (void)bus_.read_u32(0x001CA7C8u, vsync_ctr_v, mf);
+            emu::logf(emu::LogLevel::warn, "D660_PATH",
+                "pc=0x%08X instr=0x%08X a0=%u v0=0x%08X v1=0x%08X vsync_ctr=%u vblank=%u",
+                r.pc, instr, gpr_[4], gpr_[2], gpr_[3],
+                vsync_ctr_v, bus_.vblank_count());
+        }
+    }
+
+    // INT1 callback trace: CD sector ready — only log when ldst>=3.
+    if (r.pc == 0x8016ABC8u)
+    {
+        Bus::MemFault mf{};
+        uint32_t ldst_v = 0;
+        (void)bus_.read_u32(0x001CB3D4u, ldst_v, mf);
+        // Only log during ldst=3 (the critical stuck phase)
+        if (ldst_v >= 3u)
+        {
+            static uint32_t int1_ldst3_cnt = 0;
+            if (int1_ldst3_cnt < 50u)
+            {
+                ++int1_ldst3_cnt;
+                uint32_t vbl = bus_.vblank_count();
+                emu::logf(emu::LogLevel::warn, "INT1CB",
+                    "vblank=%u ldst=%d a0=0x%08X a1=0x%08X ra=0x%08X (#%u)",
+                    vbl, (int32_t)ldst_v, gpr_[4], gpr_[5], gpr_[31], int1_ldst3_cnt);
+            }
+        }
+    }
+
+    // VBlank callback entry trace (0x8016C9F4): fires every time PSYQ invokes the VBlank callback.
+    // We only start logging once vsync_ctr >= 1880 (near the freeze at 1893) to avoid budget exhaustion.
+    // Budget: 150 entries — captures callbacks up to and past the freeze point.
+    if (pc_ == 0x8016C9F4u || pc_ == 0x8016C9F0u)
+    {
+        Bus::MemFault mf{};
+        uint32_t vsync_ctr_v = 0;
+        (void)bus_.read_u32(0x001CA7C8u, vsync_ctr_v, mf);
+        if (vsync_ctr_v >= 1880u)
+        {
+            static uint32_t vblank_cb_trace = 0;
+            if (vblank_cb_trace < 150u)
+            {
+                ++vblank_cb_trace;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "VBLANK_CB",
+                    "pc=0x%08X instr=0x%08X vsync_ctr=%u ra=0x%08X a0=0x%08X a1=0x%08X v0=0x%08X sp=0x%08X",
+                    r.pc, instr, vsync_ctr_v,
+                    gpr_[31], gpr_[4], gpr_[5], gpr_[2], gpr_[29]);
+            }
+        }
+    }
+
+    // PSYQ VSync() wait loop at 0x8008A874-0x8008A87C: spinning waiting for vsync_ctr >= a0.
+    // Log only when vsync_ctr >= 1880 to capture the stall. Budget: 60 entries.
+    if (r.pc >= 0x8008A874u && r.pc <= 0x8008A87Cu)
+    {
+        Bus::MemFault mf{};
+        uint32_t vsync_ctr_v = 0;
+        (void)bus_.read_u32(0x001CA7C8u, vsync_ctr_v, mf);
+        if (vsync_ctr_v >= 1880u)
+        {
+            static uint32_t vsync_wait_trace = 0;
+            if (vsync_wait_trace < 60u)
+            {
+                ++vsync_wait_trace;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "VSYNC_WAIT",
+                    "pc=0x%08X vsync_ctr=%u target_a0=%u ra=0x%08X",
+                    r.pc, vsync_ctr_v, gpr_[4], gpr_[31]);
+            }
+        }
+    }
+
     if ((pc_ == 0x00000CA8u || pc_ == 0x00000CACu || pc_ == 0x00000CB0u) && bios_handoff_log_count_ < 16u)
     {
         ++bios_handoff_log_count_;
@@ -6325,6 +6724,62 @@ Cpu::StepResult Cpu::step()
             (unsigned)rd8(0x800B7BD8u));
     }
 
+    if ((pc_ == 0x80065454u) && stage67_entry_log_count_ < 96u)
+    {
+        // start_slot ENTRY (before gate check). Shows whether start_slot is called at all
+        // and what value mem[0x801130D4] has at that moment.
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd16ram = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram) return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys + 1u) & 0x1FFFFFu] << 8);
+        };
+        auto rd32ram = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram) return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys+1u)&0x1FFFFFu] << 8) |
+                   ((uint32_t)ram[(phys+2u)&0x1FFFFFu] << 16) | ((uint32_t)ram[(phys+3u)&0x1FFFFFu] << 24);
+        };
+        ++stage67_entry_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67FN",
+            "pc=0x%08X fn=start_slot_ENTRY a0=0x%08X ra=0x%08X gate=0x%04X acfc=0x%08X",
+            pc_,
+            gpr_[4],
+            gpr_[31],
+            rd16ram(0x801130D4u),
+            rd32ram(0x8009ACFCu));
+    }
+
+    if ((pc_ == 0x80039018u) && stage67_entry_log_count_ < 96u)
+    {
+        // Retry wrapper ENTRY: the function that calls start_slot up to 9 times.
+        // If this fires but start_slot_ENTRY never fires, there's a jal/branch bug.
+        uint8_t* ram = bus_.ram_ptr();
+        auto rd32ram = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram) return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys+1u)&0x1FFFFFu] << 8) |
+                   ((uint32_t)ram[(phys+2u)&0x1FFFFFu] << 16) | ((uint32_t)ram[(phys+3u)&0x1FFFFFu] << 24);
+        };
+        auto rd16ram = [&](uint32_t vaddr) -> uint32_t {
+            const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+            if (!ram) return 0u;
+            return (uint32_t)ram[phys] | ((uint32_t)ram[(phys+1u)&0x1FFFFFu] << 8);
+        };
+        ++stage67_entry_log_count_;
+        emu::logf(
+            emu::LogLevel::warn,
+            "STAGE67FN",
+            "pc=0x%08X fn=retry_wrapper_ENTRY a0=0x%08X ra=0x%08X gate=0x%04X acfc=0x%08X",
+            pc_,
+            gpr_[4],
+            gpr_[31],
+            rd16ram(0x801130D4u),
+            rd32ram(0x8009ACFCu));
+    }
+
     if ((pc_ == 0x80065484u || pc_ == 0x800678C0u || pc_ == 0x800679E4u) && stage67_entry_log_count_ < 96u)
     {
         uint8_t* ram = bus_.ram_ptr();
@@ -6357,6 +6812,34 @@ Cpu::StepResult Cpu::step()
             (unsigned)rd8(0x8012713Cu),
             (unsigned)rd8(0x800B7BC8u),
             (unsigned)rd8(0x800B7BD8u));
+    }
+
+    // CD init chain: game_main(0x80030000) → cd_event_init(0x80035C34) → cd_kickoff(0x80064C00)
+    // 0x8004e544 = JR $ra of fade loop (0x8004e220) — if it fires, fade loop returned.
+    // 0x8004e208 = BEQ self loop (stuck condition in 0x8004e1e0).
+    if (pc_ == 0x80030000u || pc_ == 0x80035C34u || pc_ == 0x80064C00u ||
+        pc_ == 0x80030094u || pc_ == 0x800300B8u ||
+        pc_ == 0x8004e544u || pc_ == 0x8004e208u)
+    {
+        static uint32_t cd_init_chain_count = 0;
+        if (cd_init_chain_count < 32u)
+        {
+            ++cd_init_chain_count;
+            uint8_t* ram = bus_.ram_ptr();
+            auto rd32ram = [&](uint32_t vaddr) -> uint32_t {
+                const uint32_t phys = virt_to_phys(vaddr) & 0x1FFFFFu;
+                if (!ram) return 0u;
+                return (uint32_t)ram[phys] | ((uint32_t)ram[(phys+1u)&0x1FFFFFu] << 8) |
+                       ((uint32_t)ram[(phys+2u)&0x1FFFFFu] << 16) | ((uint32_t)ram[(phys+3u)&0x1FFFFFu] << 24);
+            };
+            const char* fn = (pc_ == 0x80030000u) ? "game_main" :
+                             (pc_ == 0x80035C34u) ? "cd_event_init" :
+                             (pc_ == 0x80064C00u) ? "cd_kickoff" : "game_main_inner";
+            emu::logf(emu::LogLevel::warn, "CD_INIT_CHAIN",
+                "fn=%s pc=0x%08X ra=0x%08X a0=0x%08X gate=0x%04X",
+                fn, pc_, gpr_[31], gpr_[4],
+                rd32ram(0x801130D4u) & 0xFFFFu);
+        }
     }
 
     if (pc_ == 0x8006742Cu || pc_ == 0x8006766Cu || pc_ == 0x800676E0u ||
@@ -6569,7 +7052,7 @@ Cpu::StepResult Cpu::step()
     if (r.pc >= 0x8016CFC8u && r.pc <= 0x8016D02Cu)
         trace_tekk_scheduler_gate("TEKK_GATE10", r.pc);
 
-    if (r.pc >= 0x8016D2BCu && r.pc <= 0x8016D340u)
+    if (r.pc >= 0x8016D2BCu && r.pc <= 0x8016D380u)
         trace_tekk_scheduler_gate("TEKK_GATE4", r.pc);
 
     if (r.pc >= 0x8016AC1Cu && r.pc <= 0x8016AC30u)

@@ -22,6 +22,7 @@
 #include "gpu/gpu.h"
 #include "gpu/gpu_3d.h"
 #include "loader/loader.h"
+#include "log/async_log.h"
 #include "log/emu_log.h"
 #include "log/filelog.h"
 #include "log/logger.h"
@@ -903,12 +904,12 @@ int main(int argc, char** argv)
         rlog::logger_set_cats(&logger, rlog::parse_categories_csv(cats));
     }
 
-    // Initialize emu::Log (callback-based, UE5-ready)
+    // Initialize emu::Log — async threaded backend for CLI.
+    // UE5 uses its own log_init(). The async backend decouples stderr writes
+    // from the emulation thread, eliminating fflush overhead (~10-30ns per log call).
     const char* emu_lvl = arg_value(argc, argv, "--emu-log-level=");
-    emu::Log emu_log{};
-    emu_log.cb = cli_log_callback;
-    emu_log.max_level = emu::log_parse_level(emu_lvl); // defaults to info
-    emu::log_init(&emu_log);
+    const emu::LogLevel log_max_level = emu::log_parse_level(emu_lvl);
+    emu::async_log_init(log_max_level);
 
     const char* bios_path = arg_value(argc, argv, "--bios=");
     const char* load_path = arg_value(argc, argv, "--load=");
@@ -1201,6 +1202,34 @@ int main(int argc, char** argv)
         }
     }
 
+    // BIOS TTY: capture B(3Dh) putchar output from game/PSYQ runtime.
+    // Lines are accumulated and flushed with [BIOS_TTY] tag on newline or buffer full.
+    {
+        struct TtyCtx
+        {
+            char buf[256];
+            int len;
+        };
+        static TtyCtx tty{};
+        tty.len = 0;
+        core.set_putchar_callback(
+            [](char ch, void* user) {
+                TtyCtx* ctx = static_cast<TtyCtx*>(user);
+                if (ch == '\n' || ch == '\r' || ctx->len >= (int)sizeof(ctx->buf) - 1)
+                {
+                    ctx->buf[ctx->len] = '\0';
+                    if (ctx->len > 0)
+                        emu::logf(emu::LogLevel::warn, "BIOS_TTY", "%s", ctx->buf);
+                    ctx->len = 0;
+                }
+                else
+                {
+                    ctx->buf[ctx->len++] = ch;
+                }
+            },
+            &tty);
+    }
+
     // Enable register trace mode if requested
     if (reg_trace_start != 0 || reg_trace_end != 0)
     {
@@ -1482,6 +1511,10 @@ int main(int argc, char** argv)
         std::fclose(syslog_f);
     if (iolog_f)
         std::fclose(iolog_f);
+
+    // Flush and stop the async log thread — must be last so all pending log
+    // entries are written before the process exits.
+    emu::async_log_shutdown();
 
     return 0;
 }

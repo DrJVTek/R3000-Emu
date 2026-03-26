@@ -115,6 +115,10 @@ class Cdrom
         irq_callback_user_ = user;
     }
 
+    // Returns true if the data FIFO is empty (DMA3 DREQ not yet asserted).
+    // Used by Bus to defer DMA3 until the sector is ready.
+    bool is_fifo_empty() const { return data_r_ == data_w_; }
+
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).
     // Retourne false si pas de disque ou secteur illisible.
     bool read_sector_2048(uint32_t lba, uint8_t out[2048]);
@@ -127,6 +131,14 @@ class Cdrom
     // Comparaison case-insensitive, ignore ";1".
     bool iso9660_find_file(const char* path, uint32_t* out_lba, uint32_t* out_size);
 
+    // ISO9660 file map entry — public so static helpers in cdrom.cpp can use it.
+    struct FileMapEntry
+    {
+        uint32_t lba_start;
+        uint32_t lba_end;   // exclusive: lba_start + ceil(size/2048)
+        char path[128];     // e.g. "/TEKKEN.EXE"
+    };
+
   private:
     struct Disc;
     struct DiscRegion
@@ -135,6 +147,16 @@ class Cdrom
         char letter{0};
         char scex[4]{0, 0, 0, 0}; // "SCEI"/"SCEA"/"SCEE" (no NUL).
     };
+
+    // ISO9660 file map: built once at insert_disc() for LBA→filename annotation.
+    static constexpr int kMaxFileMapEntries = 512;
+    FileMapEntry file_map_[kMaxFileMapEntries]{};
+    int file_map_count_{0};
+
+    // Build file_map_ by recursively scanning the ISO9660 directory tree.
+    void build_file_map();
+    // Returns a static description string "NAME+0xOFFSET" for a given LBA, or nullptr if not mapped.
+    const char* lba_to_filename(uint32_t lba) const;
 
     // Helpers BCD (le BIOS parle en BCD).
     static uint8_t bcd_to_u8(uint8_t bcd);

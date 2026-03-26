@@ -33,6 +33,7 @@ set(CORE_SOURCES
   src/gpu/gpu.cpp
   src/gpu/gpu_3d.cpp
   src/gpu/gte_correlation.cpp
+  src/log/async_log.cpp
   src/log/emu_log.cpp
   src/log/filelog.cpp
   src/log/logger.cpp

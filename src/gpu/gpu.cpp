@@ -567,15 +567,14 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
             uint32_t display_line_lsb = 0u;
             if (display_.interlace && display_.v_res)
             {
-                // 480i mode (DuckStation-matching):
-                // display_line_lsb = (display_y + (!in_vblank & interlaced_display_field)) & 1
-                // The field toggles once per frame at VBlank. During VBlank the
-                // field contribution is suppressed. Games like Tekken spin-loop
-                // reading GPUSTAT and XOR bit31 to detect the field change.
+                // 480i mode: bit31 = (display_y + field) & 1, no VBlank suppression.
+                // field toggles at each VBlank. Games like Tekken read GPUSTAT during
+                // VBlank (field=N), wait one VBlank, then read again (field=N^1) and
+                // XOR bit31 to detect the frame transition. Suppressing field during
+                // VBlank made the two reads identical (no change) -> init_slot loop.
                 const uint32_t field = even_odd_field_ ? 1u : 0u;
-                const uint32_t field_contrib = in_vblank_ ? 0u : field;
                 display_line_lsb =
-                    (uint32_t)((display_.display_y + field_contrib) & 1u);
+                    (uint32_t)((display_.display_y + field) & 1u);
             }
             else
             {

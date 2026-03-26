@@ -17,6 +17,7 @@ class UInputMappingContext;
 class UR3000AudioComponent;
 class UR3000GpuComponent;
 class UR3000Gpu3DComponent;
+class UR3000VideoComponent;
 
 namespace emu
 {
@@ -349,6 +350,7 @@ class UR3000EmuComponent : public UActorComponent
     UR3000AudioComponent* AudioComp_{nullptr};
     UR3000GpuComponent* GpuComp_{nullptr};
     UR3000Gpu3DComponent* Gpu3DComp_{nullptr};
+    UR3000VideoComponent* VideoComp_{nullptr};
     TAtomic<int32> CyclesLastFrame_{0};
     TArray<uint8> BiosBytes_{};
 

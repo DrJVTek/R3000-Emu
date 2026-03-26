@@ -685,6 +685,9 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
 
     set_secondary_idle(true);
 
+    // Build LBA → filename map for log annotation (see lba_to_filename()).
+    build_file_map();
+
     // PSX-SPX: Shell close INT5 should only be sent when the shell transitions
     // from open to closed. At cold boot with disc already present, the shell was
     // never opened, so no shell close event should be sent.
@@ -877,8 +880,8 @@ void Cdrom::set_irq(uint8_t flags)
     irq_flags_ &= ~0x07u;
     irq_flags_ |= (flags & 0x07u);
     const int new_line = irq_line();
-    // Route to BUS tag so it appears in system.log
-    emu::logf(emu::LogLevel::info, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X irq_en=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X line=%d->%d",
+    // Route to BUS tag so it appears in system.log (trace only: fires every sector during ReadN)
+    emu::logf(emu::LogLevel::trace, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X irq_en=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X line=%d->%d",
         (unsigned)flags, (unsigned)old, (unsigned)irq_flags_, (unsigned)irq_enable_,
         (int)shell_close_sent_, (unsigned)pending_irq_type_, (unsigned)last_cmd_,
         old_line, new_line);
@@ -1014,7 +1017,7 @@ void Cdrom::try_fill_data_fifo()
 
     const uint32_t data_lba = data_lba_;
     uint8_t data[2048];
-    emu::logf(emu::LogLevel::info, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
+    emu::logf(emu::LogLevel::debug, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
         (unsigned)data_lba, (void*)disc_, (int)want_data_, (int)data_ready_pending_, data_r_, data_w_);
 
     // Debug: dump first 64 bytes of sector data for directory reads
@@ -1346,6 +1349,160 @@ static int iso_find_in_dir(
     return 0;
 }
 
+// Recursive ISO9660 directory scanner — appended to file_map_ sorted by LBA.
+static void iso9660_scan_dir(
+    Cdrom* cd,
+    uint32_t dir_lba,
+    uint32_t dir_size,
+    const char* prefix,        // current path prefix, e.g. "/" or "/DATA/"
+    Cdrom::FileMapEntry* map,
+    int* count,
+    int max_entries)
+{
+    if (!cd || !map || !count || *count >= max_entries)
+        return;
+    if (dir_size == 0)
+        return;
+
+    const uint32_t sectors = (dir_size + 2047u) / 2048u;
+    uint8_t sec[2048];
+    uint32_t bytes_left = dir_size;
+
+    for (uint32_t si = 0; si < sectors && *count < max_entries; ++si)
+    {
+        if (!cd->read_sector_2048(dir_lba + si, sec))
+            return;
+
+        const uint32_t lim = (bytes_left < 2048u) ? bytes_left : 2048u;
+        uint32_t off = 0;
+        while (off < lim && *count < max_entries)
+        {
+            const uint8_t rec_len = sec[off];
+            if (rec_len == 0)
+                break; // end of records in this sector
+
+            if (off + rec_len > lim)
+                break; // truncated record
+
+            const uint8_t* dr = sec + off;
+            const uint32_t extent_lba = rd_le32(dr + 2);
+            const uint32_t data_len   = rd_le32(dr + 10);
+            const uint8_t  flags      = dr[25];
+            const uint8_t  name_len   = dr[32];
+            const char*    name       = (const char*)(dr + 33);
+
+            off += rec_len;
+
+            // Skip '.' and '..'
+            if (name_len == 1 && ((uint8_t)name[0] == 0x00 || (uint8_t)name[0] == 0x01))
+                continue;
+
+            // Build full path: prefix + name (strip ";1" version suffix for files)
+            char full[128];
+            size_t plen = std::strlen(prefix);
+            std::snprintf(full, sizeof(full), "%s", prefix);
+            size_t nlen = name_len;
+            // Strip ";N" version suffix from filenames (not directories)
+            if (!(flags & 0x02))
+            {
+                for (size_t i = 0; i < nlen; ++i)
+                {
+                    if (name[i] == ';') { nlen = i; break; }
+                }
+            }
+            // Append name (uppercase only, ISO9660 names are already uppercase)
+            size_t w = plen;
+            for (size_t i = 0; i < nlen && w + 1 < sizeof(full); ++i)
+                full[w++] = name[i];
+            full[w] = '\0';
+
+            if (flags & 0x02)
+            {
+                // Directory: recurse with trailing slash
+                char subdir[128];
+                std::snprintf(subdir, sizeof(subdir), "%s/", full);
+                iso9660_scan_dir(cd, extent_lba, data_len, subdir, map, count, max_entries);
+            }
+            else if (data_len > 0 && extent_lba > 0)
+            {
+                // File: add to map
+                Cdrom::FileMapEntry& e = map[*count];
+                e.lba_start = extent_lba;
+                e.lba_end   = extent_lba + (data_len + 2047u) / 2048u;
+                std::snprintf(e.path, sizeof(e.path), "%s", full);
+                ++(*count);
+            }
+        }
+
+        if (bytes_left > 2048u)
+            bytes_left -= 2048u;
+        else
+            bytes_left = 0;
+    }
+}
+
+void Cdrom::build_file_map()
+{
+    file_map_count_ = 0;
+
+    uint32_t root_lba = 0, root_size = 0;
+    if (!iso_read_pvd(this, &root_lba, &root_size))
+    {
+        emu::logf(emu::LogLevel::warn, "CD_MAP", "build_file_map: PVD not found");
+        return;
+    }
+
+    iso9660_scan_dir(this, root_lba, root_size, "/", file_map_, &file_map_count_, kMaxFileMapEntries);
+
+    // Sort by lba_start for binary search in lba_to_filename().
+    std::sort(file_map_, file_map_ + file_map_count_,
+        [](const FileMapEntry& a, const FileMapEntry& b) { return a.lba_start < b.lba_start; });
+
+    emu::logf(emu::LogLevel::warn, "CD_MAP", "File map: %d files indexed", file_map_count_);
+    for (int i = 0; i < file_map_count_; ++i)
+    {
+        emu::logf(emu::LogLevel::warn, "CD_MAP",
+            "  [%3d] LBA %6u-%6u  %s",
+            i, file_map_[i].lba_start, file_map_[i].lba_end - 1, file_map_[i].path);
+    }
+}
+
+const char* Cdrom::lba_to_filename(uint32_t lba) const
+{
+    // Static buffer for formatted result — caller uses it before next call.
+    static char result[160];
+
+    if (file_map_count_ == 0)
+        return nullptr;
+
+    // Binary search for the last entry with lba_start <= lba.
+    int lo = 0, hi = file_map_count_ - 1, best = -1;
+    while (lo <= hi)
+    {
+        const int mid = (lo + hi) / 2;
+        if (file_map_[mid].lba_start <= lba)
+        {
+            best = mid;
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid - 1;
+        }
+    }
+
+    if (best < 0 || lba >= file_map_[best].lba_end)
+        return nullptr;
+
+    const FileMapEntry& e = file_map_[best];
+    const uint32_t offset_bytes = (lba - e.lba_start) * 2048u;
+    if (offset_bytes == 0)
+        std::snprintf(result, sizeof(result), "%s", e.path);
+    else
+        std::snprintf(result, sizeof(result), "%s+0x%X", e.path, offset_bytes);
+    return result;
+}
+
 bool Cdrom::iso9660_find_file(const char* path, uint32_t* out_lba, uint32_t* out_size)
 {
     if (out_lba)
@@ -1669,13 +1826,16 @@ void Cdrom::exec_command(uint8_t cmd)
             }
             else
             {
-                emu::logf(emu::LogLevel::info, "CD", "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
-                    loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_);
+                const char* fn = lba_to_filename(loc_lba_);
+                emu::logf(emu::LogLevel::warn, "CD_SEEK", "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u  %s",
+                    loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_,
+                    fn ? fn : "(unknown)");
             }
 
             cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
-                "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u",
-                loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_);
+                "SetLoc: MSF=%02X:%02X:%02X -> LBA=%u  %s",
+                loc_msf_[0], loc_msf_[1], loc_msf_[2], loc_lba_,
+                lba_to_filename(loc_lba_) ? lba_to_filename(loc_lba_) : "(unknown)");
             seek_pending_ = 1;
             push_resp(status_);
             queue_cmd_irq(0x03);
@@ -1748,8 +1908,15 @@ void Cdrom::exec_command(uint8_t cmd)
                 break;
             }
 
-            cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
-                "ReadN/S START: LBA=%u disc_end=%u motor_spinning=%d", loc_lba_, disc_end, (int)motor_spinning_);
+            {
+                const char* fn = lba_to_filename(loc_lba_);
+                emu::logf(emu::LogLevel::warn, "CD_SEEK",
+                    "ReadN/S START: LBA=%u  %s",
+                    loc_lba_, fn ? fn : "(unknown)");
+                cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+                    "ReadN/S START: LBA=%u  %s  disc_end=%u motor=%d",
+                    loc_lba_, fn ? fn : "(unknown)", disc_end, (int)motor_spinning_);
+            }
 
             clear_data();
             want_data_ = 0;
@@ -2537,7 +2704,11 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                      busy_ ||
                      cmd_exec_valid_ ||
                      (pending_irq_type_ != 0u) ||
-                     (resp_r_ != resp_w_) ||
+                     // NOTE: resp_r_ != resp_w_ (FIFO not empty) intentionally NOT blocking here.
+                     // Real PS1 hardware: new command can be written while FIFO has unread data;
+                     // exec_command() calls clear_resp() before pushing a new response.
+                     // Blocking on non-empty FIFO caused BIOS GetStat to be stranded after
+                     // GetID (irq_en=0x18 → no HW IRQ → BIOS never drains FIFO).
                      read_pending_irq1_ ||
                      async_stat_pending_) ? 1u : 0u;
                 // If there are pending cdrom interrupts, they must be acknowledged before sending a command.
@@ -2789,7 +2960,6 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     ((irq_flags_ & 0x1Fu) == 0u) &&
                     pending_irq_type_ == 0 &&
                     !cmd_exec_valid_ &&
-                    resp_r_ == resp_w_ &&
                     !read_pending_irq1_ &&
                     !async_stat_pending_)
                 {
@@ -2838,10 +3008,11 @@ void Cdrom::tick(uint32_t cycles)
         {
             const bool gate_irq = (irq_flags_ & 0x1Fu) != 0u;
             const bool gate_pend = pending_irq_type_ != 0;
-            const bool gate_resp = resp_r_ != resp_w_;
             const bool gate_read = read_pending_irq1_ != 0;
             const bool gate_async = async_stat_pending_ != 0;
-            if (gate_irq || gate_pend || gate_resp || gate_read || gate_async)
+            // gate_resp (resp_r_ != resp_w_) intentionally removed: exec_command() calls
+            // clear_resp() first, so stale FIFO data does not need to be drained first.
+            if (gate_irq || gate_pend || gate_read || gate_async)
             {
                 static uint32_t gate_log = 0;
                 if (gate_log < 20)
@@ -2858,7 +3029,6 @@ void Cdrom::tick(uint32_t cycles)
         if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&
             pending_irq_type_ == 0 &&
-            resp_r_ == resp_w_ &&
             !read_pending_irq1_ &&
             !async_stat_pending_)
         {
@@ -2890,7 +3060,7 @@ void Cdrom::tick(uint32_t cycles)
         (irq_flags_ & 0x1Fu) == 0u &&
         pending_irq_type_ == 0 &&
         !cmd_exec_valid_ &&
-        resp_r_ == resp_w_ &&
+        // resp_r_ == resp_w_ intentionally removed: exec_command() calls clear_resp()
         !read_pending_irq1_ &&
         !async_stat_pending_)
     {

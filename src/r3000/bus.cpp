@@ -84,6 +84,15 @@ static bool stage67_global_name(uint32_t phys, const char** out_name)
     case 0x001270B4u: *out_name = "DAT_801270B4"; return true;
     case 0x001270B6u: *out_name = "DAT_801270B6"; return true;
     case 0x0012713Cu: *out_name = "DAT_8012713C"; return true;
+    case 0x001130D4u: *out_name = "DAT_801130D4_START_SLOT_GATE"; return true;
+    // SCES_000.05 state machine variables (Tekken stage67 title-screen stall)
+    case 0x001b72ccu: *out_name = "DAT_801b72cc_SOUND_LOOKUP"; return true;
+    case 0x001cb3d4u: *out_name = "DAT_801cb3d4_LDSTATE"; return true;
+    case 0x001cb3dcu: *out_name = "DAT_801cb3dc_LDSUB"; return true;
+    case 0x001cb2ecu: *out_name = "DAT_801cb2ec_LOOPCTR"; return true;
+    case 0x001cb2fcu: *out_name = "DAT_801cb2fc_ANIMCTR"; return true;
+    case 0x001cb24cu: *out_name = "DAT_801cb24c_LDSTATE_EXIT"; return true;  // set=1 when exit() path taken in FUN_8015e440
+    case 0x001d6190u: *out_name = "DAT_801d6190_DYNCODE_LOADED"; return true; // set=0x801FFF00 by FUN_8015d4e0 before calling 0x80140400
     default: return false;
     }
 }
@@ -1042,6 +1051,13 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         const uint32_t mp3 = (phys + 3u) & rm;
         out = (uint32_t)ram_[mp0] | ((uint32_t)ram_[mp1] << 8) |
               ((uint32_t)ram_[mp2] << 16) | ((uint32_t)ram_[mp3] << 24);
+        // Unconditional read trace: start_slot gate variable (any reader, any PC)
+        if (mp0 == 0x001130D4u)
+        {
+            emu::logf(emu::LogLevel::warn, "STAGE67",
+                "START_SLOT_GATE_READ pc=0x%08X val=0x%08X (%d signed)",
+                cpu_pc_, out, (int32_t)out);
+        }
         log_stage67_watch(stage67_watch_log_count_, "RD32", cpu_pc_, addr, mp0, out, 4);
         if (cpu_pc_ >= 0xBFC03000u && cpu_pc_ <= 0xBFC07000u &&
             phys >= 0x0000B000u && phys < 0x0000B900u &&
@@ -1284,12 +1300,58 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         log_stage67_watch(stage67_watch_log_count_, "WR8", cpu_pc_, addr, mp, v, 1);
         {
             const char* gname = nullptr;
-            if (stage67_global_name(mp, &gname) && stage67_watch_log_count_ < 340u)
+            if (stage67_global_name(mp, &gname) && stage67_watch_log_count_ < 500u)
             {
                 ++stage67_watch_log_count_;
                 emu::logf(emu::LogLevel::warn, "STAGE67",
                     "GWR8 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%02X %s (#%u)",
                     cpu_pc_, addr, mp, (unsigned)v, gname, stage67_watch_log_count_);
+            }
+        }
+
+        // Watch INT3 callback (DAT_801ef68c) byte writes — catches CdSetCallback SW or SB
+        if (mp >= 0x001EF68Cu && mp <= 0x001EF68Fu)
+        {
+            const uint32_t cur = (uint32_t)ram_[0x1EF68Cu] | ((uint32_t)ram_[0x1EF68Du]<<8)
+                               | ((uint32_t)ram_[0x1EF68Eu]<<16) | ((uint32_t)ram_[0x1EF68Fu]<<24);
+            emu::logf(emu::LogLevel::warn, "INT3CB",
+                "INT3_CB_WR8 pc=0x%08X byte@%08X=0x%02X (u32_before=0x%08X)",
+                cpu_pc_, mp, (unsigned)v, cur);
+        }
+        // Watch EXE_DST_PTR (DAT_801CB33C) byte writes
+        if (mp >= 0x001CB33Cu && mp <= 0x001CB33Fu)
+        {
+            const uint32_t cur = (uint32_t)ram_[0x1CB33Cu] | ((uint32_t)ram_[0x1CB33Du]<<8)
+                               | ((uint32_t)ram_[0x1CB33Eu]<<16) | ((uint32_t)ram_[0x1CB33Fu]<<24);
+            emu::logf(emu::LogLevel::warn, "EXEDST",
+                "EXE_DST_WR8 pc=0x%08X byte@%08X=0x%02X (u32_before=0x%08X)",
+                cpu_pc_, mp, (unsigned)v, cur);
+        }
+
+        // B9D0 write-watch (byte path)
+        if (mp >= 0x0000B9D0u && mp <= 0x0000B9D3u)
+        {
+            static uint32_t b9d0_u8_cnt = 0;
+            const uint32_t vbl = vblank_total_count_;
+            if (b9d0_u8_cnt < 10u || (vbl >= 2420u && vbl <= 2560u))
+            {
+                emu::logf(emu::LogLevel::warn, "B9D0WATCH",
+                    "WR8 pc=0x%08X byte@%05X=0x%02X vblank=%u (#%u)",
+                    cpu_pc_, mp, (unsigned)v, vbl, ++b9d0_u8_cnt);
+            }
+            else ++b9d0_u8_cnt;
+        }
+
+        // Monitor all writes to CDROM event table status bytes (any size, any value)
+        // Events[0-4] status fields at 0xE02C, 0xE048, 0xE064, 0xE080, 0xE09C
+        {
+            static uint32_t evt_u8_cnt = 0;
+            if (evt_u8_cnt < 256u && mp >= 0x0000E028u && mp < 0x0000E0B4u)
+            {
+                ++evt_u8_cnt;
+                emu::logf(emu::LogLevel::warn, "EVT_TBL",
+                    "U8[%u] phys=0x%05X val=0x%02X pc=0x%08X",
+                    evt_u8_cnt, mp, (unsigned)v, cpu_pc_);
             }
         }
 
@@ -1481,12 +1543,56 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         log_stage67_watch(stage67_watch_log_count_, "WR16", cpu_pc_, addr, mp0, v, 2);
         {
             const char* gname = nullptr;
-            if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 340u)
+            if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 500u)
             {
                 ++stage67_watch_log_count_;
                 emu::logf(emu::LogLevel::warn, "STAGE67",
                     "GWR16 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%04X %s (#%u)",
                     cpu_pc_, addr, mp0, (unsigned)v, gname, stage67_watch_log_count_);
+            }
+        }
+
+        // Watch INT3 callback (DAT_801ef68c) and EXE_DST_PTR via u16 writes
+        if (mp0 >= 0x001EF68Cu && mp0 <= 0x001EF68Fu)
+        {
+            const uint32_t cur = (uint32_t)ram_[0x1EF68Cu] | ((uint32_t)ram_[0x1EF68Du]<<8)
+                               | ((uint32_t)ram_[0x1EF68Eu]<<16) | ((uint32_t)ram_[0x1EF68Fu]<<24);
+            emu::logf(emu::LogLevel::warn, "INT3CB",
+                "INT3_CB_WR16 pc=0x%08X half@%08X=0x%04X (u32_before=0x%08X)",
+                cpu_pc_, mp0, (unsigned)v, cur);
+        }
+        if (mp0 >= 0x001CB33Cu && mp0 <= 0x001CB33Fu)
+        {
+            const uint32_t cur = (uint32_t)ram_[0x1CB33Cu] | ((uint32_t)ram_[0x1CB33Du]<<8)
+                               | ((uint32_t)ram_[0x1CB33Eu]<<16) | ((uint32_t)ram_[0x1CB33Fu]<<24);
+            emu::logf(emu::LogLevel::warn, "EXEDST",
+                "EXE_DST_WR16 pc=0x%08X half@%08X=0x%04X (u32_before=0x%08X)",
+                cpu_pc_, mp0, (unsigned)v, cur);
+        }
+
+        // B9D0 write-watch (u16 path)
+        if (mp0 >= 0x0000B9D0u && mp0 <= 0x0000B9D2u)
+        {
+            static uint32_t b9d0_u16_cnt = 0;
+            const uint32_t vbl = vblank_total_count_;
+            if (b9d0_u16_cnt < 10u || (vbl >= 2420u && vbl <= 2560u))
+            {
+                emu::logf(emu::LogLevel::warn, "B9D0WATCH",
+                    "WR16 pc=0x%08X half@%05X=0x%04X vblank=%u (#%u)",
+                    cpu_pc_, mp0, (unsigned)v, vbl, ++b9d0_u16_cnt);
+            }
+            else ++b9d0_u16_cnt;
+        }
+
+        // Monitor all writes to CDROM event table area (any size, any value)
+        {
+            static uint32_t evt_u16_cnt = 0;
+            if (evt_u16_cnt < 256u && mp0 >= 0x0000E028u && mp0 < 0x0000E0B4u)
+            {
+                ++evt_u16_cnt;
+                emu::logf(emu::LogLevel::warn, "EVT_TBL",
+                    "U16[%u] phys=0x%05X val=0x%04X pc=0x%08X",
+                    evt_u16_cnt, mp0, (unsigned)v, cpu_pc_);
             }
         }
 
@@ -1700,10 +1806,83 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                 "WR32 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%08X (#%u)",
                 cpu_pc_, addr, mp0, (unsigned)v, code_stage67win_log_count_);
         }
+        // Unconditional watch: start_slot gate variable (any writer, any PC)
+        if (mp0 == 0x001130D4u)
+        {
+            emu::logf(emu::LogLevel::warn, "STAGE67",
+                "START_SLOT_GATE_WRITE pc=0x%08X val=0x%08X (%d signed)",
+                cpu_pc_, v, (int32_t)v);
+        }
+        // Watch INT3 callback (DAT_801ef68c) and EXE_DST_PTR (DAT_801CB33C)
+        if (mp0 == 0x001EF68Cu)
+        {
+            const uint32_t old_cb = (uint32_t)ram_[0x1EF68Cu] | ((uint32_t)ram_[0x1EF68Du]<<8)
+                                  | ((uint32_t)ram_[0x1EF68Eu]<<16) | ((uint32_t)ram_[0x1EF68Fu]<<24);
+            emu::logf(emu::LogLevel::warn, "INT3CB",
+                "INT3_CB_WRITE pc=0x%08X old=0x%08X new=0x%08X",
+                cpu_pc_, old_cb, v);
+        }
+        if (mp0 == 0x001CB33Cu)
+        {
+            const uint32_t old_dst = (uint32_t)ram_[0x1CB33Cu] | ((uint32_t)ram_[0x1CB33Du]<<8)
+                                   | ((uint32_t)ram_[0x1CB33Eu]<<16) | ((uint32_t)ram_[0x1CB33Fu]<<24);
+            emu::logf(emu::LogLevel::warn, "EXEDST",
+                "EXE_DST_WRITE pc=0x%08X old=0x%08X new=0x%08X",
+                cpu_pc_, old_dst, v);
+        }
+        // B938 watchpoint: BIOS I_STAT ACK guard flag (*0xA000B938 phys=0x0000B938)
+        if (mp0 == 0x0000B938u)
+        {
+            emu::logf(emu::LogLevel::warn, "B938WATCH",
+                "WRITE pc=0x%08X val=0x%08X (old=0x%08X)",
+                cpu_pc_, v,
+                (uint32_t)ram_[0x0000B938u] |
+                ((uint32_t)ram_[0x0000B939u] << 8) |
+                ((uint32_t)ram_[0x0000B93Au] << 16) |
+                ((uint32_t)ram_[0x0000B93Bu] << 24));
+        }
+        // B93C watchpoint: companion guard flag
+        if (mp0 == 0x0000B93Cu)
+        {
+            emu::logf(emu::LogLevel::warn, "B938WATCH",
+                "B93C WRITE pc=0x%08X val=0x%08X",
+                cpu_pc_, v);
+        }
+        // B9D0 write-watch: BIOS VBlank event flag (0xA000B9D0 phys=0x0000B9D0).
+        // Logs every write so we can see if/when the BIOS stops setting it on VBlank.
+        if (mp0 == 0x0000B9D0u)
+        {
+            const uint32_t vbl = vblank_total_count_;
+            static uint32_t b9d0_cnt = 0;
+            // Log all writes near the transition window, plus first 10 ever.
+            if (b9d0_cnt < 10u || (vbl >= 2420u && vbl <= 2560u))
+            {
+                emu::logf(emu::LogLevel::warn, "B9D0WATCH",
+                    "WRITE pc=0x%08X val=0x%08X vblank=%u (#%u)",
+                    cpu_pc_, v, vbl, ++b9d0_cnt);
+            }
+            else
+            {
+                ++b9d0_cnt;
+            }
+        }
+
+        // Watch ALL writes to CDROM event table area [0xE028, 0xE0B4) — any value, u32 path.
+        // Events[0-4]: status at 0xE02C, 0xE048, 0xE064, 0xE080, 0xE09C (stride=0x1C, offset+4)
+        {
+            static uint32_t evt_u32_cnt = 0;
+            if (evt_u32_cnt < 512u && mp0 >= 0x0000E028u && mp0 < 0x0000E0B4u)
+            {
+                ++evt_u32_cnt;
+                emu::logf(emu::LogLevel::warn, "EVT_TBL",
+                    "U32[%u] phys=0x%05X val=0x%08X pc=0x%08X",
+                    evt_u32_cnt, mp0, v, cpu_pc_);
+            }
+        }
         log_stage67_watch(stage67_watch_log_count_, "WR32", cpu_pc_, addr, mp0, v, 4);
         {
             const char* gname = nullptr;
-            if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 340u)
+            if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 500u)
             {
                 ++stage67_watch_log_count_;
                 emu::logf(emu::LogLevel::warn, "STAGE67",
@@ -1766,16 +1945,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
             {
             case 0:
                 dma_[ch].madr = v;
-                // Diagnostic: log DMA3 MADR=0 (kernel corruption risk)
-                if (ch == 3 && (v & 0x1FFFFFu) < 0x200u)
-                {
-                    emu::logf(emu::LogLevel::error, "BUS",
-                        "DMA3 MADR=0x%08X (kernel area!) PC=0x%08X",
-                        v, cpu_pc_);
-                }
                 break;
             case 1: dma_[ch].bcr = v; break;
-            case 2:
+            case 2: // CHCR
                 dma_[ch].chcr = v;
                 // Handle DMA start
                 if (v & 0x01000000u)
@@ -1809,6 +1981,17 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             mdec_->dma_read(buf.data(), words);
                             for (uint32_t i = 0; i < words; ++i)
                             {
+                                if (ma >= 0xE000u && ma < 0xF000u)
+                                {
+                                    static uint32_t dma1_evt = 0;
+                                    if (dma1_evt < 8u)
+                                    {
+                                        ++dma1_evt;
+                                        emu::logf(emu::LogLevel::warn, "DMA1_EVT",
+                                            "[%u] phys=0x%05X val=0x%08X madr=0x%08X word=%u",
+                                            dma1_evt, ma, buf[i], dma_[ch].madr, i);
+                                    }
+                                }
                                 ram_[ma]     = (uint8_t)(buf[i]);
                                 ram_[ma + 1] = (uint8_t)(buf[i] >> 8);
                                 ram_[ma + 2] = (uint8_t)(buf[i] >> 16);
@@ -1838,6 +2021,17 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 for (uint32_t i = 0; i < words; ++i)
                                 {
                                     const uint32_t w = gpu_->mmio_read32(kGpuBase);
+                                    if (ma >= 0xE000u && ma < 0xF000u)
+                                    {
+                                        static uint32_t dma2_evt = 0;
+                                        if (dma2_evt < 8u)
+                                        {
+                                            ++dma2_evt;
+                                            emu::logf(emu::LogLevel::warn, "DMA2_EVT",
+                                                "[%u] GPU→RAM phys=0x%05X val=0x%08X madr=0x%08X",
+                                                dma2_evt, ma, w, dma_[ch].madr);
+                                        }
+                                    }
                                     ram_[ma]     = (uint8_t)(w);
                                     ram_[ma + 1] = (uint8_t)(w >> 8);
                                     ram_[ma + 2] = (uint8_t)(w >> 16);
@@ -2019,127 +2213,24 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                     // DMA3 (CDROM → RAM)
                     if (ch == 3 && cdrom_)
                     {
-                        const uint32_t bs = dma_[ch].bcr & 0xFFFF;
-                        const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
-                        const uint32_t words = bs * (bc ? bc : 1);
-                        const uint32_t start_ma = dma_[ch].madr & 0x1FFFFF;
-                        uint32_t ma = start_ma;
-                        const uint32_t end_addr = (ma + words * 4) & 0x1FFFFF;
-
-                        emu::logf(emu::LogLevel::info, "BUS", "DMA3 CD→RAM madr=0x%08X bcr=0x%08X words=%u",
-                            dma_[ch].madr, dma_[ch].bcr, words);
-                        cdrom_->debug_log_dma3_start(dma_[ch].madr, dma_[ch].bcr, words);
-
-                        // Guard: skip DMA writing into kernel area (0x00-0x200)
-                        // On real PS1 this never happens — MADR=0 means a game-side
-                        // pointer wasn't initialised due to missing emulation elsewhere.
-                        if (ma < 0x200u)
+                        // PS1 DMA3 is gated by DREQ from the CDROM (asserted when sector FIFO
+                        // is non-empty). If the game triggers DMA3 before INT1 fills the FIFO
+                        // (e.g., from an INT3 callback), defer the transfer until the FIFO is
+                        // ready. bus.tick() will execute it after cdrom.tick() fills the FIFO.
+                        if (cdrom_->is_fifo_empty())
                         {
-                            emu::logf(emu::LogLevel::error, "BUS",
-                                "DMA3 BLOCKED: madr=0x%05X words=%u — would overwrite kernel vectors (PC=0x%08X)",
-                                ma, words, cpu_pc_);
-                            cdrom_->debug_log_dma3_end(dma_[ch].madr, words, 1);
-                            dma_finish(ch);
-                            break;
+                            dma3_pending_ = 1;
+                            emu::logf(emu::LogLevel::warn, "BUS",
+                                "DMA3 deferred (FIFO empty): madr=0x%08X bcr=0x%08X PC=0x%08X",
+                                dma_[3].madr, dma_[3].bcr, cpu_pc_);
+                            // CHCR bit 24 stays set — game sees DMA as in-progress.
                         }
-
-                        for (uint32_t i = 0; i < words; ++i)
+                        else
                         {
-                            // Read 4 bytes from CDROM data FIFO
-                            const uint8_t b0 = cdrom_->mmio_read8(0x1F801802u);
-                            const uint8_t b1 = cdrom_->mmio_read8(0x1F801802u);
-                            const uint8_t b2 = cdrom_->mmio_read8(0x1F801802u);
-                            const uint8_t b3 = cdrom_->mmio_read8(0x1F801802u);
-                            const uint32_t w = (uint32_t)b0 | ((uint32_t)b1 << 8) |
-                                               ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24);
-                            ram_[ma]     = (uint8_t)(w & 0xFF);
-                            ram_[ma + 1] = (uint8_t)((w >> 8) & 0xFF);
-                            ram_[ma + 2] = (uint8_t)((w >> 16) & 0xFF);
-                            ram_[ma + 3] = (uint8_t)((w >> 24) & 0xFF);
-                            ma = (ma + 4) & 0x1FFFFF;
+                            exec_dma3_transfer();
                         }
-
-                        if (cpu_pc_ >= 0xBFC06000u && cpu_pc_ <= 0xBFC06800u && bios_cd_dma_dump_count_ < 12)
-                        {
-                            ++bios_cd_dma_dump_count_;
-                            bios_pvd_post_pc_trace_count_ = 512u;
-                            bios_pvd_post_last_pc_ = 0xFFFFFFFFu;
-                            if (cdrom_)
-                            {
-                                const uint32_t read_lba = cdrom_->debug_read_lba();
-                                const uint32_t data_lba = cdrom_->debug_data_lba();
-                                if (read_lba == 60643u || data_lba == 60643u)
-                                {
-                                    bios_post_60643_trace_active_ = 1u;
-                                    bios_post_60643_exit_logged_ = 0u;
-                                }
-                            }
-
-                            char hexbuf[3 * 16 + 1]{};
-                            char asciibuf[16 + 1]{};
-                            for (uint32_t i = 0; i < 16; ++i)
-                            {
-                                const uint8_t b = ram_[(start_ma + i) & 0x1FFFFF];
-                                std::snprintf(&hexbuf[i * 3], 4, "%02X ", (unsigned)b);
-                                asciibuf[i] = (b >= 0x20 && b <= 0x7E) ? (char)b : '.';
-                            }
-                            asciibuf[16] = '\0';
-
-                            emu::logf(
-                                emu::LogLevel::warn,
-                                "BUS",
-                                "DMA3 BIOS RAM dump pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X words=%u read_lba=%u data_lba=%u last_cmd=0x%02X data=%s ascii='%s'",
-                                cpu_pc_,
-                                dma_[ch].madr,
-                                start_ma,
-                                end_addr,
-                                words,
-                                cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
-                                cdrom_ ? (unsigned)cdrom_->debug_data_lba() : 0u,
-                                cdrom_ ? (unsigned)cdrom_->debug_last_cmd() : 0u,
-                                hexbuf,
-                                asciibuf);
-
-                            const uint32_t probe0 = 0x0B888u;
-                            const uint32_t probe1 = 0x0B88Cu;
-                            const uint32_t range_end = (start_ma + words * 4u - 1u) & 0x1FFFFFu;
-                            const bool linear = range_end >= start_ma;
-                            const auto in_dma_range = [&](uint32_t addr) -> bool
-                            {
-                                if (linear)
-                                    return addr >= start_ma && addr <= range_end;
-                                return addr >= start_ma || addr <= range_end;
-                            };
-                            if (in_dma_range(probe0) || in_dma_range(probe1))
-                            {
-                                const uint32_t v0 =
-                                    (uint32_t)ram_[probe0] |
-                                    ((uint32_t)ram_[probe0 + 1] << 8) |
-                                    ((uint32_t)ram_[probe0 + 2] << 16) |
-                                    ((uint32_t)ram_[probe0 + 3] << 24);
-                                const uint32_t v1 =
-                                    (uint32_t)ram_[probe1] |
-                                    ((uint32_t)ram_[probe1 + 1] << 8) |
-                                    ((uint32_t)ram_[probe1 + 2] << 16) |
-                                    ((uint32_t)ram_[probe1 + 3] << 24);
-                                emu::logf(
-                                    emu::LogLevel::warn,
-                                    "BUS",
-                                    "DMA3 BIOS scratch hit pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X read_lba=%u data_lba=%u b888=0x%08X b88c=0x%08X",
-                                    cpu_pc_,
-                                    dma_[ch].madr,
-                                    start_ma,
-                                    end_addr,
-                                    cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
-                                    cdrom_ ? (unsigned)cdrom_->debug_data_lba() : 0u,
-                                    (unsigned)v0,
-                                    (unsigned)v1);
-                            }
-                        }
-
-                        dma_finish(ch);
-                        cdrom_->debug_log_dma3_end(dma_[ch].madr, words, 0);
                     }
+
 
                     // DMA6 (OTC - Ordering Table Clear)
                     if (ch == 6)
@@ -2165,6 +2256,18 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         for (uint32_t i = 0; i < words; ++i)
                         {
                             uint32_t w = (i == words - 1) ? 0x00FFFFFFu : ((ma - 4) & 0x1FFFFF);
+                            // DMA6_EVT: detect OTC overwriting CDROM event table [0xE000,0xF000)
+                            if (ma >= 0x0000E000u && ma < 0x0000F000u)
+                            {
+                                static uint32_t dma6_evt_hit = 0;
+                                if (dma6_evt_hit < 32u)
+                                {
+                                    ++dma6_evt_hit;
+                                    emu::logf(emu::LogLevel::warn, "DMA6_EVT",
+                                        "[%u] OTC writing phys=0x%05X val=0x%08X word=%u/%u madr_orig=0x%08X vblank=%u",
+                                        dma6_evt_hit, ma, w, i, words, dma_[ch].madr, vblank_total_count_);
+                                }
+                            }
                             ram_[ma] = (uint8_t)(w & 0xFF);
                             ram_[ma + 1] = (uint8_t)((w >> 8) & 0xFF);
                             ram_[ma + 2] = (uint8_t)((w >> 16) & 0xFF);
@@ -2176,8 +2279,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                 }
                 break;
             }
+            return true;
         }
-        return true;
+        // ch == 7: fall through to DPCR/DICR handlers below
     }
 
     // DMA control
@@ -2190,6 +2294,8 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     {
         // DICR write: bits 0-14 force enable, bit 15 force IRQ, bits 16-22 channel enable,
         // bit 23 master enable, bits 24-30 write-1-to-acknowledge (clear flag), bit 31 read-only.
+        emu::logf(emu::LogLevel::warn, "DICR", "[DICR] write pc=0x%08X v=0x%08X old=0x%08X master_en_new=%d",
+                  cpu_pc_, v, dicr_, (v >> 23) & 1);
         const uint32_t ack_mask = v & 0x7F000000u; // bits 24-30: writing 1 clears flag
         const uint32_t wr_mask  = 0x00FF803Fu;     // bits 0-5, 15-23: writable directly
         dicr_ = (dicr_ & ~wr_mask) | (v & wr_mask);
@@ -2363,6 +2469,144 @@ uint32_t Bus::irq_pending_masked() const
     return pending;
 }
 
+// ================== DMA3 transfer ==================
+
+void Bus::exec_dma3_transfer()
+{
+    if (!cdrom_) return;
+
+    const uint32_t bs = dma_[3].bcr & 0xFFFF;
+    const uint32_t bc = (dma_[3].bcr >> 16) & 0xFFFF;
+    const uint32_t words = bs * (bc ? bc : 1);
+    const uint32_t start_ma = dma_[3].madr & 0x1FFFFF;
+    uint32_t ma = start_ma;
+    const uint32_t end_addr = (ma + words * 4) & 0x1FFFFF;
+
+    emu::logf(emu::LogLevel::debug, "BUS", "DMA3 CD→RAM madr=0x%08X bcr=0x%08X words=%u",
+        dma_[3].madr, dma_[3].bcr, words);
+    cdrom_->debug_log_dma3_start(dma_[3].madr, dma_[3].bcr, words);
+
+    // DMA3 state snapshot: log PC + CD driver destination/callback for first 60 game-phase DMAs.
+    {
+        static uint32_t dma3_game_count = 0;
+        const bool in_game_pc = (cpu_pc_ >= 0x80010000u && cpu_pc_ <= 0x8020FFFFu)
+                             || (cpu_pc_ >= 0xA0010000u && cpu_pc_ <= 0xA020FFFFu);
+        if (in_game_pc && dma3_game_count < 60u)
+        {
+            ++dma3_game_count;
+            auto rd32_safe = [&](uint32_t phys) -> uint32_t {
+                if (phys + 4u > ram_size_) return 0xDEADBEEFu;
+                return (uint32_t)ram_[phys] | ((uint32_t)ram_[phys+1]<<8)
+                     | ((uint32_t)ram_[phys+2]<<16) | ((uint32_t)ram_[phys+3]<<24);
+            };
+            const uint32_t cd_dest = rd32_safe(0x1ca694u);
+            const uint32_t cd_cb   = rd32_safe(0x1ef68cu);
+            const uint32_t ldst    = rd32_safe(0x1cb3d4u);
+            const uint32_t exe_dst = rd32_safe(0x1cb33cu);
+            emu::logf(emu::LogLevel::warn, "DMA3_SNAP",
+                "[%u] PC=0x%08X madr=0x%08X words=%u cd_dest=0x%08X cd_cb=0x%08X ldst=%d exe_dst=0x%08X",
+                dma3_game_count, cpu_pc_, dma_[3].madr, words,
+                cd_dest, cd_cb, (int32_t)ldst, exe_dst);
+        }
+    }
+
+    // NOTE: games may intentionally DMA to low RAM (0x0000-0xFFFF) to replace the BIOS
+    // kernel area with game-specific code (e.g., Tekken's Galaga sub-EXE at KUSEG 0).
+    if (ma < 0x200u)
+    {
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "DMA3 low-RAM: madr=0x%05X words=%u (intentional kernel overwrite?) PC=0x%08X",
+            ma, words, cpu_pc_);
+    }
+
+    for (uint32_t i = 0; i < words; ++i)
+    {
+        const uint8_t b0 = cdrom_->mmio_read8(0x1F801802u);
+        const uint8_t b1 = cdrom_->mmio_read8(0x1F801802u);
+        const uint8_t b2 = cdrom_->mmio_read8(0x1F801802u);
+        const uint8_t b3 = cdrom_->mmio_read8(0x1F801802u);
+        const uint32_t w = (uint32_t)b0 | ((uint32_t)b1 << 8) |
+                           ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24);
+        if (ma >= 0x0000E000u && ma < 0x0000F000u)
+        {
+            static uint32_t dma3_evt_hit = 0;
+            if (dma3_evt_hit < 16u)
+            {
+                ++dma3_evt_hit;
+                emu::logf(emu::LogLevel::warn, "DMA3_EVT",
+                    "[%u] DMA3 writing phys=0x%05X val=0x%08X madr_orig=0x%08X word=%u/%u pc=0x%08X",
+                    dma3_evt_hit, ma, w, dma_[3].madr, i, words, cpu_pc_);
+            }
+        }
+        ram_[ma]     = (uint8_t)(w & 0xFF);
+        ram_[ma + 1] = (uint8_t)((w >> 8) & 0xFF);
+        ram_[ma + 2] = (uint8_t)((w >> 16) & 0xFF);
+        ram_[ma + 3] = (uint8_t)((w >> 24) & 0xFF);
+        ma = (ma + 4) & 0x1FFFFF;
+    }
+
+    if (cpu_pc_ >= 0xBFC06000u && cpu_pc_ <= 0xBFC06800u && bios_cd_dma_dump_count_ < 12)
+    {
+        ++bios_cd_dma_dump_count_;
+        bios_pvd_post_pc_trace_count_ = 512u;
+        bios_pvd_post_last_pc_ = 0xFFFFFFFFu;
+        if (cdrom_)
+        {
+            const uint32_t read_lba = cdrom_->debug_read_lba();
+            const uint32_t data_lba = cdrom_->debug_data_lba();
+            if (read_lba == 60643u || data_lba == 60643u)
+            {
+                bios_post_60643_trace_active_ = 1u;
+                bios_post_60643_exit_logged_ = 0u;
+            }
+        }
+
+        char hexbuf[3 * 16 + 1]{};
+        char asciibuf[16 + 1]{};
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+            const uint8_t b = ram_[(start_ma + i) & 0x1FFFFF];
+            std::snprintf(&hexbuf[i * 3], 4, "%02X ", (unsigned)b);
+            asciibuf[i] = (b >= 0x20 && b <= 0x7E) ? (char)b : '.';
+        }
+        asciibuf[16] = '\0';
+
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "DMA3 BIOS RAM dump pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X words=%u read_lba=%u data_lba=%u last_cmd=0x%02X data=%s ascii='%s'",
+            cpu_pc_, dma_[3].madr, start_ma, end_addr, words,
+            cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
+            cdrom_ ? (unsigned)cdrom_->debug_data_lba() : 0u,
+            cdrom_ ? (unsigned)cdrom_->debug_last_cmd() : 0u,
+            hexbuf, asciibuf);
+
+        const uint32_t probe0 = 0x0B888u;
+        const uint32_t probe1 = 0x0B88Cu;
+        const uint32_t range_end = (start_ma + words * 4u - 1u) & 0x1FFFFFu;
+        const bool linear = range_end >= start_ma;
+        const auto in_dma_range = [&](uint32_t addr) -> bool
+        {
+            if (linear) return addr >= start_ma && addr <= range_end;
+            return addr >= start_ma || addr <= range_end;
+        };
+        if (in_dma_range(probe0) || in_dma_range(probe1))
+        {
+            const uint32_t v0 = (uint32_t)ram_[probe0] | ((uint32_t)ram_[probe0+1]<<8)
+                              | ((uint32_t)ram_[probe0+2]<<16) | ((uint32_t)ram_[probe0+3]<<24);
+            const uint32_t v1 = (uint32_t)ram_[probe1] | ((uint32_t)ram_[probe1+1]<<8)
+                              | ((uint32_t)ram_[probe1+2]<<16) | ((uint32_t)ram_[probe1+3]<<24);
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "DMA3 BIOS scratch hit pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X read_lba=%u data_lba=%u b888=0x%08X b88c=0x%08X",
+                cpu_pc_, dma_[3].madr, start_ma, end_addr,
+                cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
+                cdrom_ ? (unsigned)cdrom_->debug_data_lba() : 0u,
+                (unsigned)v0, (unsigned)v1);
+        }
+    }
+
+    dma_finish(3);
+    cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
+}
+
 // ================== DMA completion ==================
 
 void Bus::dma_finish(int ch)
@@ -2466,7 +2710,7 @@ void Bus::check_cdrom_irq_edge()
     if (cdirq && !cdrom_irq_prev_)
     {
         i_stat_ |= (1u << 2);
-        emu::logf(emu::LogLevel::info, "BUS", "CDROM IRQ edge: i_stat=0x%04X", (unsigned)i_stat_);
+        emu::logf(emu::LogLevel::debug, "BUS", "CDROM IRQ edge: i_stat=0x%04X", (unsigned)i_stat_);
         cdrom_->debug_log_bus_irq_latched(i_stat_, i_mask_);
     }
     cdrom_irq_prev_ = cdirq;
@@ -2648,6 +2892,29 @@ void Bus::tick(uint32_t cycles)
             if (gte_3d_) gte_3d_->swap_frame();
             if (gpu_3d_) gpu_3d_->on_vblank();
 
+            // Per-VBlank: scan CDROM event status fields, log when any changes to 0x4000
+            // Events[0-4] at 0xE028+i*0x1C, status at offset+4
+            {
+                static uint32_t last_cdrom_status[5] = {0,0,0,0,0};
+                static uint32_t cdrom_flip_count = 0;
+                const uint32_t bases[5] = {0xE028u, 0xE044u, 0xE060u, 0xE07Cu, 0xE098u};
+                for (int ei = 0; ei < 5; ++ei)
+                {
+                    const uint32_t soff = bases[ei] + 4u;
+                    const uint32_t st = (uint32_t)ram_[soff] | ((uint32_t)ram_[soff+1] << 8) |
+                                        ((uint32_t)ram_[soff+2] << 16) | ((uint32_t)ram_[soff+3] << 24);
+                    if (st != last_cdrom_status[ei] && cdrom_flip_count < 64u)
+                    {
+                        ++cdrom_flip_count;
+                        emu::logf(emu::LogLevel::warn, "EVT_FLIP",
+                            "[%u] Event[%d]@0x%05X status 0x%04X->0x%04X vblank=%u pc=0x%08X",
+                            cdrom_flip_count, ei, bases[ei], last_cdrom_status[ei], st,
+                            vblank_total_count_, cpu_pc_);
+                        last_cdrom_status[ei] = st;
+                    }
+                }
+            }
+
             // Fire VBlank hooks (zero-cost when no hooks registered)
             if (hooks_ && hooks_->has_vblank())
                 hooks_->fire_vblank(vblank_total_count_);
@@ -2671,11 +2938,17 @@ void Bus::tick(uint32_t cycles)
                     dma2_nohint_last_.top_pcs.push_back(top[i]);
                 dma2_nohint_last_valid_ = true;
 
-                if (vblank_total_count_ < 10 || (vblank_total_count_ % 60) == 0)
+                // After VBlank 550 (post-loading phase): log DMA2 at warn level so it's
+                // always visible. This tells us if the title screen code issues GPU transfers.
+                const bool dma2_verbose = (vblank_total_count_ > 550u) ||
+                                          (vblank_total_count_ < 10u) ||
+                                          ((vblank_total_count_ % 60u) == 0u);
+                if (dma2_verbose)
                 {
+                const auto lvl = (vblank_total_count_ > 550u) ? emu::LogLevel::warn : emu::LogLevel::debug;
                 const size_t n = (top.size() < 6) ? top.size() : 6;
                 emu::logf(
-                    emu::LogLevel::debug,
+                    lvl,
                     "DMA2_NOHINT",
                     "vblank=%u nohint_words=%u unique_pcs=%u",
                     vblank_total_count_,
@@ -2684,7 +2957,7 @@ void Bus::tick(uint32_t cycles)
                 for (size_t i = 0; i < n; ++i)
                 {
                     emu::logf(
-                        emu::LogLevel::debug,
+                        lvl,
                         "DMA2_NOHINT",
                         "  top[%u] pc=0x%08X words=%u",
                         (uint32_t)i,
@@ -2695,6 +2968,71 @@ void Bus::tick(uint32_t cycles)
             }
             dma2_nohint_words_ = 0;
             dma2_nohint_pc_hist_.clear();
+
+            // ===== TEKKEN STATE MACHINE DUMP (VBlank 1-5000) =====
+            // Monitor loading state machine, sound lookup result, and title screen transition.
+            // Physical addresses (virtual - 0x80000000):
+            //   0x1b72cc = DAT_801b72cc  — sound seq lookup result (-1=not found, 1=found)
+            //   0x1cb3d4 = DAT_801cb3d4  — loading state machine (0-3, -1=error)
+            //   0x1cb3dc = DAT_801cb3dc  — loading sub-state (0-5)
+            //   0x1cb2ec = DAT_801cb2ec  — main loop counter (starts 2)
+            //   0x1cb2fc = DAT_801cb2fc  — animation counter (0 or 1)
+            //   0x1ca7c8 = PSYQ VBlank counter (offset -0x5838 from 0x801D0000)
+            //   0x1d6190 = DAT_801d6190  — set to 0x801FFF00 by FUN_8015d4e0 (title screen loader)
+            //              non-zero means the code-copy step was executed and 0x80140400 is running
+            {
+                // Sample every 20 VBlanks up to 560, then every 10 up to 1000, every 50 normally.
+                // Extra: every VBlank between 2430-2560 to capture the vsync_ctr freeze transition.
+                const bool should_sample =
+                    (vblank_total_count_ >= 1u && vblank_total_count_ <= 5000u) &&
+                    ((vblank_total_count_ <= 560u  && (vblank_total_count_ % 20u) == 0u) ||
+                     (vblank_total_count_ <= 1000u && (vblank_total_count_ % 10u) == 0u) ||
+                     (vblank_total_count_ >= 2430u && vblank_total_count_ <= 2560u) ||
+                     (vblank_total_count_ <= 5000u && (vblank_total_count_ % 50u) == 0u));
+                if (should_sample)
+                {
+                    auto rd32 = [&](uint32_t phys) -> uint32_t {
+                        if (phys + 3u >= ram_size_) return 0u;
+                        return (uint32_t)ram_[phys] | ((uint32_t)ram_[phys+1]<<8) |
+                               ((uint32_t)ram_[phys+2]<<16) | ((uint32_t)ram_[phys+3]<<24);
+                    };
+                    const int32_t b72cc = (int32_t)rd32(0x1b72ccu); // sound lookup
+                    const int32_t cb3d4 = (int32_t)rd32(0x1cb3d4u); // ld state
+                    const int32_t cb3dc = (int32_t)rd32(0x1cb3dcu); // ld sub-state
+                    const int32_t cb2ec = (int32_t)rd32(0x1cb2ecu); // loop ctr
+                    const uint32_t ca7c8 = rd32(0x1ca7c8u); // PSYQ VBlank counter
+                    const uint32_t ca7ec = rd32(0x1ca7ecu); // VBlank callback fn ptr
+                    // Track callback pointer changes — log on every transition.
+                    static uint32_t prev_vblank_cb = 0;
+                    if (ca7ec != prev_vblank_cb && prev_vblank_cb != 0)
+                    {
+                        emu::logf(emu::LogLevel::warn, "VBLANK_CB_CHG",
+                            "vblank=%u  0x%08X -> 0x%08X  vsync_ctr=%u",
+                            vblank_total_count_, prev_vblank_cb, ca7ec, ca7c8);
+                    }
+                    prev_vblank_cb = ca7ec;
+                    const uint32_t ca680 = rd32(0x1ca680u); // DAT_801ca680: CD status (0=pending,2=ready,5=err)
+                    const uint32_t ca818 = rd32(0x1ca818u); // DAT_801ca818: game IRQ mask (bit2=CDROM,bit0=VBlank)
+                    const uint32_t ca7f4 = rd32(0x1ca7f4u); // DAT_801ca7f4: CDROM IRQ callback fn ptr
+                    // DAT_801d6190: FUN_8015d4e0 sets this to 0x801FFF00 before calling (*(code*)0x80140400).
+                    // If non-zero → title screen dynamic code has been loaded and is executing.
+                    const uint32_t d6190 = rd32(0x1d6190u);
+                    // Is CPU currently in the dynamically-loaded title screen code region (0x80140000-0x80141FFF)?
+                    const bool in_dyn = (cpu_pc_ >= 0x80140000u && cpu_pc_ <= 0x80141FFFu);
+                    // exe_remain: bytes left to load for current EXE chunk (0x1CB334)
+                    const uint32_t exe_remain = rd32(0x1cb334u);
+                    // exe_dst: target RAM address for current EXE write (0x1CB33C)
+                    const uint32_t exe_dst = rd32(0x1cb33cu);
+                    emu::logf(emu::LogLevel::warn, "STAGE67ST",
+                        "vblank=%u pc=0x%08X sound=%d ldst=%d ldsub=%d loopctr=%d vsync_ctr=%u vblank_cb=0x%08X"
+                        " cd_stat=%u game_imask=0x%04X cd_cb=0x%08X hw_istat=0x%04X hw_imask=0x%04X"
+                        " d6190=0x%08X dyn=%d exe_remain=%u exe_dst=0x%08X",
+                        vblank_total_count_, cpu_pc_,
+                        b72cc, cb3d4, cb3dc, cb2ec, ca7c8, ca7ec,
+                        ca680, ca818, ca7f4, i_stat_, i_mask_,
+                        d6190, (int)in_dyn, exe_remain, exe_dst);
+                }
+            }
 
             // ===== VBlank STUCK DETECTION =====
             // Check if GPU is making real frame progress (submitting primitives)
@@ -2713,6 +3051,10 @@ void Bus::tick(uint32_t cycles)
             {
                 // No primitives - check if we're stuck
                 vblank_stuck_count_++;
+
+                // Re-arm every 200 stuck VBlanks so we get periodic CPU PC snapshots
+                if (vblank_stuck_logged_ && (vblank_stuck_count_ % 200) == 0)
+                    vblank_stuck_logged_ = 0;
 
                 // If stuck for 100 VBlanks (~2 seconds) and not yet logged
                 if (vblank_stuck_count_ >= 100 && !vblank_stuck_logged_)
@@ -2753,18 +3095,52 @@ void Bus::tick(uint32_t cycles)
                                   ((uint32_t)ram_[pcb_off + 3] << 24);
                     }
 
-                    // Log comprehensive state dump
-                    emu::logf(emu::LogLevel::debug, "BUS", "===== VSYNC STUCK DETECTED =====");
-                    emu::logf(emu::LogLevel::debug, "BUS", "VBlank #%u: stuck for %u VBlanks (no primitives)",
+                    // Log comprehensive state dump (warn level so it appears in normal runs)
+                    emu::logf(emu::LogLevel::warn, "BUS", "===== VSYNC STUCK DETECTED =====");
+                    emu::logf(emu::LogLevel::warn, "BUS", "VBlank #%u: stuck for %u VBlanks (no primitives)",
                         vblank_total_count_, vblank_stuck_count_);
-                    emu::logf(emu::LogLevel::debug, "BUS", "Last real frame: VBlank #%u", vblank_last_frame_);
-                    emu::logf(emu::LogLevel::debug, "BUS", "I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X",
+                    emu::logf(emu::LogLevel::warn, "BUS", "Last real frame: VBlank #%u", vblank_last_frame_);
+                    emu::logf(emu::LogLevel::warn, "BUS", "I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X",
                         (unsigned)i_stat_, (unsigned)i_mask_, (unsigned)(i_stat_ & i_mask_));
-                    emu::logf(emu::LogLevel::debug, "BUS", "CPU PC=0x%08X", cpu_pc_);
-                    emu::logf(emu::LogLevel::debug, "BUS", "Event table ptr=0x%08X", evt_ptr);
-                    emu::logf(emu::LogLevel::debug, "BUS", "SysEnqIntRP chains: [0]=0x%08X [1]=0x%08X [2]=0x%08X [3]=0x%08X",
+                    emu::logf(emu::LogLevel::warn, "BUS", "CPU PC=0x%08X", cpu_pc_);
+                    emu::logf(emu::LogLevel::warn, "BUS", "Event table ptr=0x%08X", evt_ptr);
+                    emu::logf(emu::LogLevel::warn, "BUS", "SysEnqIntRP chains: [0]=0x%08X [1]=0x%08X [2]=0x%08X [3]=0x%08X",
                         chain_ptrs[0], chain_ptrs[1], chain_ptrs[2], chain_ptrs[3]);
-                    emu::logf(emu::LogLevel::debug, "BUS", "PCB=0x%08X TCB=0x%08X", pcb_ptr, tcb_ptr);
+                    emu::logf(emu::LogLevel::warn, "BUS", "PCB=0x%08X TCB=0x%08X", pcb_ptr, tcb_ptr);
+                    emu::logf(emu::LogLevel::warn, "BUS", "Last EXC: EPC=0x%08X Cause=0x%08X (ExCode=%u)",
+                        cpu_epc_, cpu_cause_, (cpu_cause_ >> 2) & 0x1Fu);
+
+                    // Walk each interrupt chain to find bad handler pointers.
+                    // HE struct: { HE* next; int(*func)(); long type; } (12 bytes)
+                    auto rd32 = [&](uint32_t vaddr) -> uint32_t {
+                        const uint32_t phys = vaddr & 0x1FFFFFFFu;
+                        if (phys + 4u > ram_size_) return 0xDEADBEEFu;
+                        return (uint32_t)ram_[phys]           |
+                               ((uint32_t)ram_[phys + 1] << 8)  |
+                               ((uint32_t)ram_[phys + 2] << 16) |
+                               ((uint32_t)ram_[phys + 3] << 24);
+                    };
+                    for (int ci = 0; ci < 4; ++ci)
+                    {
+                        uint32_t head = chain_ptrs[ci];
+                        if (head == 0) continue;
+                        emu::logf(emu::LogLevel::warn, "BUS", "Chain[%d] entries (head=0x%08X):", ci, head);
+                        for (int ei = 0; ei < 8 && head != 0; ++ei)
+                        {
+                            const uint32_t phys = head & 0x1FFFFFFFu;
+                            if (phys + 12u > ram_size_)
+                            {
+                                emu::logf(emu::LogLevel::warn, "BUS", "  [%d] @0x%08X OUT_OF_RANGE", ei, head);
+                                break;
+                            }
+                            const uint32_t next = rd32(head);
+                            const uint32_t func = rd32(head + 4u);
+                            const uint32_t type = rd32(head + 8u);
+                            emu::logf(emu::LogLevel::warn, "BUS", "  [%d] @0x%08X next=0x%08X func=0x%08X type=0x%08X",
+                                ei, head, next, func, type);
+                            head = next;
+                        }
+                    }
 
                     // Scan event table for VSync-related events
                     if (evt_ptr != 0)
@@ -2777,7 +3153,7 @@ void Bus::tick(uint32_t cycles)
                         const uint32_t max_entries = (tbl_size > 0) ? (tbl_size / 0x1C) : 16;
                         const uint32_t base_phys = evt_ptr & (ram_size_ - 1);
 
-                        emu::logf(emu::LogLevel::debug, "BUS", "Event table size=%u max_entries=%u", tbl_size, max_entries);
+                        emu::logf(emu::LogLevel::warn, "BUS", "Event table size=%u max_entries=%u", tbl_size, max_entries);
 
                         int found_vsync = 0;
                         for (uint32_t i = 0; i < max_entries && i < 32; ++i)
@@ -2806,8 +3182,13 @@ void Bus::tick(uint32_t cycles)
                             const char* st_str = (status == 0x4000u) ? "READY" :
                                                  (status == 0x2000u) ? "BUSY" :
                                                  (status == 0x1000u) ? "ALLOCATED" : "???";
-                            emu::logf(emu::LogLevel::debug, "BUS", "  Event[%u]: cls=0x%08X spec=0x%04X status=0x%04X (%s)",
-                                i, cls, spec, status, st_str);
+                            // Also dump raw words at +0,+4,+8,+C for field layout verification
+                            const uint32_t raw0 = (uint32_t)ram_[eoff+0] | ((uint32_t)ram_[eoff+1]<<8) | ((uint32_t)ram_[eoff+2]<<16) | ((uint32_t)ram_[eoff+3]<<24);
+                            const uint32_t raw4 = (uint32_t)ram_[eoff+4] | ((uint32_t)ram_[eoff+5]<<8) | ((uint32_t)ram_[eoff+6]<<16) | ((uint32_t)ram_[eoff+7]<<24);
+                            const uint32_t raw8 = (uint32_t)ram_[eoff+8] | ((uint32_t)ram_[eoff+9]<<8) | ((uint32_t)ram_[eoff+10]<<16) | ((uint32_t)ram_[eoff+11]<<24);
+                            const uint32_t rawC = (uint32_t)ram_[eoff+12] | ((uint32_t)ram_[eoff+13]<<8) | ((uint32_t)ram_[eoff+14]<<16) | ((uint32_t)ram_[eoff+15]<<24);
+                            emu::logf(emu::LogLevel::warn, "BUS", "  Event[%u]@0x%05X: cls=0x%08X spec=0x%04X status=0x%04X (%s) raw[+0..+C]=%08X %08X %08X %08X",
+                                i, eoff, cls, spec, status, st_str, raw0, raw4, raw8, rawC);
 
                             // Check for VSync-related classes
                             if (cls == 0xF2000003u || cls == 0xF0000001u)
@@ -2815,67 +3196,19 @@ void Bus::tick(uint32_t cycles)
                         }
                         if (!found_vsync)
                         {
-                            emu::logf(emu::LogLevel::debug, "BUS", "  (No VSync events - game may use callbacks instead)");
+                            emu::logf(emu::LogLevel::warn, "BUS", "  (No VSync events - game may use callbacks instead)");
                         }
                     }
-                    emu::logf(emu::LogLevel::debug, "BUS", "===== END STUCK DUMP =====");
+                    emu::logf(emu::LogLevel::warn, "BUS", "===== END STUCK DUMP =====");
                 }
             }
 
-            // WORKAROUND: In non-HLE mode, the BIOS exception handler's VBlank
-            // event delivery doesn't always work correctly with our hardware emulation.
-            // After being stuck for 50+ VBlanks, force-mark ALL busy events as ready.
-            if (vblank_stuck_count_ >= 50)
-            {
-                // Scan event table and mark ALL busy events as ready
-                const uint32_t evt_ptr_off = 0x0120 & (ram_size_ - 1);
-                const uint32_t evt_ptr = (uint32_t)ram_[evt_ptr_off] |
-                                         ((uint32_t)ram_[evt_ptr_off + 1] << 8) |
-                                         ((uint32_t)ram_[evt_ptr_off + 2] << 16) |
-                                         ((uint32_t)ram_[evt_ptr_off + 3] << 24);
-                if (evt_ptr != 0)
-                {
-                    const uint32_t base_phys = evt_ptr & (ram_size_ - 1);
-                    for (uint32_t i = 0; i < 32; ++i)
-                    {
-                        const uint32_t eoff = base_phys + i * 0x1C;
-                        if (eoff + 0x0C > ram_size_)  // Need 0x0C bytes: status at +4, spec at +8..+B
-                            break;
-
-                        const uint32_t st_off = eoff + 0x04;
-                        const uint32_t status = (uint32_t)ram_[st_off] |
-                                                ((uint32_t)ram_[st_off + 1] << 8) |
-                                                ((uint32_t)ram_[st_off + 2] << 16) |
-                                                ((uint32_t)ram_[st_off + 3] << 24);
-
-                        // If event is BUSY (0x2000), mark it READY (0x4000)
-                        if (status == 0x2000u)
-                        {
-                            // Read class and spec for logging (to identify which event is the key one)
-                            const uint32_t cls_off = eoff + 0x00;
-                            const uint32_t spec_off = eoff + 0x08;
-                            const uint32_t evt_class = (uint32_t)ram_[cls_off] |
-                                                       ((uint32_t)ram_[cls_off + 1] << 8) |
-                                                       ((uint32_t)ram_[cls_off + 2] << 16) |
-                                                       ((uint32_t)ram_[cls_off + 3] << 24);
-                            const uint32_t evt_spec = (uint32_t)ram_[spec_off] |
-                                                      ((uint32_t)ram_[spec_off + 1] << 8) |
-                                                      ((uint32_t)ram_[spec_off + 2] << 16) |
-                                                      ((uint32_t)ram_[spec_off + 3] << 24);
-
-                            emu::logf(emu::LogLevel::debug, "BUS",
-                                "RESCUE: Event[%u] cls=0x%08X spec=0x%04X BUSY->READY",
-                                i, evt_class, evt_spec);
-
-                            const uint32_t new_status = 0x4000u;
-                            ram_[st_off]     = (uint8_t)(new_status & 0xFF);
-                            ram_[st_off + 1] = (uint8_t)((new_status >> 8) & 0xFF);
-                            ram_[st_off + 2] = (uint8_t)((new_status >> 16) & 0xFF);
-                            ram_[st_off + 3] = (uint8_t)((new_status >> 24) & 0xFF);
-                        }
-                    }
-                }
-            }
+            // NOTE: The "rescue" workaround that force-set BUSY events to READY after
+            // 50 stuck VBlanks was REMOVED. It caused Tekken (Europe) to panic because
+            // Tekken legitimately has 50+ VBlanks with no GPU output during CD loading,
+            // causing the rescue to fire and mark all CDROM events READY (including error
+            // events spec=0x80, 0x8000), which triggered BIOS ISO reader panic at 0xBFC07EE4.
+            // Root cause: "no GPU output == stuck" is wrong during loading screens.
 
             // Workaround: some BIOS ROMs (e.g. SCPH-7502) never write I_MASK
             // to non-zero — all ROM write sites store r0. The kernel's
@@ -2883,17 +3216,23 @@ void Bus::tick(uint32_t cycles)
             // CDROM at [2]), so the exception handler works correctly once
             // IRQs are enabled. After 40 VBlanks (well past BIOS init),
             // we force I_MASK to enable the standard IRQ sources.
-            if (i_mask_ == 0)
+            //
+            // Also handles the case where BIOS Exec() sets I_MASK=0x000C
+            // (CDROM+DMA) during game loading but leaves VBlank (bit 0) disabled.
+            // Without this, the second-phase game code (SCES_000.05) stalls in
+            // WaitVSync because VBlank IRQ never fires to advance the ACFC counter.
+            // We check !(i_mask_ & 0x01) so the counter also accumulates when
+            // I_MASK is non-zero but VBlank is missing, and OR in 0x0075 to
+            // preserve any bits the BIOS already set.
+            if (!(i_mask_ & 0x01))
             {
                 ++vblank_no_mask_count_;
                 if (vblank_no_mask_count_ >= 40)
                 {
-                    // Enable standard IRQ sources, including CDROM.
-                    // Note: earlier bring-up versions avoided CDROM IRQ due to
-                    // re-entrancy concerns in the BIOS handler; we now prefer
-                    // correctness so BIOS CD boot can work.
-                    i_mask_ = 0x0075; // VBlank(0) | CDROM(2) | TMR0(4) | TMR1(5) | TMR2(6)
-                    emu::logf(emu::LogLevel::info, "BUS", "Auto-enable I_MASK=0x%04X after %u VBlanks", (unsigned)i_mask_, (unsigned)vblank_no_mask_count_);
+                    // OR in standard IRQ sources so we don't clobber bits BIOS set
+                    // (e.g. DMA bit 3 that was already present in 0x000C).
+                    i_mask_ |= 0x0075; // VBlank(0) | CDROM(2) | TMR0(4) | TMR1(5) | TMR2(6)
+                    emu::logf(emu::LogLevel::info, "BUS", "Auto-enable I_MASK=0x%04X after %u VBlanks (VBlank bit was missing)", (unsigned)i_mask_, (unsigned)vblank_no_mask_count_);
                 }
             }
             else
@@ -2907,6 +3246,18 @@ void Bus::tick(uint32_t cycles)
     {
         cdrom_->tick(cycles);
 
+        // DMA3 DREQ gating: if DMA3 was deferred (FIFO was empty at trigger time),
+        // check if the FIFO is now populated (INT1 fired and try_fill_data_fifo ran).
+        // If so, execute the deferred transfer now.
+        if (dma3_pending_ && !cdrom_->is_fifo_empty())
+        {
+            dma3_pending_ = 0;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "DMA3 deferred exec: madr=0x%08X bcr=0x%08X (FIFO now ready)",
+                dma_[3].madr, dma_[3].bcr);
+            exec_dma3_transfer();
+        }
+
         // CDROM IRQ edge detection is now done in check_cdrom_irq_edge() which
         // is called after every CDROM register access. This ensures I_STAT bit 2
         // is set before the game can poll the CDROM for the IRQ type.
@@ -2914,10 +3265,12 @@ void Bus::tick(uint32_t cycles)
         check_cdrom_irq_edge();
     }
 
-    // If BIOS never enables IRQs (I_MASK stays 0), it can hang forever waiting on events.
-    // Force-enable a minimal mask after some time has passed, even if VBlank is not reached
-    // due to host throttling (e.g. UE5 time budget).
-    if (i_mask_ == 0)
+    // If VBlank IRQ is not enabled in I_MASK, the game can stall indefinitely in
+    // WaitVSync. This covers both the "BIOS never writes I_MASK" case (stays 0)
+    // and the "BIOS Exec() set I_MASK=0x000C for loading but left VBlank off" case.
+    // Force-enable a minimal mask after some time has passed, even if VBlank is not
+    // reached due to host throttling (e.g. UE5 time budget).
+    if (!(i_mask_ & 0x01))
     {
         if (no_mask_cycles_ < 0xFFFFFFFFu - cycles)
             no_mask_cycles_ += cycles;
@@ -2926,8 +3279,8 @@ void Bus::tick(uint32_t cycles)
 
         if (no_mask_cycles_ >= kForceMaskAfterCycles)
         {
-            i_mask_ = 0x0075; // VBlank(0) | CDROM(2) | TMR0(4) | TMR1(5) | TMR2(6)
-            emu::logf(emu::LogLevel::info, "BUS", "Auto-enable I_MASK=0x%04X after cycles=%u (VBlanks=%u)",
+            i_mask_ |= 0x0075; // VBlank(0) | CDROM(2) | TMR0(4) | TMR1(5) | TMR2(6)
+            emu::logf(emu::LogLevel::info, "BUS", "Auto-enable I_MASK=0x%04X after cycles=%u VBlanks=%u (VBlank bit was missing)",
                 (unsigned)i_mask_, (unsigned)no_mask_cycles_, (unsigned)vblank_no_mask_count_);
         }
     }

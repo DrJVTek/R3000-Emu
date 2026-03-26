@@ -3,6 +3,7 @@
 #include "R3000GpuComponent.h"
 #include "R3000Gpu3DComponent.h"
 #include "R3000VramViewerComponent.h"
+#include "R3000VideoComponent.h"
 
 #include "Logging/LogMacros.h"
 #include "Containers/StringConv.h"
@@ -39,9 +40,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogR3000Emu, Log, All);
 // PS1 CPU clock: 33.8688 MHz
 static constexpr double kPS1CpuClock = 33868800.0;
 
-// PS1 audio: 44100 Hz, 768 CPU cycles per audio sample
-static constexpr uint32 kCyclesPerSample = 768;
-static constexpr uint32 kSampleRate = 44100;
+// PS1 audio timing (local constants used inside functions, see kCyclesPerSampleLocal below)
 
 static uint32 EffectiveBusTickBatch(bool bThreadedMode, int32 RequestedBusTickBatch)
 {
@@ -923,6 +922,15 @@ void UR3000EmuComponent::InitEmulator()
         UE_LOG(LogR3000Emu, Log, TEXT("GPU 3D connected. Shadow=%p VramTex=%p"),
             (void*)GpuShadow, Gpu3DComp_->GetMeshComponent() ? (void*)VramComp : nullptr);
         emu::logf(emu::LogLevel::info, "CORE", "GPU3D connected (shadow=%p)", (void*)GpuShadow);
+    }
+
+    // Video component — auto-detects 24-bit (MDEC FMV) mode and shows a video plane.
+    VideoComp_ = Owner ? Owner->FindComponentByClass<UR3000VideoComponent>() : nullptr;
+    if (VideoComp_ && Gpu)
+    {
+        VideoComp_->BindGpu(Gpu);
+        UE_LOG(LogR3000Emu, Log, TEXT("Video component connected"));
+        emu::logf(emu::LogLevel::info, "CORE", "VideoComponent connected");
     }
 
     // Start worker thread if threaded mode is enabled.

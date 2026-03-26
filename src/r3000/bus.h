@@ -101,6 +101,10 @@ class Bus
     void set_cpu_pc(uint32_t pc) { cpu_pc_ = pc; }
     uint32_t cpu_pc() const { return cpu_pc_; }
 
+    // CPU COP0 exception state for stuck-detection dump
+    void set_cpu_exc_state(uint32_t epc, uint32_t cause) { cpu_epc_ = epc; cpu_cause_ = cause; }
+
+
     // Controller input: set pad button state (active-low, 0=pressed, 1=released).
     // Uses a GLOBAL atomic to avoid Hot Reload class-layout mismatches in UE5.
     // Called from UE5 game thread, read by emulator worker thread.
@@ -177,6 +181,9 @@ class Bus
 
   private:
     void dma_finish(int ch);
+    // Execute the DMA3 (CDROM→RAM) transfer using current dma_[3].madr/bcr.
+    // Called directly when FIFO is ready, or deferred when FIFO was empty at trigger time.
+    void exec_dma3_transfer();
     bool is_in_ram(uint32_t addr, uint32_t size) const;
     bool is_in_range(uint32_t addr, uint32_t base, uint32_t size, uint32_t access_size) const;
     void log_mem(const char* op, uint32_t addr, uint32_t v) const;
@@ -325,9 +332,11 @@ class Bus
     uint32_t dicr_{0};
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
+    // DMA3 DREQ gating: if CDROM FIFO is empty when DMA3 starts, defer until FIFO fills.
+    uint8_t dma3_pending_{0};
     mdec::Mdec* mdec_{nullptr};     // Real MDEC decoder (owned by Core)
-    uint32_t vblank_no_mask_count_{0}; // VBlank frames with I_MASK=0 (for auto-enable workaround)
-    uint32_t no_mask_cycles_{0}; // Cycles accumulated with I_MASK=0 (for auto-enable workaround)
+    uint32_t vblank_no_mask_count_{0}; // VBlank frames where VBlank bit (0x01) is absent from I_MASK (for auto-enable workaround)
+    uint32_t no_mask_cycles_{0}; // Cycles accumulated where VBlank bit (0x01) is absent from I_MASK (for auto-enable workaround)
 
     // VBlank stuck detection - tracks when we're stuck in VSync loop
     uint32_t vblank_total_count_{0};    // Total VBlanks since boot
@@ -368,6 +377,8 @@ class Bus
     flog::Clock trace_clock_{};
     int trace_has_clock_{0};
     uint32_t cpu_pc_{0};
+    uint32_t cpu_epc_{0};
+    uint32_t cpu_cause_{0};
     uint32_t watch_ram_u32_phys_{0};
     int watch_ram_u32_enabled_{0};
     uint32_t watch_ram_u32_last_{0};

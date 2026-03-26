@@ -344,6 +344,27 @@ void Mdec::decode_macroblock()
         yuv_to_rgb(8, 8, blocks_[0].data(), blocks_[1].data(), blocks_[5].data());
     }
 
+    // Diagnostic: dump first 3 decoded macroblocks (pixel corner samples)
+    {
+        static uint32_t mb_log = 0;
+        if (mb_log < 3)
+        {
+            ++mb_log;
+            // Log Cr/Cb DC values and first pixel RGB
+            int16_t cr_dc = blocks_[0][0];
+            int16_t cb_dc = blocks_[1][0];
+            int16_t y_dc  = blocks_[2][0];
+            uint32_t px0  = block_rgb_[0];
+            uint32_t px1  = block_rgb_[1];
+            uint8_t  r0   = (uint8_t)(px0 & 0xFF);
+            uint8_t  g0   = (uint8_t)((px0 >> 8) & 0xFF);
+            uint8_t  b0   = (uint8_t)((px0 >> 16) & 0xFF);
+            emu::logf(emu::LogLevel::warn, "MDEC",
+                "MB#%u depth=%u Cr_dc=%d Cb_dc=%d Y_dc=%d px[0]=(%u,%u,%u) px[1]=0x%06X",
+                mb_log, output_depth_, cr_dc, cb_dc, y_dc, r0, g0, b0, px1 & 0xFFFFFF);
+        }
+    }
+
     copy_out_block();
 
     // Reset for next macroblock
