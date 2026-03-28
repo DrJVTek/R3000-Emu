@@ -985,43 +985,27 @@ uint8_t Cdrom::status_reg() const
     return (uint8_t)(idx | prm_empty | prm_wrd | resp_not_empty | data_not_empty | busy);
 }
 
-void Cdrom::try_redeliver_sector()
+void Cdrom::deliver_cached_sector()
 {
-    // Called after DMA3 completes and FIFO is empty.
-    // If continuous reading is active and we have a pending sector,
-    // immediately fill the FIFO and fire INT1 so the BIOS callback
-    // can process the next sector without waiting for the next tick.
-    if (!reading_active_ || !disc_)
+    // Called by Bus after DMA3 empties the FIFO.
+    // Loads the next cached sector into FIFO and fires INT1.
+    if (cache_read_ >= stream_cache_.size())
         return;
-    if ((irq_flags_ & 0x1Fu) != 0)
-        return; // previous IRQ not yet acknowledged
-    if (data_r_ != data_w_)
-        return; // FIFO not empty
 
-    // If there's a pending INT1 that hasn't been delivered yet, deliver it now
-    if (pending_irq_type_ == 0x01 && now_cycles_ >= pending_irq_due_cycle_)
+    // Load cached sector into FIFO
+    auto& cs = stream_cache_[cache_read_++];
+    push_data(cs.data, cs.size);
+    data_ready_pending_ = 1;
+    want_data_ = 1;
+
+    // Fire INT1 (data-ready) if no pending IRQ
+    if ((irq_flags_ & 0x1Fu) == 0)
     {
-        // Simulate the INT1 delivery: set data_ready, fill FIFO, fire IRQ
-        data_ready_pending_ = 1;
-        data_lba_ = read_lba_;
-        head_lba_ = read_lba_;
-        try_fill_data_fifo();
-
-        // Deliver the IRQ
         clear_resp();
         push_resp(status_);
         irq_flags_ = 0x01; // INT1
         if (irq_callback_)
             irq_callback_(irq_line(), irq_callback_user_);
-
-        // Schedule next sector
-        read_lba_++;
-        clear_data();
-        const uint32_t next_delay = read_sector_ticks();
-        pending_irq_type_ = 0x01;
-        pending_irq_reason_ = 0xFFu;
-        pending_irq_live_status_ = 1;
-        arm_pending_irq_after(next_delay);
     }
 }
 
@@ -1053,9 +1037,7 @@ void Cdrom::try_fill_data_fifo()
     if (!want_data_)
         return;
     if (data_r_ != data_w_)
-    {
-        return; // FIFO has unread data — don't overwrite (game will DMA3 it)
-    }
+        return; // FIFO has unread data
 
     const uint32_t data_lba = data_lba_;
     emu::logf(emu::LogLevel::debug, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
@@ -1981,6 +1963,7 @@ void Cdrom::exec_command(uint8_t cmd)
             read_pending_irq1_ = 1;
             reading_active_ = 1;
             streaming_mode_ = (cmd == 0x1Bu) ? 1u : 0u; // ReadS = streaming
+            if (streaming_mode_) { stream_cache_.clear(); cache_read_ = 0; } // reset cache
             read_lba_ = loc_lba_;
             data_lba_ = read_lba_;
             // First response acknowledges the command with the pre-read drive state.
@@ -3163,6 +3146,32 @@ void Cdrom::tick(uint32_t cycles)
                         "ReadN advance STOPPED: LBA=%u+1 >= disc_end=%u", read_lba_, disc_end);
                     stop_reading_with_error(0x80); // ERROR_REASON_NOT_READY
                     return; // Don't deliver INT1, we sent INT5 instead
+                }
+
+                // In streaming mode: cache the current sector before advancing.
+                // This ensures ZERO sector loss regardless of CPU/MDEC speed.
+                if (streaming_mode_ && disc_)
+                {
+                    uint8_t raw[2352]; uint32_t raw_ss = 0;
+                    if (disc_->read_sector_raw(read_lba_, raw, sizeof(raw), &raw_ss) && raw_ss >= 2352)
+                    {
+                        // XA audio filter: skip audio+realtime sectors
+                        const bool xa_audio = (mode_ & 0x40u) && raw[15] == 2 &&
+                                              (raw[18] & 0x04u) && (raw[18] & 0x40u);
+                        if (!xa_audio)
+                        {
+                            const bool ws = (mode_ & 0x20u) != 0;
+                            const uint16_t sz = ws ? 2340u : 2048u;
+                            const uint32_t off = ws ? 12u : (raw[15] == 2 ? 24u : 16u);
+                            if (stream_cache_.size() < kStreamCacheMax)
+                            {
+                                stream_cache_.push_back({});
+                                auto& cs = stream_cache_.back();
+                                std::memcpy(cs.data, raw + off, sz);
+                                cs.size = sz;
+                            }
+                        }
+                    }
                 }
 
                 read_lba_++;
