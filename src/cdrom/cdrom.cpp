@@ -1019,26 +1019,43 @@ void Cdrom::try_fill_data_fifo()
     emu::logf(emu::LogLevel::debug, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
         (unsigned)data_lba, (void*)disc_, (int)want_data_, (int)data_ready_pending_, data_r_, data_w_);
 
+    // Read raw sector to capture header + subheader (needed by GetLocL)
+    // and to push the correct data format to FIFO.
+    uint8_t raw[2352];
+    uint32_t raw_ss = 0;
+    if (!disc_->read_sector_raw(data_lba, raw, sizeof(raw), &raw_ss) || raw_ss < 2352)
+    {
+        emu::logf(emu::LogLevel::warn, "CD",
+            "try_fill: LBA=%u raw read failed (ss=%u)", data_lba, raw_ss);
+        return;
+    }
+
+    // Capture sector header (mm,ss,ff,mode) and subheader (file,channel,submode,coding)
+    // from raw sector offsets 12-15 and 16-19. Used by GetLocL command.
+    std::memcpy(last_sector_header_, raw + 12, 4);
+    std::memcpy(last_sector_subheader_, raw + 16, 4);
+    last_sector_header_valid_ = 1;
+
+    // XA-ADPCM filter: if XA enabled (mode bit 6) and sector is realtime+audio,
+    // send to SPU instead of data FIFO (skip delivery to CPU).
+    if ((mode_ & 0x40u) && last_sector_header_[3] == 2) // Mode 2 sector + XA enable
+    {
+        const uint8_t submode = last_sector_subheader_[2];
+        if ((submode & 0x04u) && (submode & 0x40u)) // audio + realtime
+        {
+            // XA audio sector — don't deliver to CPU, just advance
+            // (SPU XA decode would go here)
+            return;
+        }
+    }
+
     // Whole-sector mode (SetMode bit 5): push 2340 bytes (raw minus sync)
     // Normal mode: push 2048 bytes (user data only)
-    // Matches DuckStation: RAW_SECTOR_OUTPUT_SIZE=2340, DATA_SECTOR_OUTPUT_SIZE=2048
     const bool whole_sector = (mode_ & 0x20u) != 0;
 
     if (whole_sector)
     {
-        uint8_t raw[2352];
-        uint32_t raw_ss = 0;
-        if (disc_->read_sector_raw(data_lba, raw, sizeof(raw), &raw_ss) && raw_ss >= 2352)
-        {
-            // Push 2340 bytes: everything after the 12-byte sync header
-            push_data(raw + 12, 2340);
-        }
-        else
-        {
-            emu::logf(emu::LogLevel::warn, "CD",
-                "try_fill WHOLE: LBA=%u raw read failed (ss=%u)", data_lba, raw_ss);
-            return;
-        }
+        push_data(raw + 12, 2340);
     }
     else
     {
@@ -2063,12 +2080,26 @@ void Cdrom::exec_command(uint8_t cmd)
         }
         case 0x10: // GetLocL
         {
-            // Très simplifié: renvoyer LBA en BCD (mm ss ff) basé sur loc_msf_
-            push_resp(status_);
-            push_resp(loc_msf_[0]);
-            push_resp(loc_msf_[1]);
-            push_resp(loc_msf_[2]);
-            queue_cmd_irq(0x03);
+            // Returns header (mm,ss,ff,mode) + subheader (file,channel,submode,coding)
+            // of the last sector read. 8 bytes total. Matches DuckStation.
+            if (!last_sector_header_valid_)
+            {
+                push_resp(status_ | 0x01u);
+                push_resp(0x80u); // NOT_READY
+                queue_cmd_irq(0x05); // INT5 error
+            }
+            else
+            {
+                push_resp(last_sector_header_[0]);  // mm
+                push_resp(last_sector_header_[1]);  // ss
+                push_resp(last_sector_header_[2]);  // ff
+                push_resp(last_sector_header_[3]);  // mode
+                push_resp(last_sector_subheader_[0]); // file
+                push_resp(last_sector_subheader_[1]); // channel
+                push_resp(last_sector_subheader_[2]); // submode
+                push_resp(last_sector_subheader_[3]); // coding
+                queue_cmd_irq(0x03); // INT3 ACK
+            }
             break;
         }
         case 0x11: // GetLocP

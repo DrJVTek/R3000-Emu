@@ -256,6 +256,13 @@ class Cdrom
     uint16_t data_r_{0};
     uint16_t data_w_{0};
 
+    // Last sector header + subheader (captured on each sector read, used by GetLocL)
+    // header: mm, ss, ff, mode (4 bytes from raw sector offset 12)
+    // subheader: file, channel, submode, coding (4 bytes from raw sector offset 16)
+    uint8_t last_sector_header_[4]{};
+    uint8_t last_sector_subheader_[4]{};
+    uint8_t last_sector_header_valid_{0};
+
     // Etat lecture
     uint8_t loc_msf_[3]{};
     uint32_t loc_lba_{0};            // SetLoc target LBA requested by software
