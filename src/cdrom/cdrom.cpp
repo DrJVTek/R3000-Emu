@@ -1053,7 +1053,9 @@ void Cdrom::try_fill_data_fifo()
     if (!want_data_)
         return;
     if (data_r_ != data_w_)
-        return; // already loaded
+    {
+        return; // FIFO has unread data — don't overwrite (game will DMA3 it)
+    }
 
     const uint32_t data_lba = data_lba_;
     emu::logf(emu::LogLevel::debug, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
@@ -1978,6 +1980,7 @@ void Cdrom::exec_command(uint8_t cmd)
             data_ready_pending_ = 0;
             read_pending_irq1_ = 1;
             reading_active_ = 1;
+            streaming_mode_ = (cmd == 0x1Bu) ? 1u : 0u; // ReadS = streaming
             read_lba_ = loc_lba_;
             data_lba_ = read_lba_;
             // First response acknowledges the command with the pre-read drive state.

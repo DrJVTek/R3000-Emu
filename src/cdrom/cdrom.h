@@ -275,6 +275,7 @@ class Cdrom
     uint8_t data_ready_pending_{0};  // data can be loaded when want_data=1
     uint8_t async_stat_pending_{0};  // async status INT1 pending after certain commands
     uint8_t reading_active_{0};      // ReadN/ReadS continuous reading in progress
+    uint8_t streaming_mode_{0};      // 1 if ReadS (streaming), 0 if ReadN (normal)
 
     // Command queue (quand IRQ flags non ack ou Busy=1).
     uint8_t queued_cmd_{0};
