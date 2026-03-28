@@ -1040,6 +1040,10 @@ void Cdrom::try_fill_data_fifo()
         return;
     if (!want_data_)
         return;
+    // In streaming mode with cache active: don't write to FIFO here.
+    // All sectors come from deliver_cached_sector via deferred timer.
+    if (streaming_mode_ && cache_read_ > 0)
+        return;
     if (data_r_ != data_w_)
         return; // FIFO has unread data
 
