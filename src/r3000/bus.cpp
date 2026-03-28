@@ -2301,15 +2301,18 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         dicr_ = (dicr_ & ~wr_mask) | (v & wr_mask);
         dicr_ &= ~ack_mask; // acknowledge flags
 
-        // Recompute master flag (bit 31): set if any (flag & enable) channel is active and master enable is set
+        // Recompute master flag: force_irq || (master_enable && ANY_flag_set)
         const uint32_t flags   = (dicr_ >> 24) & 0x7Fu;
-        const uint32_t enables = (dicr_ >> 16) & 0x7Fu;
         const int force = (dicr_ >> 15) & 1;
         const int master_en = (dicr_ >> 23) & 1;
-        if (master_en && (force || (flags & enables)))
+        const int old_mf = (dicr_ >> 31) & 1;
+        if (force || (master_en && flags))
             dicr_ |= (1u << 31);
         else
             dicr_ &= ~(1u << 31);
+        // Edge-trigger I_STAT bit 3 on 0→1 master flag transition
+        if (!(old_mf) && (dicr_ & (1u << 31)))
+            i_stat_ |= (1u << 3);
         return true;
     }
 
@@ -2617,28 +2620,28 @@ void Bus::dma_finish(int ch)
     dicr_ |= (1u << (24 + ch));
 
     // Recompute master flag (bit 31)
+    // DuckStation: master_flag = force_irq || (master_enable && ANY_flag_set)
+    // Note: master flag triggers on ANY flag, not just enabled ones.
     const uint32_t flags   = (dicr_ >> 24) & 0x7Fu;
-    const uint32_t enables = (dicr_ >> 16) & 0x7Fu;
     const int force = (dicr_ >> 15) & 1;
     const int master_en = (dicr_ >> 23) & 1;
     const int old_master_flag = (dicr_ >> 31) & 1;
-    if (master_en && (force || (flags & enables)))
+    if (force || (master_en && flags))
         dicr_ |= (1u << 31);
     else
         dicr_ &= ~(1u << 31);
     const int new_master_flag = (dicr_ >> 31) & 1;
 
-    // Raise DMA IRQ (I_STAT bit 3) when DICR master flag is set.
-    // The BIOS uses DMA IRQs during CD boot (e.g., sector transfers).
-    if (dicr_ & (1u << 31))
+    // Raise DMA IRQ (I_STAT bit 3) on 0→1 transition of master flag.
+    if (!old_master_flag && new_master_flag)
         i_stat_ |= (1u << 3);
 
     // Debug: log DMA completion state for channels 3 and 4 (CDROM/SPU)
     if (ch == 3 || ch == 4)
     {
         emu::logf(emu::LogLevel::debug, "BUS",
-            "DMA%d finish: DICR=0x%08X flags=0x%02X en=0x%02X master_en=%d force=%d flag_set=%d irq_fired=%d",
-            ch, dicr_, flags, enables, master_en, force, new_master_flag, (dicr_ & (1u << 31)) ? 1 : 0);
+            "DMA%d finish: DICR=0x%08X flags=0x%02X master_en=%d force=%d flag_set=%d irq_fired=%d",
+            ch, dicr_, flags, master_en, force, new_master_flag, (!old_master_flag && new_master_flag) ? 1 : 0);
     }
 }
 

@@ -117,6 +117,12 @@ void Mdec::write_reg(uint32_t addr, uint32_t val)
     if (addr == 0x1F80'1824u)
     {
         // Control register
+        static uint32_t ctrl_log = 0;
+        if (ctrl_log < 20u)
+            emu::logf(emu::LogLevel::warn, "MDEC",
+                "CTRL write 0x%08X reset=%d dma_in=%d dma_out=%d fifo_out=%zu/%zu (#%u)",
+                val, (val >> 31) & 1, (val >> 30) & 1, (val >> 29) & 1,
+                fifo_out_pos_, fifo_out_.size(), ++ctrl_log);
         if (val & 0x8000'0000u)
             reset();
         enable_dma_in_ = (val & (1u << 30)) != 0;
