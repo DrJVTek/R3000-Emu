@@ -985,28 +985,43 @@ uint8_t Cdrom::status_reg() const
     return (uint8_t)(idx | prm_empty | prm_wrd | resp_not_empty | data_not_empty | busy);
 }
 
-void Cdrom::promote_ring_sector()
+void Cdrom::try_redeliver_sector()
 {
-    // Called by Bus after DMA3 completes. If FIFO is empty and the ring
-    // has sectors, promote the next one to FIFO and fire INT1.
+    // Called after DMA3 completes and FIFO is empty.
+    // If continuous reading is active and we have a pending sector,
+    // immediately fill the FIFO and fire INT1 so the BIOS callback
+    // can process the next sector without waiting for the next tick.
+    if (!reading_active_ || !disc_)
+        return;
+    if ((irq_flags_ & 0x1Fu) != 0)
+        return; // previous IRQ not yet acknowledged
     if (data_r_ != data_w_)
-        return; // FIFO still has data
-    if (ring_count_ == 0)
-        return; // nothing to promote
+        return; // FIFO not empty
 
-    // Promote: set data_ready + want_data so try_fill picks up from ring
-    data_ready_pending_ = 1;
-    want_data_ = 1;
-    try_fill_data_fifo(); // will enter the "promote from ring" path
-
-    // Fire INT1 for the promoted sector
-    if ((irq_flags_ & 0x1Fu) == 0)
+    // If there's a pending INT1 that hasn't been delivered yet, deliver it now
+    if (pending_irq_type_ == 0x01 && now_cycles_ >= pending_irq_due_cycle_)
     {
+        // Simulate the INT1 delivery: set data_ready, fill FIFO, fire IRQ
+        data_ready_pending_ = 1;
+        data_lba_ = read_lba_;
+        head_lba_ = read_lba_;
+        try_fill_data_fifo();
+
+        // Deliver the IRQ
         clear_resp();
         push_resp(status_);
-        irq_flags_ = 0x01; // INT1 data-ready
+        irq_flags_ = 0x01; // INT1
         if (irq_callback_)
             irq_callback_(irq_line(), irq_callback_user_);
+
+        // Schedule next sector
+        read_lba_++;
+        clear_data();
+        const uint32_t next_delay = read_sector_ticks();
+        pending_irq_type_ = 0x01;
+        pending_irq_reason_ = 0xFFu;
+        pending_irq_live_status_ = 1;
+        arm_pending_irq_after(next_delay);
     }
 }
 
@@ -1039,42 +1054,7 @@ void Cdrom::try_fill_data_fifo()
         return;
     if (data_r_ != data_w_)
     {
-        // FIFO busy: store sector in write ring for later promotion.
-        if (reading_active_ && ring_count_ < kSectorRingSize && disc_)
-        {
-            uint8_t raw[2352]; uint32_t raw_ss = 0;
-            if (disc_->read_sector_raw(data_lba_, raw, sizeof(raw), &raw_ss) && raw_ss >= 2352)
-            {
-                // Capture header/subheader
-                std::memcpy(last_sector_header_, raw + 12, 4);
-                std::memcpy(last_sector_subheader_, raw + 16, 4);
-                last_sector_header_valid_ = 1;
-                // XA audio filter
-                if ((mode_ & 0x40u) && raw[15] == 2 && (raw[18] & 0x04u) && (raw[18] & 0x40u))
-                    return;
-                const bool ws = (mode_ & 0x20u) != 0;
-                const uint16_t sz = ws ? 2340u : 2048u;
-                const uint32_t off = ws ? 12u : (raw[15] == 2 ? 24u : 16u);
-                auto& rs = sector_ring_[ring_tail_];
-                std::memcpy(rs.data, raw + off, sz);
-                rs.size = sz;
-                ring_tail_ = (ring_tail_ + 1) % kSectorRingSize;
-                ring_count_++;
-            }
-        }
-        return;
-    }
-
-    // Promote from ring if available
-    if (ring_count_ > 0)
-    {
-        auto& rs = sector_ring_[ring_head_];
-        push_data(rs.data, rs.size);
-        rs.size = 0;
-        ring_head_ = (ring_head_ + 1) % kSectorRingSize;
-        ring_count_--;
-        data_ready_pending_ = 1;
-        return;
+        return; // FIFO has unread data — don't overwrite (game will DMA3 it)
     }
 
     const uint32_t data_lba = data_lba_;
@@ -3186,10 +3166,7 @@ void Cdrom::tick(uint32_t cycles)
                 }
 
                 read_lba_++;
-                // For streaming (ReadS), don't clear FIFO — the ring handles
-                // buffering. For normal reads (ReadN), clear for next sector.
-                if (!streaming_mode_)
-                    clear_data();
+                clear_data();
                 // Do NOT clear want_data_: on real hardware the Request Register
                 // is software-written and the drive never clears it between sectors.
                 // Clearing it here broke STR streaming (XA interleaved sectors).

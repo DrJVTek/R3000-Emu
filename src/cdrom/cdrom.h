@@ -75,9 +75,7 @@ class Cdrom
     // Niveau IRQ CDROM (utilisé par le bus pour latch IRQ2 dans I_STAT sur front montant).
     int irq_line() const;
     bool is_reading_active() const { return reading_active_ != 0; }
-
-    // Called by Bus after DMA3 completes. Promotes next ring sector to FIFO.
-    void promote_ring_sector();
+    void try_redeliver_sector();
     uint8_t irq_flags_raw() const { return irq_flags_; }
     uint8_t irq_enable_raw() const { return irq_enable_; }
     uint8_t debug_index_raw() const { return index_; }
@@ -256,19 +254,9 @@ class Cdrom
     uint8_t resp_r_{0};
     uint8_t resp_w_{0};
 
-    // Read FIFO: the game/DMA3 reads from here. Unchanged from original.
     uint8_t data_fifo_[4096]{};
     uint16_t data_r_{0};
     uint16_t data_w_{0};
-
-    // Write ring: sectors that arrive while FIFO is busy.
-    // When FIFO empties, next sector is copied from ring to FIFO.
-    static constexpr int kSectorRingSize = 8;
-    struct RingSector { uint8_t data[2352]{}; uint16_t size{0}; };
-    RingSector sector_ring_[kSectorRingSize]{};
-    uint8_t ring_head_{0}; // next to read (promote to FIFO)
-    uint8_t ring_tail_{0}; // next to write
-    uint8_t ring_count_{0};
 
     // Last sector header + subheader (captured on each sector read, used by GetLocL)
     // header: mm, ss, ff, mode (4 bytes from raw sector offset 12)
