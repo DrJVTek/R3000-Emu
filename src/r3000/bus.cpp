@@ -1977,21 +1977,17 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         else
                         {
                             // DMA1: MDEC → RAM (decoded pixels out)
+                            // Simulate DMA transfer time: tick CDROM so streaming
+                            // sectors continue arriving during MDEC decode.
+                            const uint32_t dma1_cycles = words; // ~1 cycle/word
+                            if (cdrom_)
+                                cdrom_->tick(dma1_cycles);
+                            check_cdrom_irq_edge();
+
                             std::vector<uint32_t> buf(words);
                             mdec_->dma_read(buf.data(), words);
                             for (uint32_t i = 0; i < words; ++i)
                             {
-                                if (ma >= 0xE000u && ma < 0xF000u)
-                                {
-                                    static uint32_t dma1_evt = 0;
-                                    if (dma1_evt < 8u)
-                                    {
-                                        ++dma1_evt;
-                                        emu::logf(emu::LogLevel::warn, "DMA1_EVT",
-                                            "[%u] phys=0x%05X val=0x%08X madr=0x%08X word=%u",
-                                            dma1_evt, ma, buf[i], dma_[ch].madr, i);
-                                    }
-                                }
                                 ram_[ma]     = (uint8_t)(buf[i]);
                                 ram_[ma + 1] = (uint8_t)(buf[i] >> 8);
                                 ram_[ma + 2] = (uint8_t)(buf[i] >> 16);

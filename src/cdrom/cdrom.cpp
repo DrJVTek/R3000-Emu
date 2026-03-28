@@ -3144,6 +3144,31 @@ void Cdrom::tick(uint32_t cycles)
             // Commit data-ready state only when INT1 is actually delivered.
             if (pending_irq_type_ == 0x01)
             {
+                // XA-ADPCM filter: audio+realtime sectors go to SPU, NOT to CPU.
+                // Don't deliver INT1 for these — just schedule next sector.
+                // Matches DuckStation ProcessDataSector: audio+realtime → ProcessXAADPCMSector, return.
+                if ((mode_ & 0x40u) && disc_) // XA enable
+                {
+                    uint8_t raw_hdr[24];
+                    uint32_t ss = 0;
+                    if (disc_->read_sector_raw(read_lba_, raw_hdr, sizeof(raw_hdr), &ss) && ss >= 24)
+                    {
+                        const uint8_t sec_mode = raw_hdr[15];
+                        const uint8_t submode  = raw_hdr[18];
+                        if (sec_mode == 2 && (submode & 0x04u) && (submode & 0x40u))
+                        {
+                            // XA audio+realtime sector: skip INT1, schedule next sector
+                            pending_irq_type_ = 0;
+                            const uint32_t next_delay = read_sector_ticks();
+                            pending_irq_type_ = 0x01;
+                            pending_irq_reason_ = 0xFFu; // continuous read marker
+                            pending_irq_live_status_ = 1;
+                            arm_pending_irq_after(next_delay);
+                            return; // don't deliver INT1 to CPU
+                        }
+                    }
+                }
+
                 data_ready_pending_ = 1;
                 data_lba_ = read_lba_;
                 if (pending_read_seek_commit_)
