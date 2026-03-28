@@ -2605,16 +2605,9 @@ void Bus::exec_dma3_transfer()
     dma_finish(3);
     cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
 
-    // After DMA3 completes and FIFO is empty, tick the CDROM to allow
-    // the next pending INT1 to deliver immediately. This prevents sector
-    // loss during STR streaming by ensuring the next sector fills the FIFO
-    // before the BIOS callback returns.
-    if (cdrom_->is_fifo_empty() && cdrom_->is_reading_active())
-    {
-        // Tick enough cycles for any pending INT1 to fire
-        cdrom_->tick(1);
-        check_cdrom_irq_edge();
-    }
+    // Promote next sector from ring to FIFO if available.
+    cdrom_->promote_ring_sector();
+    check_cdrom_irq_edge();
 }
 
 // ================== DMA completion ==================
