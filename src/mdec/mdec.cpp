@@ -20,12 +20,13 @@ const uint8_t Mdec::s_zagzig[64] = {
     53, 60, 61, 54, 47, 55, 62, 63
 };
 
-// Sign-extend N-bit value to int32
+// Sign-extend N-bit value to int32 (truncate to N bits first, then sign-extend)
 template <int N>
 static int32_t sign_extend(int32_t v)
 {
     const int32_t mask = 1 << (N - 1);
-    return (v ^ mask) - mask;
+    v &= (1 << N) - 1;     // mask to N bits (unsigned)
+    return (v ^ mask) - mask; // sign-extend
 }
 
 static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
