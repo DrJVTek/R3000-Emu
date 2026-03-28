@@ -992,6 +992,10 @@ void Cdrom::deliver_cached_sector()
     if (cache_read_ >= stream_cache_.size())
         return;
 
+    // Clear FIFO if it has stale data from a normal INT1
+    if (data_r_ != data_w_)
+        clear_data();
+
     // Load cached sector into FIFO
     auto& cs = stream_cache_[cache_read_++];
     push_data(cs.data, cs.size);
@@ -1963,7 +1967,28 @@ void Cdrom::exec_command(uint8_t cmd)
             read_pending_irq1_ = 1;
             reading_active_ = 1;
             streaming_mode_ = (cmd == 0x1Bu) ? 1u : 0u; // ReadS = streaming
-            if (streaming_mode_) { stream_cache_.clear(); cache_read_ = 0; } // reset cache
+            stream_cache_.clear();
+            cache_read_ = 0;
+            if (streaming_mode_ && disc_)
+            {
+                // Pre-cache sectors for streaming: zero loss regardless of timing
+                const uint32_t start = loc_lba_ + 1; // first sector delivered normally
+                const uint32_t end = disc_->disc_sectors;
+                const uint32_t count = std::min((uint32_t)kStreamCacheMax, end > start ? end - start : 0u);
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    uint8_t raw[2352]; uint32_t raw_ss = 0;
+                    if (!disc_->read_sector_raw(start + i, raw, sizeof(raw), &raw_ss) || raw_ss < 2352)
+                        break;
+                    if ((mode_ & 0x40u) && raw[15] == 2 && (raw[18] & 0x04u) && (raw[18] & 0x40u))
+                        continue; // skip XA audio
+                    const uint16_t sz = (mode_ & 0x20u) ? 2340u : 2048u;
+                    const uint32_t off = (mode_ & 0x20u) ? 12u : (raw[15] == 2 ? 24u : 16u);
+                    stream_cache_.push_back({});
+                    std::memcpy(stream_cache_.back().data, raw + off, sz);
+                    stream_cache_.back().size = sz;
+                }
+            }
             read_lba_ = loc_lba_;
             data_lba_ = read_lba_;
             // First response acknowledges the command with the pre-read drive state.

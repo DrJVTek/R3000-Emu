@@ -332,6 +332,7 @@ class Bus
     uint32_t dicr_{0};
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
+    uint32_t cdrom_deferred_irq_cycles_{0}; // deferred INT1 after DMA3 (5000 cycles)
     // DMA3 DREQ gating: if CDROM FIFO is empty when DMA3 starts, defer until FIFO fills.
     uint8_t dma3_pending_{0};
     mdec::Mdec* mdec_{nullptr};     // Real MDEC decoder (owned by Core)

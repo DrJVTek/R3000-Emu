@@ -78,6 +78,8 @@ class Cdrom
     bool is_reading_active() const { return reading_active_ != 0; }
     bool has_cached_sectors() const { return cache_read_ < stream_cache_.size(); }
     void deliver_cached_sector();
+    uint32_t debug_cache_read() const { return cache_read_; }
+    size_t debug_cache_size() const { return stream_cache_.size(); }
     uint8_t irq_flags_raw() const { return irq_flags_; }
     uint8_t irq_enable_raw() const { return irq_enable_; }
     uint8_t debug_index_raw() const { return index_; }
