@@ -74,6 +74,8 @@ class Cdrom
 
     // Niveau IRQ CDROM (utilisé par le bus pour latch IRQ2 dans I_STAT sur front montant).
     int irq_line() const;
+    bool is_reading_active() const { return reading_active_ != 0; }
+    void try_redeliver_sector();
     uint8_t irq_flags_raw() const { return irq_flags_; }
     uint8_t irq_enable_raw() const { return irq_enable_; }
     uint8_t debug_index_raw() const { return index_; }

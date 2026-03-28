@@ -985,6 +985,46 @@ uint8_t Cdrom::status_reg() const
     return (uint8_t)(idx | prm_empty | prm_wrd | resp_not_empty | data_not_empty | busy);
 }
 
+void Cdrom::try_redeliver_sector()
+{
+    // Called after DMA3 completes and FIFO is empty.
+    // If continuous reading is active and we have a pending sector,
+    // immediately fill the FIFO and fire INT1 so the BIOS callback
+    // can process the next sector without waiting for the next tick.
+    if (!reading_active_ || !disc_)
+        return;
+    if ((irq_flags_ & 0x1Fu) != 0)
+        return; // previous IRQ not yet acknowledged
+    if (data_r_ != data_w_)
+        return; // FIFO not empty
+
+    // If there's a pending INT1 that hasn't been delivered yet, deliver it now
+    if (pending_irq_type_ == 0x01 && now_cycles_ >= pending_irq_due_cycle_)
+    {
+        // Simulate the INT1 delivery: set data_ready, fill FIFO, fire IRQ
+        data_ready_pending_ = 1;
+        data_lba_ = read_lba_;
+        head_lba_ = read_lba_;
+        try_fill_data_fifo();
+
+        // Deliver the IRQ
+        clear_resp();
+        push_resp(status_);
+        irq_flags_ = 0x01; // INT1
+        if (irq_callback_)
+            irq_callback_(irq_line(), irq_callback_user_);
+
+        // Schedule next sector
+        read_lba_++;
+        clear_data();
+        const uint32_t next_delay = read_sector_ticks();
+        pending_irq_type_ = 0x01;
+        pending_irq_reason_ = 0xFFu;
+        pending_irq_live_status_ = 1;
+        arm_pending_irq_after(next_delay);
+    }
+}
+
 int Cdrom::irq_line() const
 {
     // PSX-SPX: IRQ_Flag bits 0-2 contain a VALUE 1-7 for INT1-INT7 (not a bitmask).
@@ -3142,33 +3182,11 @@ void Cdrom::tick(uint32_t cycles)
             }
 
             // Commit data-ready state only when INT1 is actually delivered.
+            // Note: XA audio filtering is handled in try_fill_data_fifo(),
+            // NOT here. The read_lba_ has already been advanced at this point
+            // so reading it here would check the WRONG sector.
             if (pending_irq_type_ == 0x01)
             {
-                // XA-ADPCM filter: audio+realtime sectors go to SPU, NOT to CPU.
-                // Don't deliver INT1 for these — just schedule next sector.
-                // Matches DuckStation ProcessDataSector: audio+realtime → ProcessXAADPCMSector, return.
-                if ((mode_ & 0x40u) && disc_) // XA enable
-                {
-                    uint8_t raw_hdr[24];
-                    uint32_t ss = 0;
-                    if (disc_->read_sector_raw(read_lba_, raw_hdr, sizeof(raw_hdr), &ss) && ss >= 24)
-                    {
-                        const uint8_t sec_mode = raw_hdr[15];
-                        const uint8_t submode  = raw_hdr[18];
-                        if (sec_mode == 2 && (submode & 0x04u) && (submode & 0x40u))
-                        {
-                            // XA audio+realtime sector: skip INT1, schedule next sector
-                            pending_irq_type_ = 0;
-                            const uint32_t next_delay = read_sector_ticks();
-                            pending_irq_type_ = 0x01;
-                            pending_irq_reason_ = 0xFFu; // continuous read marker
-                            pending_irq_live_status_ = 1;
-                            arm_pending_irq_after(next_delay);
-                            return; // don't deliver INT1 to CPU
-                        }
-                    }
-                }
-
                 data_ready_pending_ = 1;
                 data_lba_ = read_lba_;
                 if (pending_read_seek_commit_)

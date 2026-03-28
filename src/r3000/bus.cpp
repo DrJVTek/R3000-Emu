@@ -2604,6 +2604,17 @@ void Bus::exec_dma3_transfer()
 
     dma_finish(3);
     cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
+
+    // Missed sector redeliver (matches DuckStation CheckForSectorBufferReadComplete):
+    // After the game finishes reading a sector via DMA3, if continuous reading is
+    // active and the next sector is already available, immediately fill the FIFO
+    // and signal a new INT1 so the BIOS callback runs without waiting for the
+    // next sector tick. This prevents sector loss during STR streaming.
+    if (cdrom_->is_fifo_empty() && cdrom_->is_reading_active())
+    {
+        cdrom_->try_redeliver_sector();
+        check_cdrom_irq_edge();
+    }
 }
 
 // ================== DMA completion ==================
