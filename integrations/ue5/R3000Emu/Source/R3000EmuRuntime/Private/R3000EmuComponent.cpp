@@ -24,6 +24,7 @@
 #include "r3000/cpu.h"
 #include "audio/spu.h"
 #include "loader/loader.h"
+#include "log/async_log.h"
 #include "log/filelog.h"
 #include "util/file_util.h"
 
@@ -307,16 +308,18 @@ static void UERlogCallback(rlog::Level Level, rlog::Category /*Cat*/, const char
     }
 }
 
-// emu::logf callback → UE_LOG + optional file sinks per tag.
+// emu::logf async output — called from the async_log consumer thread.
+// UE_LOG is thread-safe.  File writes happen on the log thread, not the emu thread.
 // User pointer is EmuLogFiles*.
-static void UELogCallback(emu::LogLevel Level, const char* Tag, const char* Msg, void* User)
+static void UEAsyncLogOutput(uint64_t /*ts_ns*/, emu::LogLevel Level,
+                              const char* Tag, const char* Msg, void* User)
 {
     switch (Level)
     {
-    case emu::LogLevel::error: UE_LOG(LogR3000Emu, Error,   TEXT("[%hs] %hs"), Tag, Msg); break;
-    case emu::LogLevel::warn:  UE_LOG(LogR3000Emu, Warning, TEXT("[%hs] %hs"), Tag, Msg); break;
-    case emu::LogLevel::info:  UE_LOG(LogR3000Emu, Log,     TEXT("[%hs] %hs"), Tag, Msg); break;
-    case emu::LogLevel::debug: UE_LOG(LogR3000Emu, Verbose, TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::error: UE_LOG(LogR3000Emu, Error,       TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::warn:  UE_LOG(LogR3000Emu, Warning,     TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::info:  UE_LOG(LogR3000Emu, Log,         TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::debug: UE_LOG(LogR3000Emu, Verbose,     TEXT("[%hs] %hs"), Tag, Msg); break;
     case emu::LogLevel::trace: UE_LOG(LogR3000Emu, VeryVerbose, TEXT("[%hs] %hs"), Tag, Msg); break;
     }
 
@@ -528,16 +531,15 @@ void UR3000EmuComponent::InitEmulator()
         TextLogFile_ = fopen_utf8(FTCHARToUTF8(*TextLogPath).Get(), "wb");
     }
 
-    // Init emu::logf → UE_LOG callback.
-    EmuLog_.cb = UELogCallback;
+    // Init emu::logf → async log thread → UEAsyncLogOutput.
+    // File pointers are valid until async_log_shutdown() in EndPlay.
     EmuLogFiles_.spu = SpuLogFile_;
     EmuLogFiles_.sys = SysLogFile_;
-    EmuLog_.user = &EmuLogFiles_;
     {
         const FTCHARToUTF8 EmuLvlUtf8(*EmuLogLevel);
-        EmuLog_.max_level = emu::log_parse_level(EmuLvlUtf8.Get());
+        const emu::LogLevel EmuLevel = emu::log_parse_level(EmuLvlUtf8.Get());
+        emu::async_log_init(EmuLevel, 14);
     }
-    emu::log_init(&EmuLog_);
 
     if (CoreLogFile_)
         rlog::logger_init(&CoreLogger_, CoreLogFile_);
@@ -1251,7 +1253,7 @@ void UR3000EmuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
     }
     AudioComp_ = nullptr;
     GpuComp_ = nullptr;
-    emu::log_init(nullptr);
+    emu::async_log_shutdown();  // blocks until consumer thread drains + exits
 
     if (CoreLogFile_)
     {
