@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <vector>
 
 #include "../log/filelog.h"
 #include "../log/logger.h"
@@ -76,10 +75,7 @@ class Cdrom
     // Niveau IRQ CDROM (utilisé par le bus pour latch IRQ2 dans I_STAT sur front montant).
     int irq_line() const;
     bool is_reading_active() const { return reading_active_ != 0; }
-    bool has_cached_sectors() const { return cache_read_ < stream_cache_.size(); }
-    void deliver_cached_sector();
-    uint32_t debug_cache_read() const { return cache_read_; }
-    size_t debug_cache_size() const { return stream_cache_.size(); }
+    void try_redeliver_sector();
     uint8_t irq_flags_raw() const { return irq_flags_; }
     uint8_t irq_enable_raw() const { return irq_enable_; }
     uint8_t debug_index_raw() const { return index_; }
@@ -261,15 +257,6 @@ class Cdrom
     uint8_t data_fifo_[4096]{};
     uint16_t data_r_{0};
     uint16_t data_w_{0};
-
-    // Streaming sector cache: stores ALL sectors during ReadS so none are lost.
-    // The FIFO (data_fifo_) is the "current sector" being read by DMA3.
-    // The cache stores future sectors that arrived while the FIFO was busy.
-    // On each INT1 delivery, the next sector is popped from cache into FIFO.
-    static constexpr int kStreamCacheMax = 256;
-    struct CachedSector { uint8_t data[2352]{}; uint16_t size{0}; };
-    std::vector<CachedSector> stream_cache_;
-    uint32_t cache_read_{0};  // next to deliver to FIFO
 
     // Last sector header + subheader (captured on each sector read, used by GetLocL)
     // header: mm, ss, ff, mode (4 bytes from raw sector offset 12)

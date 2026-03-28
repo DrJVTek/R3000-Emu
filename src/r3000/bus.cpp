@@ -2605,11 +2605,16 @@ void Bus::exec_dma3_transfer()
     dma_finish(3);
     cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
 
-    // After DMA3 empties the FIFO, schedule deferred INT1 for cached sector.
-    // The 5000-cycle delay ensures the BIOS handler has done RFE before we
-    // set I_STAT (the handler clears I_STAT after dispatch, killing immediate sets).
-    if (cdrom_->is_fifo_empty() && cdrom_->has_cached_sectors())
-        cdrom_deferred_irq_cycles_ = 5000;
+    // After DMA3 completes and FIFO is empty, tick the CDROM to allow
+    // the next pending INT1 to deliver immediately. This prevents sector
+    // loss during STR streaming by ensuring the next sector fills the FIFO
+    // before the BIOS callback returns.
+    if (cdrom_->is_fifo_empty() && cdrom_->is_reading_active())
+    {
+        // Tick enough cycles for any pending INT1 to fire
+        cdrom_->tick(1);
+        check_cdrom_irq_edge();
+    }
 }
 
 // ================== DMA completion ==================
@@ -3261,24 +3266,6 @@ void Bus::tick(uint32_t cycles)
                 "DMA3 deferred exec: madr=0x%08X bcr=0x%08X (FIFO now ready)",
                 dma_[3].madr, dma_[3].bcr);
             exec_dma3_transfer();
-        }
-
-        // Deferred INT1 for cached sector redeliver (fires after BIOS RFE).
-        if (cdrom_deferred_irq_cycles_ > 0)
-        {
-            cdrom_deferred_irq_cycles_ = (cycles < cdrom_deferred_irq_cycles_)
-                ? cdrom_deferred_irq_cycles_ - cycles : 0;
-            if (cdrom_deferred_irq_cycles_ == 0 && cdrom_->has_cached_sectors())
-            {
-                static uint32_t def_log = 0;
-                if (def_log < 30)
-                    emu::logf(emu::LogLevel::warn, "DEFERRED_INT1",
-                        "[%u] fire cache_read=%u/%zu",
-                        ++def_log, cdrom_->debug_cache_read(), cdrom_->debug_cache_size());
-                cdrom_->deliver_cached_sector();
-                i_stat_ |= (1u << 2);
-                cdrom_irq_prev_ = 1;
-            }
         }
 
         // CDROM IRQ edge detection is now done in check_cdrom_irq_edge() which
