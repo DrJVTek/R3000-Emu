@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
+#include <string>
 #include <cstring>
 
 namespace mdec
@@ -258,8 +261,18 @@ void Mdec::execute()
         }
 
         case State::decoding:
-            decode_macroblock();
-            return;
+            if (!decode_macroblock())
+            {
+                // decode_rle can exhaust remaining_halfwords_ mid-block
+                // (padding skip loop exits when remaining hits 0).
+                if (remaining_halfwords_ == 0)
+                {
+                    state_ = State::idle;
+                    dump_frame_ppm();
+                }
+                return;   // need more data or frame complete
+            }
+            continue;     // decoded one MB, try next
 
         case State::set_quant:
         {
@@ -319,13 +332,13 @@ void Mdec::execute()
 // ---------------------------------------------------------------------------
 // Macroblock decoding: 6 blocks (Cr, Cb, Y1-Y4)
 // ---------------------------------------------------------------------------
-void Mdec::decode_macroblock()
+bool Mdec::decode_macroblock()
 {
     for (; current_block_ < 6; ++current_block_)
     {
         const uint8_t* qt = (current_block_ >= 2) ? iq_y_.data() : iq_uv_.data();
         if (!decode_rle(blocks_[current_block_].data(), qt))
-            return; // need more data
+            return false; // need more data
 
         idct(blocks_[current_block_].data());
     }
@@ -373,7 +386,11 @@ void Mdec::decode_macroblock()
     current_coeff_ = 64;
 
     if (remaining_halfwords_ == 0)
+    {
         state_ = State::idle;
+        dump_frame_ppm();
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +642,81 @@ void Mdec::copy_out_block()
         break;
     }
     }
+}
+
+// ---------------------------------------------------------------------------
+// enable_frame_dump / dump_frame_ppm
+// ---------------------------------------------------------------------------
+void Mdec::enable_frame_dump(const char* path_prefix, int frame_w, int frame_h, int max_frames)
+{
+    dump_prefix_ = path_prefix ? path_prefix : "";
+    dump_w_ = frame_w;
+    dump_h_ = frame_h;
+    dump_max_ = max_frames;
+    dump_count_ = 0;
+    emu::logf(emu::LogLevel::info, "MDEC",
+        "frame dump enabled: prefix=%s w=%d h=%d max=%d",
+        dump_prefix_.c_str(), dump_w_, dump_h_, dump_max_);
+}
+
+void Mdec::dump_frame_ppm()
+{
+    if (dump_count_ >= dump_max_ || dump_prefix_.empty())
+        return;
+    if (output_depth_ != 2 && output_depth_ != 3)
+        return;
+
+    // Auto-detect frame dimensions from fifo size
+    int W = dump_w_, H = dump_h_;
+    if (W == 0 || H == 0)
+    {
+        const int wpb = (output_depth_ == 2) ? 192 : 128;
+        const int total_mbs = (int)(fifo_out_.size() / wpb);
+        struct { int w, h; } sizes[] = {
+            {320,240},{320,256},{320,160},{640,480},{256,240},{512,240},
+        };
+        for (auto& s : sizes)
+            if ((s.w/16)*(s.h/16) == total_mbs) { W=s.w; H=s.h; break; }
+        if (W == 0) { W = total_mbs*16; H = 16; }
+    }
+
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s_%04d.ppm", dump_prefix_.c_str(), dump_count_);
+
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return;
+
+    f << "P6\n" << W << " " << H << "\n255\n";
+    const int mb_cols = W / 16;
+
+    if (output_depth_ == 2) // 24-bit
+    {
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(fifo_out_.data());
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+            {
+                int off = ((y/16)*mb_cols+(x/16))*768 + ((y%16)*16+(x%16))*3;
+                f.put((char)src[off]); f.put((char)src[off+1]); f.put((char)src[off+2]);
+            }
+    }
+    else // 15-bit
+    {
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+            {
+                int mb = (y/16)*mb_cols+(x/16);
+                int p = (y%16)*16+(x%16);
+                uint32_t w = fifo_out_[mb*128+p/2];
+                uint16_t px = (p&1) ? (uint16_t)(w>>16) : (uint16_t)(w&0xFFFF);
+                f.put((char)(uint8_t)(((px)&0x1F)*255/31));
+                f.put((char)(uint8_t)(((px>>5)&0x1F)*255/31));
+                f.put((char)(uint8_t)(((px>>10)&0x1F)*255/31));
+            }
+    }
+
+    emu::logf(emu::LogLevel::warn, "MDEC",
+        "frame dump #%d -> %s (%dx%d depth=%u)", dump_count_, path, W, H, output_depth_);
+    dump_count_++;
 }
 
 } // namespace mdec

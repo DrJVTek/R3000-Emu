@@ -1256,6 +1256,16 @@ int main(int argc, char** argv)
         emu::logf(emu::LogLevel::info, "MAIN", "WAV output: %s", wav_output);
     }
 
+    // Optional MDEC frame dump: --mdec-dump=N dumps first N decoded frames as PPM
+    {
+        const char* mdec_dump_s = arg_value(argc, argv, "--mdec-dump=");
+        if (mdec_dump_s && core.bus() && core.bus()->mdec())
+        {
+            const int max_frames = std::atoi(mdec_dump_s);
+            core.bus()->mdec()->enable_frame_dump("logs/mdec_frame", 0, 0, max_frames);
+        }
+    }
+
     // Fast boot: skip BIOS, load game EXE directly from CD
     if (has_flag(argc, argv, "--fast-boot") && cd_path)
     {

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace mdec
@@ -28,7 +29,11 @@ public:
     bool data_out_request() const;
     bool data_in_request() const;
 
+    // Frame dump: dumps first max_frames completed CMD1 as PPM files
+    void enable_frame_dump(const char* path_prefix, int frame_w, int frame_h, int max_frames);
+
 private:
+    void dump_frame_ppm();
     // Commands
     enum class State : uint8_t
     {
@@ -39,7 +44,7 @@ private:
     };
 
     void execute();
-    void decode_macroblock();
+    bool decode_macroblock();
     bool decode_rle(int16_t* blk, const uint8_t* qt);
     void idct(int16_t* blk);
     void yuv_to_rgb(uint32_t xx, uint32_t yy,
@@ -86,6 +91,10 @@ private:
     bool fifo_in_empty() const { return fifo_in_pos_ >= fifo_in_.size(); }
     uint16_t fifo_in_pop();
     void fifo_out_push(uint32_t v);
+
+    // Frame dump state
+    std::string dump_prefix_{};
+    int dump_w_{0}, dump_h_{0}, dump_max_{0}, dump_count_{0};
 };
 
 } // namespace mdec

@@ -1016,57 +1016,55 @@ void Cdrom::try_fill_data_fifo()
         return; // already loaded
 
     const uint32_t data_lba = data_lba_;
-    uint8_t data[2048];
     emu::logf(emu::LogLevel::debug, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
         (unsigned)data_lba, (void*)disc_, (int)want_data_, (int)data_ready_pending_, data_r_, data_w_);
 
-    // Debug: dump first 64 bytes of sector data for directory reads
-    if (data_lba <= 20)
+    // Whole-sector mode (SetMode bit 5): push 2340 bytes (raw minus sync)
+    // Normal mode: push 2048 bytes (user data only)
+    // Matches DuckStation: RAW_SECTOR_OUTPUT_SIZE=2340, DATA_SECTOR_OUTPUT_SIZE=2048
+    const bool whole_sector = (mode_ & 0x20u) != 0;
+
+    if (whole_sector)
     {
         uint8_t raw[2352];
         uint32_t raw_ss = 0;
-        if (disc_->read_sector_raw(data_lba, raw, sizeof(raw), &raw_ss))
+        if (disc_->read_sector_raw(data_lba, raw, sizeof(raw), &raw_ss) && raw_ss >= 2352)
         {
-            emu::logf(emu::LogLevel::info, "CD",
-                "RAW sector %u: ss=%u mode=%02X hdr=%02X%02X%02X%02X sub=%02X%02X%02X%02X%02X%02X%02X%02X",
-                data_lba, raw_ss, raw[15],
-                raw[12], raw[13], raw[14], raw[15],
-                raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23]);
-            // Dump first 32 bytes of user data (offset 24 for Mode2)
-            const uint8_t* ud = raw + 24;
-            emu::logf(emu::LogLevel::info, "CD",
-                "User[0..31]: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X "
-                "%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
-                ud[0],ud[1],ud[2],ud[3],ud[4],ud[5],ud[6],ud[7],
-                ud[8],ud[9],ud[10],ud[11],ud[12],ud[13],ud[14],ud[15],
-                ud[16],ud[17],ud[18],ud[19],ud[20],ud[21],ud[22],ud[23],
-                ud[24],ud[25],ud[26],ud[27],ud[28],ud[29],ud[30],ud[31]);
-            // Dump PVD root directory record (bytes 156-171) for sector 16
-            if (data_lba == 16 && raw_ss >= 2352)
-            {
-                emu::logf(emu::LogLevel::debug, "CD", "PVD RootDir[156..171]: %02X %02X %02X%02X%02X%02X %02X%02X%02X%02X",
-                    ud[156], ud[157], ud[158], ud[159], ud[160], ud[161],
-                    ud[162], ud[163], ud[164], ud[165]);
-            }
+            // Push 2340 bytes: everything after the 12-byte sync header
+            push_data(raw + 12, 2340);
+        }
+        else
+        {
+            emu::logf(emu::LogLevel::warn, "CD",
+                "try_fill WHOLE: LBA=%u raw read failed (ss=%u)", data_lba, raw_ss);
+            return;
         }
     }
-
-    if (read_user_data_2048(data_lba, data))
+    else
     {
-        push_data(data, sizeof(data));
+        uint8_t data[2048];
+        if (read_user_data_2048(data_lba, data))
+        {
+            push_data(data, sizeof(data));
+        }
+        else
+        {
+            emu::logf(emu::LogLevel::warn, "CD",
+                "try_fill: LBA=%u read_user_data_2048 failed", data_lba);
+            return;
+        }
+    }
+    {
         const flog::Level fifo_log_level =
             (data_lba == 16 || data_lba == 60642 || data_lba == 60643)
                 ? flog::Level::info
                 : flog::Level::trace;
+        // Log first 8 bytes from FIFO (safe: data was just pushed)
+        const uint8_t* fb = &data_fifo_[0];
         cd_log(log_cd_, log_io_, clock_, has_clock_, fifo_log_level,
-            "FIFO LBA=%u [%02X%02X%02X%02X %02X%02X%02X%02X]",
-            (unsigned)data_lba,
-            data[0],data[1],data[2],data[3],data[4],data[5],data[6],data[7]);
-    }
-    else
-    {
-        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
-            "FIFO FILL FAILED LBA=%u", (unsigned)data_lba);
+            "FIFO LBA=%u %s [%02X%02X%02X%02X %02X%02X%02X%02X]",
+            (unsigned)data_lba, whole_sector ? "RAW2340" : "USR2048",
+            fb[0],fb[1],fb[2],fb[3],fb[4],fb[5],fb[6],fb[7]);
         // Note: Don't send error here - bounds checking is done in tick()
         // during continuous reading. This can fail early for other reasons.
     }
@@ -3095,7 +3093,9 @@ void Cdrom::tick(uint32_t cycles)
 
                 read_lba_++;
                 clear_data();
-                want_data_ = 0;
+                // Do NOT clear want_data_: on real hardware the Request Register
+                // is software-written and the drive never clears it between sectors.
+                // Clearing it here broke STR streaming (XA interleaved sectors).
                 pending_irq_reason_ = 0; // clear marker before pushing resp
                 cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
                     "ReadN advance -> LBA=%u", read_lba_);
