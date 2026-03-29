@@ -2008,12 +2008,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             // Tick CDROM with realistic MDEC decode time.
                             // Real PS1: MDEC is cycle-accurate, takes real time to decode.
                             // Our MDEC is instant, so we compensate by ticking the CDROM
-                            // with the time that a real PS1 would spend on MDEC+DMA.
-                            // Each DMA1 chunk = 1920 words = 10 macroblocks at 24-bit.
-                            // Real timing: ~380 cycles/MB decode + memory stalls ≈ 5000/MB total.
-                            // 10 MBs × 5000 = 50000 cycles per chunk.
-                            const uint32_t mbs_per_chunk = words / 192;
-                            const uint32_t dma1_cycles = words + mbs_per_chunk * 5000;
+                            // with realistic MDEC+DMA time so streaming sectors arrive.
+                            // Each DMA1 chunk = 1920 words = 10 MBs at 24-bit.
+                            // Real PS1 timing: ~20000 cycles/MB (decode + mem stalls + DMA + GPU wait).
+                            // This gives the CDROM enough time during MDEC output for
+                            // the next frame's sectors to accumulate in the ring buffer.
+                            const uint32_t mbs_per_chunk = (words > 192) ? words / 192 : 1;
+                            const uint32_t dma1_cycles = words + mbs_per_chunk * 20000;
                             if (cdrom_)
                                 cdrom_->tick(dma1_cycles);
                             check_cdrom_irq_edge();
@@ -2644,15 +2645,13 @@ void Bus::exec_dma3_transfer()
     dma_finish(3);
     cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
 
-    // After streaming DMA3: advance CDROM by one sector period so the
-    // next sector arrives before the game reads the ring buffer.
-    // Only for ReadS (streaming) mode — normal ReadN boot reads must
-    // NOT be accelerated or the BIOS timing breaks.
+    // After streaming DMA3: advance CDROM time so the next sector
+    // arrives before the game reads the ring buffer. This compensates
+    // for our CPU running faster than real PS1 (no cache/pipeline stalls).
+    // Only for ReadS (streaming) — normal ReadN boot must NOT be affected.
     if (cdrom_->is_reading_active() && cdrom_->is_streaming_mode())
     {
-        // Half a sector period — enough to keep sectors flowing without
-        // causing INT1 cascade (full period would trigger next sector immediately)
-        const uint32_t sector_ticks = 112000u;
+        const uint32_t sector_ticks = 112000u; // ~50% of double-speed sector period
         cdrom_->tick(sector_ticks);
         check_cdrom_irq_edge();
     }

@@ -483,7 +483,7 @@ void Mdec::idct(int16_t* blk)
 {
     int64_t temp[64];
 
-    // Pass 1: columns
+    // Pass 1: columns (DuckStation IDCT_Old)
     for (int x = 0; x < 8; ++x)
     {
         for (int y = 0; y < 8; ++y)
@@ -728,8 +728,15 @@ void Mdec::dump_frame_ppm()
             }
     }
 
+    // Also dump raw fifo_out_ binary for analysis
+    {
+        char raw_path[512];
+        std::snprintf(raw_path, sizeof(raw_path), "%s_%04d.raw", dump_prefix_.c_str(), dump_count_);
+        std::ofstream rf(raw_path, std::ios::binary);
+        if (rf) rf.write(reinterpret_cast<const char*>(fifo_out_.data()), fifo_out_.size() * 4);
+    }
     emu::logf(emu::LogLevel::warn, "MDEC",
-        "frame dump #%d -> %s (%dx%d depth=%u)", dump_count_, path, W, H, output_depth_);
+        "frame dump #%d -> %s (%dx%d depth=%u fifo_out=%zu words)", dump_count_, path, W, H, output_depth_, fifo_out_.size());
     dump_count_++;
 }
 
