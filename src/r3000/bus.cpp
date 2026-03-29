@@ -1977,25 +1977,19 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         else
                         {
                             // DMA1: MDEC → RAM (decoded pixels out)
-                            // Simulate DMA transfer time: tick CDROM so streaming
-                            // sectors continue arriving during MDEC decode.
-                            const uint32_t dma1_cycles = words; // ~1 cycle/word
-                            if (cdrom_)
-                                cdrom_->tick(dma1_cycles);
-                            check_cdrom_irq_edge();
-
-                            std::vector<uint32_t> buf(words);
-                            mdec_->dma_read(buf.data(), words);
-                            for (uint32_t i = 0; i < words; ++i)
-                            {
-                                ram_[ma]     = (uint8_t)(buf[i]);
-                                ram_[ma + 1] = (uint8_t)(buf[i] >> 8);
-                                ram_[ma + 2] = (uint8_t)(buf[i] >> 16);
-                                ram_[ma + 3] = (uint8_t)(buf[i] >> 24);
-                                ma = (ma + 4) & 0x1FFFFF;
-                            }
+                            // Defer execution: the CPU continues running while
+                            // the DMA transfer "happens". After ~11k cycles,
+                            // the transfer completes and dma_finish fires.
+                            // This allows CD INT1s to be processed between slices.
+                            dma1_pending_ = 1;
+                            dma1_delay_cycles_ = 11000; // ~1 slice decode time
+                            dma1_words_ = words;
+                            dma1_madr_ = ma;
+                            // CHCR bit 24 stays set — game sees DMA as in-progress.
+                            // dma_finish will be called from tick() when delay expires.
                         }
-                        dma_finish(ch);
+                        if (!dma1_pending_)
+                            dma_finish(ch);
                     }
                     // DMA2 (GPU)
                     else if (ch == 2 && gpu_)
@@ -2615,6 +2609,27 @@ void Bus::exec_dma3_transfer()
         cdrom_->tick(1);
         check_cdrom_irq_edge();
     }
+}
+
+// ================== Deferred DMA1 (MDEC OUT) ==================
+
+void Bus::exec_dma1_deferred()
+{
+    if (!mdec_)
+        return;
+
+    std::vector<uint32_t> buf(dma1_words_);
+    mdec_->dma_read(buf.data(), dma1_words_);
+    uint32_t ma = dma1_madr_;
+    for (uint32_t i = 0; i < dma1_words_; ++i)
+    {
+        ram_[ma]     = (uint8_t)(buf[i]);
+        ram_[ma + 1] = (uint8_t)(buf[i] >> 8);
+        ram_[ma + 2] = (uint8_t)(buf[i] >> 16);
+        ram_[ma + 3] = (uint8_t)(buf[i] >> 24);
+        ma = (ma + 4) & 0x1FFFFF;
+    }
+    dma_finish(1);
 }
 
 // ================== DMA completion ==================
@@ -3249,6 +3264,21 @@ void Bus::tick(uint32_t cycles)
             {
                 vblank_no_mask_count_ = 0;
             }
+    }
+
+    // Deferred DMA1 (MDEC OUT): complete after delay expires
+    if (dma1_pending_)
+    {
+        if (cycles >= dma1_delay_cycles_)
+        {
+            dma1_pending_ = 0;
+            dma1_delay_cycles_ = 0;
+            exec_dma1_deferred();
+        }
+        else
+        {
+            dma1_delay_cycles_ -= cycles;
+        }
     }
 
     // Tick CDROM

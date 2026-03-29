@@ -334,6 +334,14 @@ class Bus
     uint8_t cdrom_irq_prev_{0};
     // DMA3 DREQ gating: if CDROM FIFO is empty when DMA3 starts, defer until FIFO fills.
     uint8_t dma3_pending_{0};
+
+    // Deferred DMA1 (MDEC OUT): executes after delay so CD IRQs can fire between slices.
+    uint8_t  dma1_pending_{0};
+    uint32_t dma1_delay_cycles_{0};
+    uint32_t dma1_words_{0};
+    uint32_t dma1_madr_{0};
+
+    void exec_dma1_deferred();
     mdec::Mdec* mdec_{nullptr};     // Real MDEC decoder (owned by Core)
     uint32_t vblank_no_mask_count_{0}; // VBlank frames where VBlank bit (0x01) is absent from I_MASK (for auto-enable workaround)
     uint32_t no_mask_cycles_{0}; // Cycles accumulated where VBlank bit (0x01) is absent from I_MASK (for auto-enable workaround)
