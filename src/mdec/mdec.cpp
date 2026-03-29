@@ -701,7 +701,16 @@ void Mdec::dump_frame_ppm()
     if (!f) return;
 
     f << "P6\n" << W << " " << H << "\n255\n";
-    const int mb_cols = W / 16;
+    const int mb_rows = H / 16;
+
+    // PsyQ STR playback requests one 16-pixel-wide slice at a time via DecDCTout().
+    // The MDEC output stream is therefore laid out slice-major:
+    //   slice 0: MB(0,0), MB(0,1), ...
+    //   slice 1: MB(1,0), MB(1,1), ...
+    // not raster-major across the whole frame.
+    const auto slice_major_mb_index = [mb_rows](int x, int y) -> int {
+        return (x / 16) * mb_rows + (y / 16);
+    };
 
     if (output_depth_ == 2) // 24-bit
     {
@@ -709,7 +718,8 @@ void Mdec::dump_frame_ppm()
         for (int y = 0; y < H; y++)
             for (int x = 0; x < W; x++)
             {
-                int off = ((y/16)*mb_cols+(x/16))*768 + ((y%16)*16+(x%16))*3;
+                int mb = slice_major_mb_index(x, y);
+                int off = mb * 768 + ((y % 16) * 16 + (x % 16)) * 3;
                 f.put((char)src[off]); f.put((char)src[off+1]); f.put((char)src[off+2]);
             }
     }
@@ -718,7 +728,7 @@ void Mdec::dump_frame_ppm()
         for (int y = 0; y < H; y++)
             for (int x = 0; x < W; x++)
             {
-                int mb = (y/16)*mb_cols+(x/16);
+                int mb = slice_major_mb_index(x, y);
                 int p = (y%16)*16+(x%16);
                 uint32_t w = fifo_out_[mb*128+p/2];
                 uint16_t px = (p&1) ? (uint16_t)(w>>16) : (uint16_t)(w&0xFFFF);

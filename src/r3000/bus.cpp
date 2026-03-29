@@ -2097,6 +2097,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                     if (gpu_3d_) gpu_3d_->gp0_with_face_hint(w, tok, ram_face_writer_pc(ma));
                                     ma = (ma + 4) & 0x1FFFFF;
                                 }
+
                             }
                             else if (mode == 2) // Linked list
                             {
@@ -2667,15 +2668,18 @@ void Bus::dma_finish(int ch)
 {
     dma_[ch].chcr &= ~0x01000000u; // clear busy/trigger bit
 
-    // DICR: set flag bit (24+ch) for software polling
-    dicr_ |= (1u << (24 + ch));
+    // DuckStation/PS1 behavior: completion only raises the per-channel IRQ flag
+    // when both the channel IRQ enable bit and the DMA master enable bit are set.
+    const int master_en = (dicr_ >> 23) & 1;
+    const int ch_irq_en = (dicr_ >> (16 + ch)) & 1;
+    if (master_en && ch_irq_en)
+        dicr_ |= (1u << (24 + ch));
 
     // Recompute master flag (bit 31)
     // DuckStation: master_flag = force_irq || (master_enable && ANY_flag_set)
     // Note: master flag triggers on ANY flag, not just enabled ones.
     const uint32_t flags   = (dicr_ >> 24) & 0x7Fu;
     const int force = (dicr_ >> 15) & 1;
-    const int master_en = (dicr_ >> 23) & 1;
     const int old_master_flag = (dicr_ >> 31) & 1;
     if (force || (master_en && flags))
         dicr_ |= (1u << 31);
@@ -2691,8 +2695,8 @@ void Bus::dma_finish(int ch)
     if (ch == 3 || ch == 4)
     {
         emu::logf(emu::LogLevel::debug, "BUS",
-            "DMA%d finish: DICR=0x%08X flags=0x%02X master_en=%d force=%d flag_set=%d irq_fired=%d",
-            ch, dicr_, flags, master_en, force, new_master_flag, (!old_master_flag && new_master_flag) ? 1 : 0);
+            "DMA%d finish: DICR=0x%08X flags=0x%02X master_en=%d ch_en=%d force=%d flag_set=%d irq_fired=%d",
+            ch, dicr_, flags, master_en, ch_irq_en, force, new_master_flag, (!old_master_flag && new_master_flag) ? 1 : 0);
     }
 }
 
