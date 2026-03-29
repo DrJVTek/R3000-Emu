@@ -1,8 +1,11 @@
 # R3000-Emu Project Notes
 
-> **⚠️ CLAUDE: LIRE `docs/DEBUG_UE5_STUCK.md` AU DÉBUT DE CHAQUE SESSION !**
+> **⚠️ CLAUDE: LIRE CES DOCS AU DÉBUT DE CHAQUE SESSION !**
+> - `docs/DEBUG_UE5_STUCK.md` — historique debug UE5
+> - `docs/STR_DEBUG_STATUS.md` — **état du debug STR streaming (MDEC vidéo)**
+>   → Contient l'état exact, ce qui a été vérifié, la prochaine étape
+>   → **METTRE À JOUR après chaque découverte**
 >
-> Ce fichier contient l'historique complet du debug UE5 et les infos critiques.
 > **Préférence utilisateur: NON-HLE (bHleVectors=false)**
 
 ---
