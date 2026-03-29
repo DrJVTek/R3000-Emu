@@ -800,30 +800,41 @@ void Cdrom::clear_resp()
 
 void Cdrom::push_data(const uint8_t* p, size_t n)
 {
-    if (!p || n == 0)
-        return;
-    for (size_t i = 0; i < n; ++i)
-    {
-        const uint16_t next = (uint16_t)(data_w_ + 1);
-        if (next == data_r_)
-            return; // drop
-        data_fifo_[data_w_] = p[i];
-        data_w_ = next;
-    }
+    // Write to WRITE buffer. DO NOT touch sb_r_ here.
+    auto& b = sb_[sb_w_];
+    const size_t cap = sizeof(b.data);
+    const size_t c = (n <= cap) ? n : cap;
+    std::memcpy(b.data, p, c);
+    b.sz = (uint16_t)c;
+    b.pos = 0;
+    sb_w_ = (sb_w_ + 1) % kNumSB;
 }
 
 uint8_t Cdrom::pop_data()
 {
-    if (data_r_ == data_w_)
-        return 0;
-    const uint8_t v = data_fifo_[data_r_];
-    data_r_ = (uint16_t)(data_r_ + 1);
-    return v;
+    // Read from READ buffer.
+    auto& b = sb_[sb_r_];
+    if (b.pos >= b.sz) return 0;
+    return b.data[b.pos++];
 }
 
 void Cdrom::clear_data()
 {
-    data_r_ = data_w_ = 0;
+    // Clear READ buffer only. Write buffer untouched.
+    auto& b = sb_[sb_r_];
+    b.pos = 0;
+    b.sz = 0;
+}
+
+void Cdrom::check_sector_read_complete()
+{
+    auto& b = sb_[sb_r_];
+    if (b.pos < b.sz) return; // not done reading
+    // Clear consumed buffer
+    b.pos = 0; b.sz = 0;
+    // Note: don't auto-promote to next buffer. The normal INT1 delivery
+    // path handles sector-by-sector delivery. Auto-promotion caused
+    // duplicate sector reads that confused StCdInterrupt.
 }
 
 void Cdrom::clear_params()
@@ -891,7 +902,7 @@ void Cdrom::set_irq(uint8_t flags)
         old_line, new_line, (unsigned)status_, (unsigned)last_cmd_,
         (int)reading_active_, (int)seek_in_progress_,
         (unsigned)read_lba_, (unsigned)data_lba_,
-        (unsigned)data_r_, (unsigned)data_w_);
+        (unsigned)sb_[sb_r_].pos, (unsigned)sb_[sb_r_].sz);
 
     // Push-model notification: immediately notify the bus of IRQ state change.
     // This mirrors DuckStation's InterruptController::SetLineState approach.
@@ -919,7 +930,7 @@ void Cdrom::debug_log_dma3_start(uint32_t madr, uint32_t bcr, uint32_t words)
         (unsigned)irq_flags_, (unsigned)irq_enable_, (unsigned)status_,
         (int)want_data_, (int)data_ready_pending_, (int)reading_active_,
         (unsigned)read_lba_, (unsigned)data_lba_,
-        (unsigned)data_r_, (unsigned)data_w_);
+        (unsigned)sb_[sb_r_].pos, (unsigned)sb_[sb_r_].sz);
 }
 
 void Cdrom::debug_log_dma3_end(uint32_t madr, uint32_t words, int blocked)
@@ -931,7 +942,7 @@ void Cdrom::debug_log_dma3_end(uint32_t madr, uint32_t words, int blocked)
         (unsigned)irq_flags_, (unsigned)status_,
         (int)want_data_, (int)data_ready_pending_, (int)reading_active_,
         (unsigned)read_lba_, (unsigned)data_lba_,
-        (unsigned)data_r_, (unsigned)data_w_);
+        (unsigned)sb_[sb_r_].pos, (unsigned)sb_[sb_r_].sz);
 }
 
 void Cdrom::stop_reading_with_error(uint8_t reason)
@@ -979,7 +990,7 @@ uint8_t Cdrom::status_reg() const
     const uint8_t prm_empty = (param_count_ == 0) ? (1u << 3) : 0u;
     const uint8_t prm_wrd = (param_count_ < (uint8_t)sizeof(param_fifo_)) ? (1u << 4) : 0u;
     const uint8_t resp_not_empty = (resp_r_ != resp_w_) ? (1u << 5) : 0u;
-    const uint8_t data_not_empty = (data_r_ != data_w_) ? (1u << 6) : 0u;
+    const uint8_t data_not_empty = (!is_fifo_empty()) ? (1u << 6) : 0u;
     const uint8_t busy = (busy_ || queued_cmd_valid_) ? (1u << 7) : 0u;
 
     return (uint8_t)(idx | prm_empty | prm_wrd | resp_not_empty | data_not_empty | busy);
@@ -995,7 +1006,7 @@ void Cdrom::try_redeliver_sector()
         return;
     if ((irq_flags_ & 0x1Fu) != 0)
         return; // previous IRQ not yet acknowledged
-    if (data_r_ != data_w_)
+    if (sb_[sb_r_].pos != sb_[sb_r_].sz)
         return; // FIFO not empty
 
     // If there's a pending INT1 that hasn't been delivered yet, deliver it now
@@ -1005,7 +1016,12 @@ void Cdrom::try_redeliver_sector()
         data_ready_pending_ = 1;
         data_lba_ = read_lba_;
         head_lba_ = read_lba_;
-        try_fill_data_fifo();
+        {
+            const uint8_t sb_w_before = sb_w_;
+            try_fill_data_fifo();
+            if (sb_w_ != sb_w_before)
+                sb_r_ = (sb_w_ + kNumSB - 1) % kNumSB;
+        }
 
         // Deliver the IRQ
         clear_resp();
@@ -1052,14 +1068,14 @@ void Cdrom::try_fill_data_fifo()
         return;
     if (!want_data_)
         return;
-    if (data_r_ != data_w_)
-    {
-        return; // FIFO has unread data — don't overwrite (game will DMA3 it)
-    }
+    // If read buffer still has unread data, don't push another copy.
+    // This prevents double-push when game writes BFRD while mid-DMA3.
+    if (!is_fifo_empty())
+        return;
 
     const uint32_t data_lba = data_lba_;
     emu::logf(emu::LogLevel::debug, "CD", "try_fill: LBA=%u disc=%p want=%d drp=%d fifo_r=%u fifo_w=%u",
-        (unsigned)data_lba, (void*)disc_, (int)want_data_, (int)data_ready_pending_, data_r_, data_w_);
+        (unsigned)data_lba, (void*)disc_, (int)want_data_, (int)data_ready_pending_, sb_[sb_r_].pos, sb_[sb_r_].sz);
 
     // Read raw sector to capture header + subheader (needed by GetLocL)
     // and to push the correct data format to FIFO.
@@ -1118,8 +1134,9 @@ void Cdrom::try_fill_data_fifo()
             (data_lba == 16 || data_lba == 60642 || data_lba == 60643)
                 ? flog::Level::info
                 : flog::Level::trace;
-        // Log first 8 bytes from FIFO (safe: data was just pushed)
-        const uint8_t* fb = &data_fifo_[0];
+        // Log first 8 bytes from the buffer just written (sb_w_ was advanced)
+        const uint8_t prev_w = (sb_w_ + kNumSB - 1) % kNumSB;
+        const uint8_t* fb = sb_[prev_w].data;
         cd_log(log_cd_, log_io_, clock_, has_clock_, fifo_log_level,
             "FIFO LBA=%u %s [%02X%02X%02X%02X %02X%02X%02X%02X]",
             (unsigned)data_lba, whole_sector ? "RAW2340" : "USR2048",
@@ -2666,8 +2683,8 @@ void Cdrom::exec_command(uint8_t cmd)
         (unsigned)status_reg(),
         (unsigned)resp_r_,
         (unsigned)resp_w_,
-        (unsigned)data_r_,
-        (unsigned)data_w_
+        (unsigned)sb_[sb_r_].pos,
+        (unsigned)sb_[sb_r_].sz
     );
 }
 
@@ -2696,10 +2713,10 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
                 if (data_read_count_ <= 5 || (data_read_count_ & 0x7FF) == 0)
                 {
                     emu::logf(emu::LogLevel::info, "CD", "DATA_READ #%u = 0x%02X (fifo_r=%u fifo_w=%u)",
-                        data_read_count_, out, data_r_, data_w_);
+                        data_read_count_, out, sb_[sb_r_].pos, sb_[sb_r_].sz);
                     cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::debug,
                         "DATA_READ #%u = 0x%02X (fifo=%u/%u data_lba=%u want=%d drp=%d)",
-                        data_read_count_, (unsigned)out, (unsigned)data_r_, (unsigned)data_w_,
+                        data_read_count_, (unsigned)out, (unsigned)sb_[sb_r_].pos, (unsigned)sb_[sb_r_].sz,
                         (unsigned)data_lba_, (int)want_data_, (int)data_ready_pending_);
                 }
             }
@@ -2734,7 +2751,7 @@ uint8_t Cdrom::mmio_read8(uint32_t addr)
             (unsigned)(off & 3u), (unsigned)index_, (unsigned)out,
             (unsigned)irq_flags_, (int)data_ready_pending_, (int)want_data_,
             (int)busy_, (unsigned)resp_r_, (unsigned)resp_w_,
-            (unsigned)data_r_, (unsigned)data_w_,
+            (unsigned)sb_[sb_r_].pos, (unsigned)sb_[sb_r_].sz,
             (unsigned)read_lba_, (unsigned)data_lba_);
     }
     return out;
@@ -2896,7 +2913,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 want_data_ = new_want;
                 emu::logf(emu::LogLevel::info, "CD",
                     "Request reg write=0x%02X want_data=%d data_ready_pending=%d fifo_r=%u fifo_w=%u",
-                    v, (int)want_data_, (int)data_ready_pending_, (unsigned)data_r_, (unsigned)data_w_);
+                    v, (int)want_data_, (int)data_ready_pending_, (unsigned)sb_[sb_r_].pos, (unsigned)sb_[sb_r_].sz);
                 if (!want_data_)
                 {
                     // Reset Data FIFO
@@ -2904,7 +2921,11 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 }
                 else
                 {
+                    const uint8_t sb_w_before = sb_w_;
                     try_fill_data_fifo();
+                    // If try_fill pushed data, update read pointer to the new buffer
+                    if (sb_w_ != sb_w_before)
+                        sb_r_ = (sb_w_ + kNumSB - 1) % kNumSB;
                 }
             }
             else if (index_ == 1 || index_ == 3)
@@ -3165,8 +3186,12 @@ void Cdrom::tick(uint32_t cycles)
                     return; // Don't deliver INT1, we sent INT5 instead
                 }
 
-                // XA audio filter: check BEFORE advancing. If current sector
-                // is audio+realtime, skip INT1 entirely (real PS1 routes to SPU).
+                // Advance to the next sector first, then check if it's XA.
+                // On real hardware, XA audio sectors are silently routed to SPU
+                // and never generate INT1.
+                read_lba_++;
+
+                // XA audio filter: check the sector we're about to deliver.
                 if ((mode_ & 0x40u) && disc_)
                 {
                     uint8_t xa_raw[24]; uint32_t xa_ss = 0;
@@ -3174,8 +3199,7 @@ void Cdrom::tick(uint32_t cycles)
                     {
                         if (xa_raw[15] == 2 && (xa_raw[18] & 0x04u) && (xa_raw[18] & 0x40u))
                         {
-                            // Audio sector: skip INT1, just advance and schedule next
-                            read_lba_++;
+                            // XA audio sector: skip INT1, schedule next sector
                             const uint32_t next_delay = read_sector_ticks();
                             pending_irq_type_ = 0x01;
                             pending_irq_reason_ = 0xFFu;
@@ -3185,7 +3209,6 @@ void Cdrom::tick(uint32_t cycles)
                         }
                     }
                 }
-                read_lba_++;
                 clear_data();
                 // Do NOT clear want_data_: on real hardware the Request Register
                 // is software-written and the drive never clears it between sectors.
@@ -3218,7 +3241,22 @@ void Cdrom::tick(uint32_t cycles)
                     pending_read_seek_commit_ = 0;
                 }
                 head_lba_ = read_lba_;
+                const uint8_t sb_w_before = sb_w_;
                 try_fill_data_fifo();
+                // If try_fill actually wrote a sector, point read to it
+                if (sb_w_ != sb_w_before)
+                    sb_r_ = (sb_w_ + kNumSB - 1) % kNumSB;
+                else if (is_read_advance && reading_active_)
+                {
+                    // try_fill skipped this sector (XA audio or error).
+                    // Don't deliver INT1 — schedule the next sector instead.
+                    const uint32_t next_delay = read_sector_ticks();
+                    pending_irq_type_ = 0x01;
+                    pending_irq_reason_ = 0xFFu;
+                    pending_irq_live_status_ = 1;
+                    arm_pending_irq_after(next_delay);
+                    return;
+                }
             }
 
             // DuckStation Init second-response handler: cancel any queued command
@@ -3255,8 +3293,8 @@ void Cdrom::tick(uint32_t cycles)
                     (unsigned)pending_irq_reason_,
                     (int)want_data_,
                     (int)data_ready_pending_,
-                    (unsigned)data_r_,
-                    (unsigned)data_w_);
+                    (unsigned)sb_[sb_r_].pos,
+                    (unsigned)sb_[sb_r_].sz);
             }
             emu::logf(emu::LogLevel::debug, "CD", "Async IRQ%u delivered (resp=0x%02X reason=0x%02X)",
                 (unsigned)pending_irq_type_, (unsigned)irq_resp, (unsigned)pending_irq_reason_);

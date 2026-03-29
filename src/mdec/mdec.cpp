@@ -267,18 +267,26 @@ void Mdec::execute()
         }
 
         case State::decoding:
+        {
+            static uint32_t mb_count = 0;
             if (!decode_macroblock())
             {
                 // decode_rle can exhaust remaining_halfwords_ mid-block
                 // (padding skip loop exits when remaining hits 0).
                 if (remaining_halfwords_ == 0)
                 {
+                    emu::logf(emu::LogLevel::warn, "MDEC",
+                        "Frame decode END: %u MBs, fifo_out=%zu",
+                        mb_count, fifo_out_.size());
+                    mb_count = 0;
                     state_ = State::idle;
                     dump_frame_ppm();
                 }
                 return;   // need more data or frame complete
             }
+            mb_count++;
             continue;     // decoded one MB, try next
+        }
 
         case State::set_quant:
         {

@@ -1963,6 +1963,15 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         if (ch == 0)
                         {
                             // DMA0: RAM → MDEC (compressed data in)
+                            // Tick CDROM so streaming sectors continue arriving during
+                            // MDEC decode. Without this, DecDCTvlc runs too fast relative
+                            // to sector delivery and reads empty ring buffer slots.
+                            if (cdrom_)
+                            {
+                                const uint32_t dma0_cycles = words; // ~1 cycle/word
+                                cdrom_->tick(dma0_cycles);
+                                check_cdrom_irq_edge();
+                            }
                             std::vector<uint32_t> buf(words);
                             for (uint32_t i = 0; i < words; ++i)
                             {
@@ -1972,14 +1981,39 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                          ((uint32_t)ram_[ma + 3] << 24);
                                 ma = (ma + 4) & 0x1FFFFF;
                             }
+                            {
+                                static int dma0_log = 0;
+                                if (dma0_log < 10)
+                                {
+                                    dma0_log++;
+                                    emu::logf(emu::LogLevel::warn, "BUS",
+                                        "DMA0 MDEC_IN #%d: madr=0x%08X words=%u",
+                                        dma0_log, dma_[0].madr, words);
+                                }
+                            }
                             mdec_->dma_write(buf.data(), words);
                         }
                         else
                         {
                             // DMA1: MDEC → RAM (decoded pixels out)
-                            // Simulate DMA transfer time: tick CDROM so streaming
-                            // sectors continue arriving during MDEC decode.
-                            const uint32_t dma1_cycles = words; // ~1 cycle/word
+                            {
+                                static int dma1_log = 0;
+                                if (dma1_log < 3) {
+                                    dma1_log++;
+                                    emu::logf(emu::LogLevel::warn, "BUS",
+                                        "DMA1 MDEC_OUT #%d: madr=0x%08X words=%u",
+                                        dma1_log, dma_[1].madr, words);
+                                }
+                            }
+                            // Tick CDROM with realistic MDEC decode time.
+                            // Real PS1: MDEC is cycle-accurate, takes real time to decode.
+                            // Our MDEC is instant, so we compensate by ticking the CDROM
+                            // with the time that a real PS1 would spend on MDEC+DMA.
+                            // Each DMA1 chunk = 1920 words = 10 macroblocks at 24-bit.
+                            // Real timing: ~380 cycles/MB decode + memory stalls ≈ 5000/MB total.
+                            // 10 MBs × 5000 = 50000 cycles per chunk.
+                            const uint32_t mbs_per_chunk = words / 192;
+                            const uint32_t dma1_cycles = words + mbs_per_chunk * 5000;
                             if (cdrom_)
                                 cdrom_->tick(dma1_cycles);
                             check_cdrom_irq_edge();
@@ -2235,8 +2269,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         if (words == 0) words = 0x10000;
                         uint32_t ma = dma_[ch].madr & 0x1FFFFF;
 
-                        emu::logf(emu::LogLevel::info, "BUS", "DMA6 OTC: madr=0x%08X bcr=0x%08X words=%u (OT tail at 0x%05X)",
-                            dma_[ch].madr, dma_[ch].bcr, words, ma);
+                        {
+                            uint32_t ot_lowest = (words > 0) ? ((ma - (words - 1) * 4) & 0x1FFFFF) : ma;
+                            emu::logf(emu::LogLevel::warn, "BUS",
+                                "DMA6 OTC: madr=0x%08X words=%u range=[0x%06X - 0x%06X] ring=0x1F61E0 %s",
+                                dma_[ch].madr, words, ot_lowest, ma,
+                                (ot_lowest <= 0x1F61E0 && ma >= 0x1F61E0) ? "**OVERLAP!**" : "ok");
+                        }
 
                         // Guard: OTC walks backward — check if it reaches kernel area
                         {
@@ -2605,16 +2644,22 @@ void Bus::exec_dma3_transfer()
     dma_finish(3);
     cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
 
-    // After DMA3 completes and FIFO is empty, tick the CDROM to allow
-    // the next pending INT1 to deliver immediately. This prevents sector
-    // loss during STR streaming by ensuring the next sector fills the FIFO
-    // before the BIOS callback returns.
-    if (cdrom_->is_fifo_empty() && cdrom_->is_reading_active())
+    // After streaming DMA3: advance CDROM by one sector period so the
+    // next sector arrives before the game reads the ring buffer.
+    // Only for ReadS (streaming) mode — normal ReadN boot reads must
+    // NOT be accelerated or the BIOS timing breaks.
+    if (cdrom_->is_reading_active() && cdrom_->is_streaming_mode())
     {
-        // Tick enough cycles for any pending INT1 to fire
-        cdrom_->tick(1);
+        // Half a sector period — enough to keep sectors flowing without
+        // causing INT1 cascade (full period would trigger next sector immediately)
+        const uint32_t sector_ticks = 112000u;
+        cdrom_->tick(sector_ticks);
         check_cdrom_irq_edge();
     }
+
+    // Check if read buffer is consumed — promote next buffer if available.
+    cdrom_->check_sector_read_complete();
+    check_cdrom_irq_edge();
 }
 
 // ================== DMA completion ==================

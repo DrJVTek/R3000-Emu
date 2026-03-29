@@ -75,6 +75,7 @@ class Cdrom
     // Niveau IRQ CDROM (utilisé par le bus pour latch IRQ2 dans I_STAT sur front montant).
     int irq_line() const;
     bool is_reading_active() const { return reading_active_ != 0; }
+    bool is_streaming_mode() const { return streaming_mode_ != 0; }
     void try_redeliver_sector();
     uint8_t irq_flags_raw() const { return irq_flags_; }
     uint8_t irq_enable_raw() const { return irq_enable_; }
@@ -119,7 +120,8 @@ class Cdrom
 
     // Returns true if the data FIFO is empty (DMA3 DREQ not yet asserted).
     // Used by Bus to defer DMA3 until the sector is ready.
-    bool is_fifo_empty() const { return data_r_ == data_w_; }
+    bool is_fifo_empty() const { return sb_[sb_r_].pos >= sb_[sb_r_].sz; }
+    void check_sector_read_complete();
 
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).
     // Retourne false si pas de disque ou secteur illisible.
@@ -254,9 +256,13 @@ class Cdrom
     uint8_t resp_r_{0};
     uint8_t resp_w_{0};
 
-    uint8_t data_fifo_[4096]{};
-    uint16_t data_r_{0};
-    uint16_t data_w_{0};
+    // 8 sector buffers (like DuckStation). write_idx advances on each
+    // new sector. read_idx advances only on INT1 delivery.
+    static constexpr int kNumSB = 8;
+    struct SB { uint8_t data[2352]{}; uint16_t pos{0}; uint16_t sz{0}; };
+    SB sb_[kNumSB]{};
+    uint8_t sb_w_{0}; // next buffer to write
+    uint8_t sb_r_{0}; // buffer the game reads from
 
     // Last sector header + subheader (captured on each sector read, used by GetLocL)
     // header: mm, ss, ff, mode (4 bytes from raw sector offset 12)
