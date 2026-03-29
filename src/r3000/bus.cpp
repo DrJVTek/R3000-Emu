@@ -1977,10 +1977,13 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         else
                         {
                             // DMA1: MDEC → RAM (decoded pixels out)
-                            // Transfer immediately, but DEFER dma_finish by 11k cycles.
-                            // This way CHCR bit24 is cleared immediately (StCdInterrupt
-                            // sees MDEC as inactive) but the DMA IRQ fires after a delay
-                            // (gives time for CD sectors to be processed).
+                            // Simulate DMA transfer time: tick CDROM so streaming
+                            // sectors continue arriving during MDEC decode.
+                            const uint32_t dma1_cycles = words; // ~1 cycle/word
+                            if (cdrom_)
+                                cdrom_->tick(dma1_cycles);
+                            check_cdrom_irq_edge();
+
                             std::vector<uint32_t> buf(words);
                             mdec_->dma_read(buf.data(), words);
                             for (uint32_t i = 0; i < words; ++i)
@@ -1991,14 +1994,8 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 ram_[ma + 3] = (uint8_t)(buf[i] >> 24);
                                 ma = (ma + 4) & 0x1FFFFF;
                             }
-                            // Clear CHCR busy bit immediately
-                            dma_[ch].chcr &= ~0x01000000u;
-                            // Defer dma_finish (DICR flag + IRQ) by 11k cycles
-                            dma1_pending_ = 1;
-                            dma1_delay_cycles_ = 11000;
                         }
-                        if (!dma1_pending_)
-                            dma_finish(ch);
+                        dma_finish(ch);
                     }
                     // DMA2 (GPU)
                     else if (ch == 2 && gpu_)
@@ -2529,15 +2526,6 @@ void Bus::exec_dma3_transfer()
         const uint8_t b3 = cdrom_->mmio_read8(0x1F801802u);
         const uint32_t w = (uint32_t)b0 | ((uint32_t)b1 << 8) |
                            ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24);
-        // Dump first word of ring buffer DMA3 (header reads)
-        if (i == 0 && (ma >= 0x1EFF00u && ma < 0x1F0100u) && words == 8)
-        {
-            static uint32_t rb_dump = 0;
-            if (rb_dump < 30)
-                emu::logf(emu::LogLevel::warn, "RB_DATA",
-                    "[%u] dest=0x%06X w0=0x%08X data_lba=%u",
-                    ++rb_dump, ma, w, cdrom_->debug_data_lba());
-        }
         if (ma >= 0x0000E000u && ma < 0x0000F000u)
         {
             static uint32_t dma3_evt_hit = 0;
@@ -2627,14 +2615,6 @@ void Bus::exec_dma3_transfer()
         cdrom_->tick(1);
         check_cdrom_irq_edge();
     }
-}
-
-// ================== Deferred DMA1 (MDEC OUT) ==================
-
-void Bus::exec_dma1_deferred()
-{
-    // Transfer already done — just complete the DMA (DICR flag + IRQ).
-    dma_finish(1);
 }
 
 // ================== DMA completion ==================
@@ -3269,21 +3249,6 @@ void Bus::tick(uint32_t cycles)
             {
                 vblank_no_mask_count_ = 0;
             }
-    }
-
-    // Deferred DMA1 (MDEC OUT): complete after delay expires
-    if (dma1_pending_)
-    {
-        if (cycles >= dma1_delay_cycles_)
-        {
-            dma1_pending_ = 0;
-            dma1_delay_cycles_ = 0;
-            exec_dma1_deferred();
-        }
-        else
-        {
-            dma1_delay_cycles_ -= cycles;
-        }
     }
 
     // Tick CDROM
