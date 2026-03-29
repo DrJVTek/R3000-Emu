@@ -3165,6 +3165,26 @@ void Cdrom::tick(uint32_t cycles)
                     return; // Don't deliver INT1, we sent INT5 instead
                 }
 
+                // XA audio filter: check BEFORE advancing. If current sector
+                // is audio+realtime, skip INT1 entirely (real PS1 routes to SPU).
+                if ((mode_ & 0x40u) && disc_)
+                {
+                    uint8_t xa_raw[24]; uint32_t xa_ss = 0;
+                    if (disc_->read_sector_raw(read_lba_, xa_raw, sizeof(xa_raw), &xa_ss) && xa_ss >= 24)
+                    {
+                        if (xa_raw[15] == 2 && (xa_raw[18] & 0x04u) && (xa_raw[18] & 0x40u))
+                        {
+                            // Audio sector: skip INT1, just advance and schedule next
+                            read_lba_++;
+                            const uint32_t next_delay = read_sector_ticks();
+                            pending_irq_type_ = 0x01;
+                            pending_irq_reason_ = 0xFFu;
+                            pending_irq_live_status_ = 1;
+                            arm_pending_irq_after(next_delay);
+                            return; // don't deliver INT1
+                        }
+                    }
+                }
                 read_lba_++;
                 clear_data();
                 // Do NOT clear want_data_: on real hardware the Request Register
