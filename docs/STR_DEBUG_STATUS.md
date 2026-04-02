@@ -69,18 +69,36 @@ lba=112: game ack DICR → mf=0, puis header fire à nouveau
 - Last sector : SB 0x8A (ch1+ch3+master, ch3 ON) → DMA3 IRQ fire → `data_ready_callback`
 - Le handler est aussi ajouté pour read_u8 (LBU) — nécessaire pour le read-modify-write
 
-### Stall frame 4 — analyse en cours
-- `StCdInterrupt` boucle à pc=0x80016038/3C avec `dicr=0x00080000` (ch3 ON, master OFF)
-- Le handler DMA GPU (pc=0x80068300) écrit hardcodé `0x04840000` → clobber ch3/ch1/master
-- Le SB de StCdInterrupt écrit tout byte 2 → clobber les bits des autres handlers
-- L'intercalage BIOS (CDROM bit 2 AVANT DMA bit 3) cause : SB met ch3 → SW clobber ch3
-- Sur vrai PS1, le SW (GPU DMA handler) tourne AVANT le SB (StCdInterrupt) car dans des passes séparées
-- Le `cdrom_->tick(112000)` coalesce les deux IRQ dans la même passe
+### Stall frame 4 — `e18=0` (ring size jamais initialisé)
 
-### Prochaine étape frame 4
-1. Comprendre exactement comment `dicr_` arrive à `0x00080000` (ch3 sans master)
-2. Le defer INT1 du CD tick devrait séparer les passes — vérifier pourquoi ça ne suffit pas
-3. Possibilité : le handler DMA GPU fire à chaque VBlank (pas seulement pendant STR) et clobber en continu
+**Symptôme** : `StGetNext` boucle sur `idx=0 slot_status=3 e08=11 e10=0 e18=0`
+- Baseline (sans DICR byte) : `e18=11` → ring OK
+- Avec DICR byte handler : `e18=0` → ring jamais initialisé
+
+**Cause** : le DICR byte handler route LBU/SB vers `dicr_` au lieu de `io_[]`.
+Avant le fix, SB à DICR+2 allait dans `io_[]` et n'affectait PAS `dicr_`.
+LBU lisait aussi de `io_[]` → les SB/LBU étaient cohérents entre eux mais déconnectés de dicr_.
+Avec le fix, SB/LBU touchent directement `dicr_`, ce qui change le comportement DMA IRQ
+pendant l'init PsyQ → `StSetRing` n'est jamais appelé → `e18=0`.
+
+**Détails SB** :
+- PsyQ `StCdInterrupt` (pc=0x80016A88) écrit des valeurs hardcodées à DICR byte 2 :
+  - `0x82` (ch1+master, ch3 OFF) pour non-last sectors
+  - `0x8A` (ch1+ch3+master) pour last sector
+- Ces valeurs NE contiennent PAS ch2 (bit 18, GPU DMA) → le SB clobber ch2 dans dicr_
+- Le handler DMA GPU (pc=0x80068300) écrit hardcodé `0x04840000` (ch2 seulement) → clobber ch1/ch3
+
+**Tentatives échouées** :
+- OR des enables SB dans le SW → empêche le SB de disable ch3
+- Merge SB dans SW via flag → pas d'effet (le stall est e18=0, pas le clobber)
+- SB modifie uniquement les bits changés (XOR) → toujours e18=0
+- Defer INT1 pendant CD tick DMA3 → pas d'effet sur e18
+
+**Prochaine étape** :
+1. Tracer le moment exact où `e18` devrait être écrit (StSetRing call) dans les deux cas
+2. Comparer ce que LBU retourne pour DICR+2 pendant l'init : `io_[]` vs `dicr_`
+3. Si la valeur LBU diffère, c'est ce qui fait prendre un chemin de code différent à PsyQ
+4. Fix possible : synchroniser `io_[]` avec `dicr_` pour les bytes DPCR/DICR
 
 ### NE PAS REFAIRE
 - Changer les constantes de timing (112000, 20000/MB) — déjà optimisé
