@@ -879,6 +879,15 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
         return true;
     }
 
+    // DPCR / DICR (byte read — LBU from DMA control registers)
+    if (phys >= 0x1F8010F0u && phys < 0x1F8010F8u)
+    {
+        const uint32_t reg = (phys < 0x1F8010F4u) ? dpcr_ : dicr_;
+        const uint32_t byte_off = phys & 3u;
+        out = (uint8_t)((reg >> (byte_off * 8)) & 0xFFu);
+        return true;
+    }
+
     // SIO0 (Serial/Controller)
     if (phys >= kSio0Base && phys < kSio0Base + kSio0Size)
     {
@@ -1434,6 +1443,52 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
             }
             }
         }
+        return true;
+    }
+
+    // DPCR / DICR (byte write — SB to DMA control registers)
+    if (phys >= 0x1F8010F0u && phys < 0x1F8010F8u)
+    {
+        if (phys < 0x1F8010F4u)
+        {
+            // DPCR byte write
+            const uint32_t byte_off = phys - 0x1F8010F0u;
+            const uint32_t shift = byte_off * 8;
+            dpcr_ = (dpcr_ & ~((uint32_t)0xFFu << shift)) | ((uint32_t)v << shift);
+            return true;
+        }
+
+        // DICR byte write
+        const uint32_t byte_off = phys - 0x1F8010F4u;
+        const uint32_t shift = byte_off * 8;
+
+        if (byte_off == 3)
+        {
+            // Byte 3 (bits 24-31): bits 24-30 acknowledge (write 1 clears), bit 31 read-only
+            const uint32_t ack_mask = ((uint32_t)(v & 0x7Fu)) << 24;
+            dicr_ &= ~ack_mask;
+        }
+        else
+        {
+            // Bytes 0-2: apply writable mask per byte
+            const uint32_t byte_mask = (uint32_t)0xFFu << shift;
+            constexpr uint32_t wr_mask = 0x00FF803Fu; // bits 0-5, 15, 16-23
+            const uint32_t effective = byte_mask & wr_mask;
+            dicr_ = (dicr_ & ~effective) | (((uint32_t)v << shift) & effective);
+        }
+
+        // Recompute master flag
+        const uint32_t flags     = (dicr_ >> 24) & 0x7Fu;
+        const int      force     = (dicr_ >> 15) & 1;
+        const int      master_en = (dicr_ >> 23) & 1;
+        const int      old_mf    = (dicr_ >> 31) & 1;
+        if (force || (master_en && flags))
+            dicr_ |= (1u << 31);
+        else
+            dicr_ &= ~(1u << 31);
+        if (!old_mf && (dicr_ & (1u << 31)))
+            i_stat_ |= (1u << 3);
+
         return true;
     }
 

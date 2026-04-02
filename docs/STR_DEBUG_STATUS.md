@@ -6,32 +6,89 @@
 
 ---
 
-## État actuel (2026-04-02, baseline restaurée après Codex + Claude)
+## État actuel (2026-04-02, session Claude Opus — analyse DMA IRQ coalescence)
 
-### Découverte critique (2026-04-02, Claude session)
+### Baseline confirmée intacte (commit deca519)
+- **Frame 1** : 200/200 MBs ✅
+- **Frame 2** : 200/200 MBs ✅  
+- **Frame 3** : 188/200 MBs (98%)
+- **Frames 4+** : stall
+- **IMPORTANT** : hello_strplay met ~163 secondes d'émulation pour démarrer ReadS.
+  Il faut `--timeout-ms=180000` minimum, pas 30000 !
 
-**`write_u8` ne gère PAS les écritures byte au DICR (0x1F8010F4) !**
+### Découverte session (2026-04-02, Claude Opus)
 
-PsyQ utilise `SB` (store byte) à DICR+2 pour toggler le ch3 IRQ enable :
-- `C_011_OBJ_948` (non-last sector) : `DICR[2] &= ~(1<<3)` → DÉSACTIVE ch3 IRQ
-- `C_011_OBJ_A20` (last sector) : écrit à DICR[2] pour ACTIVER ch3 IRQ
+#### 1. DICR byte handlers implémentés et testés
+- `read_u8` et `write_u8` pour DPCR (0x1F8010F0) et DICR (0x1F8010F4)
+- **hello_strplay n'utilise PAS SB pour DICR** — que des écritures 32-bit
+- Le handler est correct mais sans effet sur hello_strplay
+- Peut servir pour Tekken ou d'autres jeux PsyQ qui utilisent SB
 
-Chez nous, ces `SB` tombent dans le fallback I/O → **silencieusement ignorés**.
-Conséquence : ch3 IRQ reste toujours ON → DMA IRQ fire pour CHAQUE DMA3 → coalescence.
+#### 2. DMA IRQ coalescence = cause racine confirmée par traces
+Trace DMA3IRQ (hello_strplay ReadS, lba 109-112) :
+```
+lba=109 header(8w):  old_mf=0 → new_mf=1, irq_fired=1 ← SEUL IRQ qui fire
+lba=109 payload(504): old_mf=1 → new_mf=1, irq_fired=0 ← coalesced (même secteur, attendu)
+lba=110 header:       old_mf=1 → new_mf=1, irq_fired=0 ← coalesced (cross-sector!)
+lba=110 payload:      old_mf=1 → new_mf=1, irq_fired=0
+lba=111 header/payload: idem
+lba=112: game ack DICR → mf=0, puis header fire à nouveau
+```
+**Résultat** : `data_ready_callback` fire 1 fois pour 4 secteurs au lieu de 1 fois/secteur.
 
-**Tentative de fix** : ajout handler DICR byte dans `write_u8` → **0 frames** (régression totale).
-Cause : `C_011_OBJ_A20` lit le DICR[2] APRÈS que le non-last path l'a clearé et le réécrit tel quel.
-Il faut comprendre comment `C_011_OBJ_A20` est CENSÉ réactiver ch3 (asm à 0x80016A88 pas clair dans Ghidra).
+#### 3. Cause de la coalescence cross-sector
+- Notre DMA est **instantané** (0 cycles). Sur vrai PS1, DMA3 prend des centaines de cycles.
+- Pendant StCdInterrupt (interrupts désactivés), TOUS les DMA3 d'un secteur completent.
+- Le cdrom_->tick(112000) depuis DMA3 fait avancer le CD et queue le prochain INT1.
+- CDROM INT1 → StCdInterrupt cascade : le prochain secteur se traite dans le MÊME handler.
+- master_flag reste à 1 pendant toute la cascade → pas d'edge 0→1 → DMA IRQ perdu.
 
-**Fix revert** — baseline restaurée à 200/200/188.
+#### 4. DuckStation : architecture DMA/CDROM très différente
+- DuckStation NE tick PAS le CD depuis DMA3
+- `CheckForSectorBufferReadComplete()` appelé DANS `DMARead()` (avant CompleteTransfer)
+- Missed INT1 redeliver avec 5000 cycles de délai
+- `current_read_sector_buffer` SAUTE au write pointer quand INT1 est délivré
+- DMA prend du temps réel (tick count retourné et ajouté au CPU)
+
+#### 5. Tentatives et résultats
+| Tentative | Résultat | Pourquoi |
+|-----------|----------|----------|
+| Retirer CD tick de DMA3/0/1 | 0 frames | CD starve — pas assez de cycles via Bus::tick() seul |
+| Reorder check_sector_read_complete avant dma_finish | 200/200/188 | Pas d'effet |
+| Auto-ack ch3 flag après dma_finish | 0 frames (quand appliqué à tous ch) | Casse GPU DMA2 |
+| Auto-ack ch3 SEULEMENT | 0 frames (re-testé 180s) | Le handler a BESOIN du flag pour dispatcher data_ready_callback |
+| want_data_=0 dans check_sector_read_complete | 0 frames | Casse BFRD (interdit par design) |
+| try_redeliver_sector depuis check_complete | 200/200/188 | try_redeliver exige pending IRQ existant |
 
 ### Prochaine étape exacte
 
-1. Désassembler correctement `C_011_OBJ_A20` (le code à 0x80016A88 retourné par Ghidra semble faux)
-2. Comprendre comment le ch3 IRQ enable est réactivé pour le dernier secteur
-3. Implémenter le DICR byte write handler qui respecte cette sémantique
-4. Si `C_011_OBJ_A20` OR le bit ch3 (pas juste write-back), le fix est simple
-5. Si `C_011_OBJ_A20` dépend d'un autre mécanisme (BIOS DMA handler), c'est plus complexe
+### Fix appliqué : DICR byte handlers (read_u8 + write_u8) ✅
+- Résultat : **200/200/200** (vs 200/200/188 avant)
+- PsyQ `StCdInterrupt` utilise `SB` à DICR+2 (0x1F8010F6) pour toggler ch3 DMA IRQ enable
+- Non-last sector : SB 0x82 (ch1+master, ch3 OFF) → DMA3 IRQ supprimé
+- Last sector : SB 0x8A (ch1+ch3+master, ch3 ON) → DMA3 IRQ fire → `data_ready_callback`
+- Le handler est aussi ajouté pour read_u8 (LBU) — nécessaire pour le read-modify-write
+
+### Stall frame 4 — analyse en cours
+- `StCdInterrupt` boucle à pc=0x80016038/3C avec `dicr=0x00080000` (ch3 ON, master OFF)
+- Le handler DMA GPU (pc=0x80068300) écrit hardcodé `0x04840000` → clobber ch3/ch1/master
+- Le SB de StCdInterrupt écrit tout byte 2 → clobber les bits des autres handlers
+- L'intercalage BIOS (CDROM bit 2 AVANT DMA bit 3) cause : SB met ch3 → SW clobber ch3
+- Sur vrai PS1, le SW (GPU DMA handler) tourne AVANT le SB (StCdInterrupt) car dans des passes séparées
+- Le `cdrom_->tick(112000)` coalesce les deux IRQ dans la même passe
+
+### Prochaine étape frame 4
+1. Comprendre exactement comment `dicr_` arrive à `0x00080000` (ch3 sans master)
+2. Le defer INT1 du CD tick devrait séparer les passes — vérifier pourquoi ça ne suffit pas
+3. Possibilité : le handler DMA GPU fire à chaque VBlank (pas seulement pendant STR) et clobber en continu
+
+### NE PAS REFAIRE
+- Changer les constantes de timing (112000, 20000/MB) — déjà optimisé
+- Re-vérifier CPU shifts, zigzag, IDCT, scale table — tous confirmés corrects
+- Modifier `sb_r_` directement — toutes les variantes testées ont échoué
+- Retirer les ticks DMA3/DMA1 — sans eux, 0 frames
+- Mettre want_data_=0 dans check_sector_read_complete — casse le boot
+- Utiliser `--timeout-ms=30000` — **hello_strplay a besoin de 180000 minimum**
 
 ### NE PAS REFAIRE
 - Changer les constantes de timing (112000, 20000/MB) — déjà optimisé
