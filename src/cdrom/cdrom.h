@@ -6,6 +6,9 @@
 
 #include "../log/filelog.h"
 #include "../log/logger.h"
+#include "../audio/xa_decoder.h"
+
+namespace audio { class Spu; }
 
 namespace cdrom
 {
@@ -121,6 +124,9 @@ class Cdrom
         irq_callback_ = cb;
         irq_callback_user_ = user;
     }
+
+    // Set SPU for XA-ADPCM audio output
+    void set_spu(audio::Spu* spu) { spu_ = spu; }
 
     // Returns true if the data FIFO is empty (DMA3 DREQ not yet asserted).
     // Used by Bus to defer DMA3 until the sector is ready.
@@ -241,6 +247,10 @@ class Cdrom
     // IRQ callback for push-model notification
     IrqCallback irq_callback_{nullptr};
     void* irq_callback_user_{nullptr};
+
+    // XA-ADPCM decoder + SPU output
+    audio::Spu* spu_{nullptr};
+    audio::XaDecoder xa_decoder_;
 
     TimingMode timing_mode_{TimingMode::CompatibilityFast};
 

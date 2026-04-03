@@ -1,4 +1,5 @@
 #include "cdrom.h"
+#include "../audio/spu.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1101,8 +1102,15 @@ void Cdrom::try_fill_data_fifo()
         const uint8_t submode = last_sector_subheader_[2];
         if ((submode & 0x04u) && (submode & 0x40u)) // audio + realtime
         {
-            // XA audio sector — don't deliver to CPU, just advance
-            // (SPU XA decode would go here)
+            // XA audio sector — decode and send to SPU, skip CPU delivery
+            if (spu_)
+            {
+                // XA decoder expects data starting at subheader (raw + 16)
+                int16_t xa_left[4032], xa_right[4032];
+                const int n = xa_decoder_.decode_sector(raw + 16, xa_left, xa_right);
+                if (n > 0)
+                    spu_->push_xa_samples(xa_left, xa_right, n);
+            }
             return;
         }
     }

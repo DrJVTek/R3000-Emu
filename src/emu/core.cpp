@@ -318,6 +318,9 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
         auto* bus = static_cast<r3000::Bus*>(user);
         bus->check_cdrom_irq_edge();
     }, bus_.get());
+    // Connect CDROM XA-ADPCM output to SPU
+    if (bus_->spu())
+        cdrom_.set_spu(bus_->spu());
     cpu_.reset(new (std::nothrow) r3000::Cpu(*bus_, logger_));
     if (!cpu_)
     {
