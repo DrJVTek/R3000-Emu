@@ -2885,8 +2885,22 @@ void Bus::fire_vblank_external()
 
 // ================== TICK ==================
 
+void Bus::tick_peripherals(uint32_t cycles)
+{
+    // Temporarily disable external_vblank_ so tick() processes everything
+    const bool was_external = external_vblank_;
+    external_vblank_ = false;
+    tick(cycles);
+    external_vblank_ = was_external;
+}
+
 void Bus::tick(uint32_t cycles)
 {
+    // In external peripheral mode, tick() does almost nothing — peripherals
+    // are ticked by tick_peripherals() called from the worker thread.
+    if (external_vblank_)
+        return;
+
     if (bios_post_60643_trace_active_ &&
         !bios_post_60643_exit_logged_ &&
         cpu_pc_ < 0xBFC00000u)

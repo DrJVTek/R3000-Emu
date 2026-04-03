@@ -149,6 +149,11 @@ class Bus
     void fire_vblank_external();
     void set_external_vblank(bool enabled) { external_vblank_ = enabled; }
 
+    // Tick peripherals (timers, SIO0, SPU, CDROM) separately from the CPU.
+    // Called from worker thread at regular intervals instead of per-instruction.
+    // cycles = accumulated CPU cycles since last call.
+    void tick_peripherals(uint32_t cycles);
+
     // SPU access
     audio::Spu* spu() const { return spu_; }
 

@@ -203,6 +203,14 @@ public:
                 ++LocalSteps;
             }
 
+            // Tick peripherals with accumulated cycles from this iteration
+            {
+                r3000::Bus* Bus = Core->bus();
+                const uint32 PeriphCycles = static_cast<uint32>(DeltaTime * kPS1CpuClock);
+                if (Bus && PeriphCycles > 0)
+                    Bus->tick_peripherals(PeriphCycles);
+            }
+
             // Fire VBlank at fixed rate (independent of CPU speed)
             if (Now - LastVblTime >= kVblPeriod)
             {
