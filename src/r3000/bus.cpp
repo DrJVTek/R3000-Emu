@@ -2924,9 +2924,9 @@ void Bus::tick(uint32_t cycles)
     uint32_t gpu_scanline_delta = 0;
     bool gpu_vblank_fired = false;
 
-    if (gpu_ && !external_vblank_)
+    if (gpu_)
     {
-        // Normal mode: VBlank derived from GPU scanline counter
+        // Always tick scanline counter (needed for GPUSTAT polling).
         const uint32_t old_scanline = gpu_->current_scanline();
         const uint32_t total_scanlines = gpu_->total_scanlines();
         gpu_vblank_fired = gpu_->tick_vblank(cycles) != 0;
@@ -3051,10 +3051,15 @@ void Bus::tick(uint32_t cycles)
     }
 
     // Handle GPU VBlank edge latched at the start of this tick.
+    // When external_vblank_ is active, the IRQ + draw swap are done by
+    // fire_vblank_external() at a fixed rate. Diagnostics still run here.
     if (gpu_vblank_fired)
     {
-            i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
-            ++vblank_total_count_;
+            if (!external_vblank_)
+            {
+                i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
+                ++vblank_total_count_;
+            }
 
             // Dump BIOS IRQ handler chain once at vblank 200
             // The BIOS stores priority chain head pointers at 0x0100-0x010F
@@ -3093,8 +3098,12 @@ void Bus::tick(uint32_t cycles)
             }
 
             // Shadow 3D systems: swap buffers at VBlank
-            if (gte_3d_) gte_3d_->swap_frame();
-            if (gpu_3d_) gpu_3d_->on_vblank();
+            // (handled by fire_vblank_external when external_vblank_ is active)
+            if (!external_vblank_)
+            {
+                if (gte_3d_) gte_3d_->swap_frame();
+                if (gpu_3d_) gpu_3d_->on_vblank();
+            }
 
             // Per-VBlank: scan CDROM event status fields, log when any changes to 0x4000
             // Events[0-4] at 0xE028+i*0x1C, status at offset+4
@@ -3119,8 +3128,8 @@ void Bus::tick(uint32_t cycles)
                 }
             }
 
-            // Fire VBlank hooks (zero-cost when no hooks registered)
-            if (hooks_ && hooks_->has_vblank())
+            // Fire VBlank hooks (handled by fire_vblank_external when external)
+            if (!external_vblank_ && hooks_ && hooks_->has_vblank())
                 hooks_->fire_vblank(vblank_total_count_);
 
             // DMA2 no-token diagnostics: build per-vblank summary and optionally log top PCs.
