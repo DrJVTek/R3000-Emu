@@ -2698,6 +2698,35 @@ void Bus::exec_dma3_transfer()
         }
     }
 
+    // Log STR header for 8-word DMA3 (header read)
+    if (words == 8 && cdrom_->is_streaming_mode())
+    {
+        static uint32_t str_hdr_cnt = 0;
+        if (str_hdr_cnt < 60)
+        {
+            ++str_hdr_cnt;
+            // Read back the 32 bytes from RAM
+            auto rd16 = [&](uint32_t p) -> uint16_t {
+                return (uint16_t)ram_[p] | ((uint16_t)ram_[p+1] << 8);
+            };
+            const uint32_t base = start_ma;
+            const uint16_t magic    = rd16(base + 0);
+            const uint16_t type     = rd16(base + 2);
+            const uint16_t chunk_id = rd16(base + 4);
+            const uint16_t n_chunks = rd16(base + 6);
+            const uint32_t frame_no = (uint32_t)ram_[base+8] | ((uint32_t)ram_[base+9]<<8) |
+                                      ((uint32_t)ram_[base+10]<<16) | ((uint32_t)ram_[base+11]<<24);
+            const uint16_t demux_sz = rd16(base + 12);
+            const uint16_t width    = rd16(base + 16);
+            const uint16_t height   = rd16(base + 18);
+            emu::logf(emu::LogLevel::warn, "STRHDR",
+                "[%u] lba=%u madr=0x%05X magic=0x%04X type=0x%04X chunk=%u/%u frame=%u demux=%u %ux%u last=%d",
+                str_hdr_cnt, cdrom_->debug_data_lba(), start_ma,
+                magic, type, chunk_id, n_chunks, frame_no, demux_sz, width, height,
+                (chunk_id == n_chunks - 1) ? 1 : 0);
+        }
+    }
+
     dma_finish(3);
     cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
 

@@ -141,6 +141,9 @@ class Bus
     // Accès device (pour HLE BIOS côté CPU).
     cdrom::Cdrom* cdrom() const { return cdrom_; }
 
+    // CDROM IRQ edge detection — public so the CDROM IRQ callback can call it.
+    void check_cdrom_irq_edge();
+
     // SPU access
     audio::Spu* spu() const { return spu_; }
 
@@ -190,7 +193,6 @@ class Bus
     void sio0_write_data(uint8_t v);
     uint16_t sio0_read_data();
     uint16_t sio0_stat_value() const;
-    void check_cdrom_irq_edge();
 
     uint8_t* ram_{nullptr};
     uint32_t ram_size_{0};

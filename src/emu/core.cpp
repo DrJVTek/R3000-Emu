@@ -311,6 +311,13 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
         set_err(err, err_cap, "out of memory");
         return false;
     }
+    // Register CDROM IRQ callback so edge detection is immediate (like DuckStation's
+    // SetLineState) instead of polled. Without this, fast IRQ ack+re-fire sequences
+    // (e.g., consecutive sector deliveries in STR streaming) miss the 0→1 edge.
+    cdrom_.set_irq_callback([](int irq_state, void* user) {
+        auto* bus = static_cast<r3000::Bus*>(user);
+        bus->check_cdrom_irq_edge();
+    }, bus_.get());
     cpu_.reset(new (std::nothrow) r3000::Cpu(*bus_, logger_));
     if (!cpu_)
     {
