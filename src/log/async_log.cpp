@@ -41,6 +41,10 @@ struct AsyncLogState
 
     LogLevel                 max_level{LogLevel::info};
 
+    // Consumer callback (if set, used instead of stderr)
+    AsyncLogConsumer         consumer{nullptr};
+    void*                    consumer_user{nullptr};
+
     // Consumer thread wakeup
     std::mutex               mtx;
     std::condition_variable  cv;
@@ -78,11 +82,18 @@ static void consumer_loop(AsyncLogState* s)
                 break;
 
             const LogEntry& e = s->ring[t & s->mask];
-            const uint8_t lvl = (e.level < 5) ? e.level : 4;
 
-            // Format: [LEVEL] [TAG] msg
-            std::fprintf(stderr, "[%s] [%s] %s\n",
-                level_str[lvl], e.tag, e.msg);
+            if (s->consumer)
+            {
+                s->consumer(e.ts_ns, static_cast<LogLevel>(e.level),
+                            e.tag, e.msg, s->consumer_user);
+            }
+            else
+            {
+                const uint8_t lvl = (e.level < 5) ? e.level : 4;
+                std::fprintf(stderr, "[%s] [%s] %s\n",
+                    level_str[lvl], e.tag, e.msg);
+            }
 
             s->tail.store(t + 1, std::memory_order_release);
         }
@@ -138,7 +149,8 @@ static void async_log_cb(LogLevel level, const char* tag, const char* msg, void*
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-void async_log_init(LogLevel max_level, int ring_cap_bits)
+void async_log_init(LogLevel max_level, int ring_cap_bits,
+                     AsyncLogConsumer consumer, void* consumer_user)
 {
     if (g_alog)
         return; // already initialised
@@ -148,11 +160,13 @@ void async_log_init(LogLevel max_level, int ring_cap_bits)
     const uint32_t cap = 1u << ring_cap_bits;
 
     auto* s = new AsyncLogState();
-    s->ring      = new LogEntry[cap];
-    s->mask      = cap - 1;
-    s->max_level = max_level;
-    s->running   = true;
-    g_alog       = s;
+    s->ring          = new LogEntry[cap];
+    s->mask          = cap - 1;
+    s->max_level     = max_level;
+    s->consumer      = consumer;
+    s->consumer_user = consumer_user;
+    s->running       = true;
+    g_alog           = s;
 
     // Install as emu::Log sink.
     static emu::Log log_obj;

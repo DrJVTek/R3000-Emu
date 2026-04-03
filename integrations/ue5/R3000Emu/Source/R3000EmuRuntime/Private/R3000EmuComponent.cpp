@@ -538,7 +538,7 @@ void UR3000EmuComponent::InitEmulator()
     {
         const FTCHARToUTF8 EmuLvlUtf8(*EmuLogLevel);
         const emu::LogLevel EmuLevel = emu::log_parse_level(EmuLvlUtf8.Get());
-        emu::async_log_init(EmuLevel, 14);
+        emu::async_log_init(EmuLevel, 14, UEAsyncLogOutput, &EmuLogFiles_);
     }
 
     if (CoreLogFile_)

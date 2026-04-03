@@ -16,10 +16,17 @@
 namespace emu
 {
 
+// Consumer callback type: called from the log thread for each entry.
+// If not set, entries go to stderr (CLI default).
+using AsyncLogConsumer = void(*)(uint64_t ts_ns, LogLevel level,
+                                  const char* tag, const char* msg, void* user);
+
 // Start the async log background thread.
 // max_level: filter, same as emu::Log::max_level.
-// if ring_cap_bits >= 10 && <= 17: ring buffer has 2^n entries (default=14 = 16384).
-void async_log_init(LogLevel max_level, int ring_cap_bits = 14);
+// consumer/user: optional output callback (called from log thread, not emu thread).
+//   If nullptr, entries go to stderr.
+void async_log_init(LogLevel max_level, int ring_cap_bits = 14,
+                     AsyncLogConsumer consumer = nullptr, void* consumer_user = nullptr);
 
 // Flush remaining entries and stop the background thread.
 // Blocks until all queued messages have been written.
