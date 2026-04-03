@@ -2024,7 +2024,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             if (cdrom_)
                             {
                                 const uint32_t dma0_cycles = words; // ~1 cycle/word
-                                cdrom_->tick(dma0_cycles);
+                                // No CD tick from DMA0
                                 check_cdrom_irq_edge();
                             }
                             std::vector<uint32_t> buf(words);
@@ -2071,7 +2071,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             const uint32_t mbs_per_chunk = (words > 192) ? words / 192 : 1;
                             const uint32_t dma1_cycles = words + mbs_per_chunk * 20000;
                             if (cdrom_)
-                                cdrom_->tick(dma1_cycles);
+                                // No CD tick from DMA1
                             check_cdrom_irq_edge();
 
                             std::vector<uint32_t> buf(words);
@@ -2736,9 +2736,9 @@ void Bus::exec_dma3_transfer()
     // Only for ReadS (streaming) — normal ReadN boot must NOT be affected.
     if (cdrom_->is_reading_active() && cdrom_->is_streaming_mode())
     {
-        const uint32_t sector_ticks = 112000u; // ~50% of double-speed sector period
-        cdrom_->tick(sector_ticks);
-        check_cdrom_irq_edge();
+        // No CD tick from DMA3 — let Bus::tick() in the main loop handle it.
+        // The tick_clock_only caused read_lba to cascade when deliveries
+        // caught up with the advanced clock.
     }
 
     // Check if read buffer is consumed — promote next buffer if available.

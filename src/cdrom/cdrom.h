@@ -92,6 +92,10 @@ class Cdrom
     // Tick (called from bus). Handles async IRQ delivery (INT5, INT1 for reads).
     void tick(uint32_t cycles);
 
+    // Advance clock only — no IRQ delivery. Used by DMA handlers to give the
+    // CD time without cascading INT1 deliveries that advance read_lba_ too fast.
+    void tick_clock_only(uint32_t cycles) { now_cycles_ += cycles; }
+
     // Audio output for SPU: get next stereo sample pair from CDDA/XA playback.
     // Returns true if audio is available, false if FIFO is empty.
     bool get_audio_frame(int16_t* left, int16_t* right);
