@@ -933,6 +933,7 @@ void Gpu::gp0_execute()
 // ---------------------------------------------------------------------------
 void Gpu::gp0_fill_rect()
 {
+    if (skip_fill_rect_) return;
     const uint32_t color = cmd_buf_[0] & 0x00FFFFFFu;
     const uint32_t xy = cmd_buf_[1];
     const uint32_t wh = cmd_buf_[2];

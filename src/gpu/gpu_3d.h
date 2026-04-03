@@ -63,6 +63,9 @@ class Gpu3D : public IGpu
     void bind_gte_3d(gte::Gte3D* g) { gte_3d_ = g; }
     void bind_bus(r3000::Bus* b) { bus_ = b; }
 
+    void set_skip_fill_rect(bool skip) { skip_fill_rect_ = skip; }
+    bool skip_fill_rect() const { return skip_fill_rect_; }
+
     // IGpu interface
     void reset() override;
     void gp0(uint32_t word) override;
@@ -145,6 +148,7 @@ class Gpu3D : public IGpu
     // Shadow GTE reference for SXY lookup
     gte::Gte3D* gte_3d_{nullptr};
     r3000::Bus* bus_{nullptr};
+    bool skip_fill_rect_{false};
 
     // Debug counters (public for CLI diagnostic — saved at VBlank before reset)
   public:

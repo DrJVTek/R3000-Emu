@@ -285,6 +285,9 @@ class Gpu
     void set_clip_to_draw_area(bool enabled) { clip_to_draw_area_ = enabled; }
     bool clip_to_draw_area() const { return clip_to_draw_area_; }
 
+    void set_skip_fill_rect(bool skip) { skip_fill_rect_ = skip; }
+    bool skip_fill_rect() const { return skip_fill_rect_; }
+
     // Get previous frame stats (saved before reset, for stuck detection)
     const FrameStats& prev_frame_stats() const { return prev_frame_stats_; }
 
@@ -401,6 +404,7 @@ class Gpu
 
     // Draw area clipping toggle (default: on = standard PS1; off = VR mode)
     bool clip_to_draw_area_{true};
+    bool skip_fill_rect_{false};
 
     uint32_t vblank_div_{0};
     bool in_vblank_{false};
