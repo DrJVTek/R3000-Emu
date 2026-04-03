@@ -1,4 +1,5 @@
 #include "xa_decoder.h"
+#include <algorithm>
 #include <cstring>
 
 namespace audio
@@ -86,52 +87,29 @@ void XaDecoder::decode_sound_group(
         const int32_t fneg = (filter < 5) ? kNegTable[filter] : 0;
 
         // Pick previous samples for this channel
-        int16_t s1, s2;
-        if (is_stereo_)
-        {
-            if (b & 1) { s1 = prev_right_[0]; s2 = prev_right_[1]; }
-            else        { s1 = prev_left_[0];  s2 = prev_left_[1];  }
-        }
-        else
-        {
-            s1 = prev_left_[0]; s2 = prev_left_[1];
-        }
+        // DuckStation: prev samples are s32, indexed by channel (stereo: block&1)
+        int32_t* prev = is_stereo_ ? ((b & 1) ? prev_right_ : prev_left_) : prev_left_;
 
         for (int w = 0; w < 28; w++)
         {
             // Each data word is 4 bytes (little-endian), nibble for block b
-            const uint32_t word = (uint32_t)words_ptr[w * 4 + 0]
-                                | ((uint32_t)words_ptr[w * 4 + 1] << 8)
-                                | ((uint32_t)words_ptr[w * 4 + 2] << 16)
-                                | ((uint32_t)words_ptr[w * 4 + 3] << 24);
-            const int32_t nibble_raw = (int32_t)((word >> (b * 4)) & 0x0F);
+            uint32_t word;
+            std::memcpy(&word, &words_ptr[w * 4], sizeof(word));
+            const uint32_t nibble = (word >> (b * 4)) & 0x0F;
 
-            // Sign extend 4-bit to 32-bit
-            const int32_t nibble = (nibble_raw >= 8) ? (nibble_raw - 16) : nibble_raw;
+            // DuckStation formula: cast to int16 THEN arithmetic shift
+            const int16_t sample = static_cast<int16_t>(static_cast<uint16_t>(nibble << 12)) >> shift;
 
-            // Decode sample
-            int32_t sample = (nibble << 12) >> shift;
-            sample += (s1 * fpos + s2 * fneg + 32) >> 6;
+            // Mix with previous samples (filter)
+            const int32_t interp_sample = std::clamp<int32_t>(
+                static_cast<int32_t>(sample) + ((prev[0] * fpos) >> 6) + ((prev[1] * fneg) >> 6),
+                -32768, 32767);
 
-            // Clamp to int16
-            if (sample > 32767) sample = 32767;
-            if (sample < -32768) sample = -32768;
-
-            s2 = s1;
-            s1 = static_cast<int16_t>(sample);
-            block_samples[b][w] = static_cast<int16_t>(sample);
+            prev[1] = prev[0];
+            prev[0] = interp_sample;
+            block_samples[b][w] = static_cast<int16_t>(interp_sample);
         }
-
-        // Save state per channel
-        if (is_stereo_)
-        {
-            if (b & 1) { prev_right_[0] = s1; prev_right_[1] = s2; }
-            else        { prev_left_[0] = s1;  prev_left_[1] = s2;  }
-        }
-        else
-        {
-            prev_left_[0] = s1; prev_left_[1] = s2;
-        }
+        // State is already saved via prev pointer (points to prev_left_ or prev_right_)
     }
 
     // Output: interleave blocks into L/R channels

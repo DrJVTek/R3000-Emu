@@ -62,9 +62,9 @@ class XaDecoder
     uint8_t filter_file_{0};
     uint8_t filter_channel_{0};
 
-    // ADPCM decode state (separate for left/right)
-    int16_t prev_left_[2]{0, 0};
-    int16_t prev_right_[2]{0, 0};
+    // ADPCM decode state — s32 like DuckStation (separate for left/right)
+    int32_t prev_left_[2]{0, 0};
+    int32_t prev_right_[2]{0, 0};
 
     // Last sector info
     int sample_rate_{37800};
