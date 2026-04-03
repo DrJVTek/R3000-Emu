@@ -252,12 +252,21 @@ void UR3000GpuComponent::RebuildMesh()
 
     if (NumCmds == 0)
     {
-        // Don't clear the mesh on empty frames — keep the previous frame visible.
         // PS1 games often skip GPU commands on some VBlanks (e.g. Ridge Racer
-        // draws 2 frames then skips 1 in 30fps interlaced mode). Clearing
-        // the mesh on empty frames causes visible flickering.
+        // draws 2 frames then skips 1 in 30fps interlaced mode). Keep the
+        // previous mesh for a few empty frames to avoid flickering.
+        // But if many consecutive frames are empty (e.g. during STR video
+        // playback where the GPU has no draw commands), clear the mesh to
+        // avoid stale polygons remaining visible.
+        EmptyFrameCount_++;
+        if (EmptyFrameCount_ < 3)
+            return;
+        // Clear stale mesh after 3+ consecutive empty frames
+        if (MeshComp_)
+            MeshComp_->ClearAllMeshSections();
         return;
     }
+    EmptyFrameCount_ = 0;
 
     // Lazy-(re)create material instances if slots were assigned after BindGpu
     // (e.g., Blueprint BeginPlay sets MatSemi0-3 after InitEmulator already called BindGpu)

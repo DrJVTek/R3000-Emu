@@ -276,6 +276,7 @@ private:
 
     uint32 LastVramFrame_{0xFFFFFFFFu};
     int32 LastTriCount_{0};
+    int32 EmptyFrameCount_{0};
     int32 SectionTriCount_[kNumSections]{0};
     int32 LastSectionCount_{0};
     float GpuFps_{0.0f};
