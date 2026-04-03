@@ -723,9 +723,9 @@ void Bus::sio0_do_transfer()
             ++sio0_xfer_count;
             if (sio0_xfer_count <= 20 || (sio0_xfer_count % 100 == 0))
             {
-                emu::logf(emu::LogLevel::info, "BUS",
-                    "SIO0 xfer #%u START: btns=0x%04X baud=%u",
-                    sio0_xfer_count, btns, (unsigned)sio0_baud_);
+                emu::logf(emu::LogLevel::warn, "BUS",
+                    "SIO0 xfer #%u START: btns=0x%04X baud=%u vbl=%u",
+                    sio0_xfer_count, btns, (unsigned)sio0_baud_, vblank_total_count_);
             }
         }
 
@@ -2858,6 +2858,31 @@ void Bus::check_cdrom_irq_edge()
     cdrom_irq_prev_ = cdirq;
 }
 
+// ================== EXTERNAL VBLANK ==================
+
+void Bus::fire_vblank_external()
+{
+    // Fire VBlank IRQ — same as the gpu_vblank_fired path in tick() but
+    // called from the worker thread timer at a fixed rate (50Hz PAL / 60Hz NTSC).
+    // This decouples VBlank from CPU speed.
+    i_stat_ |= (1u << 0);
+    ++vblank_total_count_;
+
+    // GPU draw list swap (needed for UE5 rendering bridge)
+    if (gpu_)
+    {
+        gpu_->tick_vblank_swap_only();
+    }
+
+    // Shadow 3D systems
+    if (gte_3d_) gte_3d_->swap_frame();
+    if (gpu_3d_) gpu_3d_->on_vblank();
+
+    // VBlank hooks
+    if (hooks_ && hooks_->has_vblank())
+        hooks_->fire_vblank(vblank_total_count_);
+}
+
 // ================== TICK ==================
 
 void Bus::tick(uint32_t cycles)
@@ -2899,8 +2924,9 @@ void Bus::tick(uint32_t cycles)
     uint32_t gpu_scanline_delta = 0;
     bool gpu_vblank_fired = false;
 
-    if (gpu_)
+    if (gpu_ && !external_vblank_)
     {
+        // Normal mode: VBlank derived from GPU scanline counter
         const uint32_t old_scanline = gpu_->current_scanline();
         const uint32_t total_scanlines = gpu_->total_scanlines();
         gpu_vblank_fired = gpu_->tick_vblank(cycles) != 0;
@@ -3029,6 +3055,42 @@ void Bus::tick(uint32_t cycles)
     {
             i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
             ++vblank_total_count_;
+
+            // Dump BIOS IRQ handler chain once at vblank 200
+            // The BIOS stores priority chain head pointers at 0x0100-0x010F
+            // Each entry: +0=next, +4=handler_func, +8=verifier
+            if (vblank_total_count_ == 200)
+            {
+                auto rd32 = [&](uint32_t p) -> uint32_t {
+                    if (p + 4 > ram_size_) return 0xDEADu;
+                    return (uint32_t)ram_[p] | ((uint32_t)ram_[p+1]<<8)
+                         | ((uint32_t)ram_[p+2]<<16) | ((uint32_t)ram_[p+3]<<24);
+                };
+                emu::logf(emu::LogLevel::warn, "IRQ_CHAIN",
+                    "VBL#200 i_stat=0x%04X i_mask=0x%04X",
+                    i_stat_, i_mask_);
+                // Dump priority chain heads (4 priorities × 4 bytes at 0x100)
+                for (int p = 0; p < 4; p++)
+                {
+                    uint32_t head = rd32(0x100 + p * 4);
+                    emu::logf(emu::LogLevel::warn, "IRQ_CHAIN",
+                        "  Priority[%d] head=0x%08X", p, head);
+                    // Walk chain (max 8 entries)
+                    uint32_t ptr = head;
+                    for (int j = 0; j < 8 && ptr != 0 && ptr != 0xFFFFFFFF; j++)
+                    {
+                        uint32_t phys = ptr & 0x1FFFFF;
+                        if (phys + 12 > ram_size_) break;
+                        uint32_t next = rd32(phys);
+                        uint32_t func = rd32(phys + 4);
+                        uint32_t verf = rd32(phys + 8);
+                        emu::logf(emu::LogLevel::warn, "IRQ_CHAIN",
+                            "    [%d] @0x%08X next=0x%08X func=0x%08X verifier=0x%08X",
+                            j, ptr, next, func, verf);
+                        ptr = next;
+                    }
+                }
+            }
 
             // Shadow 3D systems: swap buffers at VBlank
             if (gte_3d_) gte_3d_->swap_frame();

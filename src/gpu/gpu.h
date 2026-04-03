@@ -213,6 +213,9 @@ class Gpu
 
     // VBlank generator (approximate; used to raise IRQ0/I_STAT.bit0).
     int tick_vblank(uint32_t cycles);
+    // Swap draw lists + toggle field without scanline counting.
+    // Used by external VBlank (worker thread timer).
+    void tick_vblank_swap_only();
     uint32_t current_scanline() const;
     uint32_t total_scanlines() const;
 

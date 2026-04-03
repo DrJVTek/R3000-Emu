@@ -127,6 +127,11 @@ public:
         // Positive = behind real-time (must execute), negative = ahead (sleep).
         double CycleDebt = 0.0;
         double LastTime = FPlatformTime::Seconds();
+        double LastVblTime = LastTime;
+
+        // VBlank period: 20ms for PAL (50Hz), ~16.7ms for NTSC (60Hz)
+        // TODO: read from GPU display config (is_pal)
+        constexpr double kVblPeriod = 1.0 / 50.0; // PAL
 
         // Timing stats (logged every 2 seconds)
         double StatsTime = LastTime;
@@ -134,13 +139,21 @@ public:
         uint64 StatsSteps = 0;
         uint32 StatsVBlanks = 0;
 
+        // Enable external VBlank on the bus (disables tick_vblank in Bus::tick)
+        {
+            r3000::Bus* Bus = Owner->GetCore() ? Owner->GetCore()->bus() : nullptr;
+            if (Bus)
+                Bus->set_external_vblank(true);
+        }
+
         while (!Owner->bWorkerShouldStop_.Load())
         {
             // Check if emulation is paused
             if (!Owner->IsRunning() || Owner->bWorkerPaused_.Load())
             {
                 FPlatformProcess::Sleep(0.001f);
-                LastTime = FPlatformTime::Seconds(); // reset so we don't accumulate debt while paused
+                LastTime = FPlatformTime::Seconds();
+                LastVblTime = LastTime;
                 CycleDebt = 0.0;
                 continue;
             }
@@ -150,6 +163,7 @@ public:
             {
                 FPlatformProcess::Sleep(0.001f);
                 LastTime = FPlatformTime::Seconds();
+                LastVblTime = LastTime;
                 CycleDebt = 0.0;
                 continue;
             }
@@ -183,6 +197,19 @@ public:
                 CycleDebt -= static_cast<double>(Cycles);
                 LocalTotalCycles += Cycles;
                 ++LocalSteps;
+            }
+
+            // Fire VBlank at fixed rate (independent of CPU speed)
+            if (Now - LastVblTime >= kVblPeriod)
+            {
+                LastVblTime += kVblPeriod;
+                // Prevent accumulation if we're behind
+                if (Now - LastVblTime > kVblPeriod * 2.0)
+                    LastVblTime = Now;
+
+                r3000::Bus* Bus = Core->bus();
+                if (Bus)
+                    Bus->fire_vblank_external();
             }
 
             // Update owner stats (atomic)

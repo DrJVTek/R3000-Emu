@@ -489,6 +489,26 @@ uint32_t Gpu::total_scanlines() const
     return display_.is_pal ? 314u : 263u;
 }
 
+void Gpu::tick_vblank_swap_only()
+{
+    // Toggle field (games poll GPUSTAT bit 31 to detect VSync)
+    even_odd_field_ = !even_odd_field_;
+    if (display_.interlace)
+        status_ ^= (1u << 13);
+
+    // Swap draw lists
+    {
+        std::lock_guard<std::mutex> lock(draw_list_mutex_);
+        draw_lists_[draw_active_].frame_id = frame_count_;
+        draw_lists_[draw_active_].draw_env = draw_env_;
+        draw_lists_[draw_active_].display = display_;
+        draw_active_ = 1 - draw_active_;
+        draw_lists_[draw_active_].clear();
+    }
+    ++frame_count_;
+    frame_stats_ = FrameStats{};
+}
+
 // ---------------------------------------------------------------------------
 // Logging / dump
 // ---------------------------------------------------------------------------
