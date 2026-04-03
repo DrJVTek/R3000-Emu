@@ -184,31 +184,43 @@ public:
             // Accumulate cycle debt: how many PS1 cycles this wall-clock delta represents
             CycleDebt += DeltaTime * kPS1CpuClock;
 
-            // Execute instructions until debt is paid off
-            while (CycleDebt > 0.0 && !Owner->bWorkerShouldStop_.Load())
-            {
-                const auto Res = Core->step();
-                if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
-                {
-                    emu::logf(emu::LogLevel::warn, "CORE",
-                        "Worker: emu stopped kind=%d pc=0x%08X",
-                        (int)Res.kind, Res.pc);
-                    Owner->bWorkerPaused_.Store(true);
-                    break;
-                }
-
-                const uint32 Cycles = Core->last_cycles();
-                CycleDebt -= static_cast<double>(Cycles);
-                LocalTotalCycles += Cycles;
-                ++LocalSteps;
-            }
-
-            // Tick peripherals with accumulated cycles from this iteration
+            // Execute instructions until debt is paid off.
+            // Tick peripherals every ~1000 cycles to deliver IRQs (VBlank, SIO0, etc.)
+            // without per-instruction overhead.
             {
                 r3000::Bus* Bus = Core->bus();
-                const uint32 PeriphCycles = static_cast<uint32>(DeltaTime * kPS1CpuClock);
-                if (Bus && PeriphCycles > 0)
-                    Bus->tick_peripherals(PeriphCycles);
+                uint32 PeriphAccum = 0;
+                constexpr uint32 kPeriphBatch = 1024; // tick peripherals every ~1024 cycles
+
+                while (CycleDebt > 0.0 && !Owner->bWorkerShouldStop_.Load())
+                {
+                    const auto Res = Core->step();
+                    if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
+                    {
+                        emu::logf(emu::LogLevel::warn, "CORE",
+                            "Worker: emu stopped kind=%d pc=0x%08X",
+                            (int)Res.kind, Res.pc);
+                        Owner->bWorkerPaused_.Store(true);
+                        break;
+                    }
+
+                    const uint32 Cycles = Core->last_cycles();
+                    CycleDebt -= static_cast<double>(Cycles);
+                    LocalTotalCycles += Cycles;
+                    ++LocalSteps;
+                    PeriphAccum += Cycles;
+
+                    if (PeriphAccum >= kPeriphBatch)
+                    {
+                        if (Bus)
+                            Bus->tick_peripherals(PeriphAccum);
+                        PeriphAccum = 0;
+                    }
+                }
+
+                // Flush remaining peripheral cycles
+                if (Bus && PeriphAccum > 0)
+                    Bus->tick_peripherals(PeriphAccum);
             }
 
             // Fire VBlank at fixed rate (independent of CPU speed)
