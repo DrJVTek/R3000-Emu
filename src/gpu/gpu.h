@@ -52,6 +52,17 @@ struct DisplayConfig
     }
 };
 
+// Info about the last CPU→VRAM DMA write (for R3000ImageComponent)
+struct CpuVramWriteInfo
+{
+    uint32_t seq{0};              // Monotonic sequence number (0 = no write yet)
+    uint32_t vram_write_seq{0};   // VRAM modification sequence
+    uint32_t frame_count{0};      // Frame at which write occurred
+    uint16_t x{0}, y{0};         // VRAM destination
+    uint16_t w{0}, h{0};         // Size in 16-bit words / rows
+    DisplayConfig display{};      // Display config snapshot at write time
+};
+
 struct Stage67GpuDebug
 {
     uint32_t gpustat{0};
@@ -211,6 +222,28 @@ class Gpu
     const uint16_t* vram() const { return vram_.get(); }
     const DisplayConfig& display_config() const { return display_; }
 
+    // CPU→VRAM write tracking for R3000ImageComponent
+    void copy_last_cpu_vram_write(CpuVramWriteInfo& out) const
+    {
+        std::lock_guard<std::mutex> lock(draw_list_mutex_);
+        out = last_cpu_vram_write_;
+    }
+    // Called internally when CPU→VRAM DMA write completes
+    void record_cpu_vram_write(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
+    {
+        std::lock_guard<std::mutex> lock(draw_list_mutex_);
+        ++vram_write_seq_;
+        ++cpu_vram_write_seq_;
+        last_cpu_vram_write_.seq = cpu_vram_write_seq_;
+        last_cpu_vram_write_.vram_write_seq = vram_write_seq_;
+        last_cpu_vram_write_.frame_count = frame_count_;
+        last_cpu_vram_write_.x = x;
+        last_cpu_vram_write_.y = y;
+        last_cpu_vram_write_.w = w;
+        last_cpu_vram_write_.h = h;
+        last_cpu_vram_write_.display = display_;
+    }
+
     /// Get the ready draw list (previous frame's commands).
     /// WARNING: Not thread-safe if called from UE5 while emulator is running.
     /// Prefer copy_ready_draw_list() for thread-safe access.
@@ -353,6 +386,11 @@ class Gpu
     // Display configuration (GP1)
     DisplayConfig display_{};
 
+    // CPU→VRAM write tracking
+    CpuVramWriteInfo last_cpu_vram_write_{};
+    uint32_t vram_write_seq_{0};
+    uint32_t cpu_vram_write_seq_{0};
+
     // Double-buffered draw command lists for UE5 bridge
     FrameDrawList draw_lists_[2];
     int draw_active_{0};
@@ -360,9 +398,6 @@ class Gpu
 
     // 3D reconstruction: correlation table (owned by Core)
     GteCorrelationTable* gte_corr_{nullptr};
-
-    // VRAM write tracking (bumped on fill, cpu→vram, vram→vram)
-    uint32_t vram_write_seq_{0};
 
     // Draw area clipping toggle (default: on = standard PS1; off = VR mode)
     bool clip_to_draw_area_{true};
