@@ -45,7 +45,11 @@ static constexpr double kPS1CpuClock = 33868800.0;
 
 static uint32 EffectiveBusTickBatch(bool bThreadedMode, int32 RequestedBusTickBatch)
 {
-    return bThreadedMode ? 1u : static_cast<uint32>(FMath::Clamp(RequestedBusTickBatch, 1, 128));
+    // With external VBlank (50Hz timer), threaded mode no longer needs
+    // batch=1. Use 64 as default for good perf with acceptable precision.
+    if (bThreadedMode && RequestedBusTickBatch <= 1)
+        return 64u;
+    return static_cast<uint32>(FMath::Clamp(RequestedBusTickBatch, 1, 128));
 }
 
 static int EffectiveCdTimingMode(ECDTimingMode Mode)
