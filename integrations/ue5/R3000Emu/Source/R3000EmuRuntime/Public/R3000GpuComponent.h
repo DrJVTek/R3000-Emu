@@ -148,6 +148,11 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
     float GetEffectivePixelScale() const;
 
+    /** Skip GP0(02h) fill rect commands (screen clears). Enable to prevent background fills
+     *  from hiding 3D geometry in VR mode. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    bool bSkipFillRect{false};
+
     /** When enabled, log transform params and vertex coords to UE Output Log (Verbose). Useful for debugging offset/exploding polygons. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Debug")
     bool bDebugMeshLog{false};

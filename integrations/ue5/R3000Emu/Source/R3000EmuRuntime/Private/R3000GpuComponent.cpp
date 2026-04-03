@@ -500,6 +500,9 @@ void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         return;
     }
 
+    // Sync skip_fill_rect option to GPU
+    Gpu_->set_skip_fill_rect(bSkipFillRect);
+
     // Check for stale pointer (Hot Reload issue) - DISABLED for debug, just log
     if (!Gpu_->is_valid())
     {
