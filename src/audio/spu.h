@@ -147,6 +147,7 @@ class Spu
     int xa_read_pos_{0};
     int xa_write_pos_{0};
     int xa_samples_available_{0};
+    uint32_t xa_read_frac_{0};  // 16.16 fixed-point fractional position for resampling
 
     // Cycle accumulator for sample generation
     uint32_t cycle_accum_{0};

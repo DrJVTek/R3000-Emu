@@ -435,12 +435,26 @@ void Spu::tick(int16_t* out_l, int16_t* out_r)
                 has_cd_audio = true;
             }
             // Fallback to XA buffer (for XA-ADPCM sectors pushed via push_xa_samples)
-            else if (xa_samples_available_ > 0)
+            // Resample from XA rate (37800 Hz) to SPU rate (44100 Hz) using
+            // linear interpolation with a fixed-point phase accumulator.
+            else if (xa_samples_available_ > 1)
             {
-                cd_l = xa_buffer_l_[xa_read_pos_];
-                cd_r = xa_buffer_r_[xa_read_pos_];
-                xa_read_pos_ = (xa_read_pos_ + 1) % kXaBufferSize;
-                xa_samples_available_--;
+                // 16.16 fixed-point step: 37800/44100 ≈ 0.857142
+                constexpr uint32_t kXaStep = (37800u << 16) / 44100u; // 0.857... in 16.16
+                const int p0 = xa_read_pos_;
+                const int p1 = (xa_read_pos_ + 1) % kXaBufferSize;
+                const int32_t frac = xa_read_frac_ >> 8; // 0..255 for lerp
+                cd_l = static_cast<int16_t>(((int32_t)xa_buffer_l_[p0] * (256 - frac) +
+                                             (int32_t)xa_buffer_l_[p1] * frac) >> 8);
+                cd_r = static_cast<int16_t>(((int32_t)xa_buffer_r_[p0] * (256 - frac) +
+                                             (int32_t)xa_buffer_r_[p1] * frac) >> 8);
+                xa_read_frac_ += kXaStep;
+                while (xa_read_frac_ >= 0x10000u)
+                {
+                    xa_read_frac_ -= 0x10000u;
+                    xa_read_pos_ = (xa_read_pos_ + 1) % kXaBufferSize;
+                    xa_samples_available_--;
+                }
                 has_cd_audio = true;
             }
 
