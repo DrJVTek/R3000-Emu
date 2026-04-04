@@ -697,6 +697,19 @@ void Bus::sio0_do_transfer()
     sio0_rx_data_ = resp;
     sio0_rx_ready_ = 1;
 
+    // Debug: log SIO0 phase transitions after game boot (vbl > 300)
+    {
+        static uint32_t phase_log = 0;
+        if (phase_log < 50 && vblank_total_count_ > 300)
+        {
+            ++phase_log;
+            emu::logf(emu::LogLevel::warn, "SIO0_PHASE",
+                "[%u] tx=0x%02X resp=0x%02X phase=%u->%u ack=%d vbl=%u",
+                phase_log, v, resp, prev_phase, sio0_tx_phase_,
+                (sio0_tx_phase_ != 0u) ? 1 : 0, vblank_total_count_);
+        }
+    }
+
     // RXINTEN: trigger IRQ when RX data arrives (CTRL bit 11, 0x0800)
     if (sio0_ctrl_ & 0x0800u)
     {
@@ -716,6 +729,34 @@ void Bus::sio0_do_transfer()
         if (prev_phase == 4u)
         {
             deliver_events_for_class(ram_, ram_size_, 0xF000'0009u);
+
+            // Debug: dump pad buffer after SIO0 transfer complete.
+            // Scan RAM for the BIOS pad buffer by looking for the pattern
+            // that InitTAP wrote (IsOK + ID at known addresses).
+            // The BIOS writes the SIO0 response into the buffer passed to InitTAP.
+            static uint32_t pad_dump_count = 0;
+            if (pad_dump_count < 30)
+            {
+                ++pad_dump_count;
+                // Read first 8 bytes at a few candidate addresses
+                auto rd8 = [&](uint32_t p) -> uint8_t {
+                    return (p < ram_size_) ? ram_[p] : 0;
+                };
+                auto rd16 = [&](uint32_t p) -> uint16_t {
+                    return (p + 1 < ram_size_) ?
+                        ((uint16_t)ram_[p] | ((uint16_t)ram_[p+1] << 8)) : 0;
+                };
+                // Try the address from tstjoy.map: 0x17080
+                const uint32_t base = 0x17080u;
+                emu::logf(emu::LogLevel::warn, "PAD_BUF",
+                    "[%u] @0x%05X IsOK=%d ID=0x%02X Pad=0x%04X byte2=0x%02X byte3=0x%02X btns_sent=0x%04X",
+                    pad_dump_count, base,
+                    (int)(int8_t)rd8(base),
+                    rd8(base + 1),
+                    rd16(base + 2),
+                    rd8(base + 4), rd8(base + 5),
+                    pad_buttons());
+            }
         }
     }
     else
@@ -2909,10 +2950,23 @@ void Bus::tick_peripherals(uint32_t cycles)
 
 void Bus::tick(uint32_t cycles)
 {
-    // In external peripheral mode, tick() does almost nothing — peripherals
-    // are ticked by tick_peripherals() called from the worker thread.
+    // In external peripheral mode, only tick SIO0 (needs per-instruction
+    // precision for ACK timing) and return. Everything else is handled by
+    // tick_peripherals() called every ~256 cycles from the worker thread.
     if (external_vblank_)
+    {
+        if (sio0_state_ == Sio0State::Transmitting && sio0_transfer_countdown_ > 0)
+        {
+            if (cycles >= sio0_transfer_countdown_) { sio0_transfer_countdown_ = 0; sio0_do_transfer(); }
+            else sio0_transfer_countdown_ -= cycles;
+        }
+        else if (sio0_state_ == Sio0State::WaitingForACK && sio0_ack_countdown_ > 0)
+        {
+            if (cycles >= sio0_ack_countdown_) { sio0_ack_countdown_ = 0; sio0_do_ack(); }
+            else sio0_ack_countdown_ -= cycles;
+        }
         return;
+    }
 
     if (bios_post_60643_trace_active_ &&
         !bios_post_60643_exit_logged_ &&

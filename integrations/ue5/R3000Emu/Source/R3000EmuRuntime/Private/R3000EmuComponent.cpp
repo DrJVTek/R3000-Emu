@@ -190,7 +190,7 @@ public:
             {
                 r3000::Bus* Bus = Core->bus();
                 uint32 PeriphAccum = 0;
-                constexpr uint32 kPeriphBatch = 1024; // tick peripherals every ~1024 cycles
+                constexpr uint32 kPeriphBatch = 256; // must be < 450 (SIO0 ACK delay)
 
                 while (CycleDebt > 0.0 && !Owner->bWorkerShouldStop_.Load())
                 {
