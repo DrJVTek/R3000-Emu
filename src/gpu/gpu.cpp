@@ -1401,7 +1401,10 @@ void Gpu::gp0_cpu_to_vram_data(uint32_t v)
     vram_write_seq_++;
 
     if (cpu_vram_words_remaining_ == 0 || cpu_vram_row_ >= cpu_vram_h_)
+    {
         gp0_state_ = Gp0State::idle;
+        record_cpu_vram_write(cpu_vram_x_, cpu_vram_y_, cpu_vram_w_, cpu_vram_h_);
+    }
 }
 
 // ---------------------------------------------------------------------------

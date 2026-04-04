@@ -4,6 +4,7 @@
 #include "R3000Gpu3DComponent.h"
 #include "R3000VramViewerComponent.h"
 #include "R3000VideoComponent.h"
+#include "R3000ImageComponent.h"
 
 #include "Logging/LogMacros.h"
 #include "Containers/StringConv.h"
@@ -975,6 +976,15 @@ void UR3000EmuComponent::InitEmulator()
         VideoComp_->BindGpu(Gpu);
         UE_LOG(LogR3000Emu, Log, TEXT("Video component connected"));
         emu::logf(emu::LogLevel::info, "CORE", "VideoComponent connected");
+    }
+
+    // Image component — shows static CPU→VRAM images (logos, loading screens).
+    ImageComp_ = Owner ? Owner->FindComponentByClass<UR3000ImageComponent>() : nullptr;
+    if (ImageComp_ && Gpu)
+    {
+        ImageComp_->BindGpu(Gpu);
+        UE_LOG(LogR3000Emu, Log, TEXT("Image component connected"));
+        emu::logf(emu::LogLevel::info, "CORE", "ImageComponent connected");
     }
 
     // Start worker thread if threaded mode is enabled.

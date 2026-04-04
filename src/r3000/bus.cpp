@@ -2974,6 +2974,14 @@ void Bus::tick(uint32_t cycles)
             ++vblank_total_count_;
         }
 
+        // DMA3 deferred check: if DMA3 was triggered but CDROM FIFO was empty,
+        // check if FIFO is now populated and execute the transfer.
+        if (dma3_pending_ && cdrom_ && !cdrom_->is_fifo_empty())
+        {
+            dma3_pending_ = 0;
+            exec_dma3_transfer();
+        }
+
         if (sio0_state_ == Sio0State::Transmitting && sio0_transfer_countdown_ > 0)
         {
             if (cycles >= sio0_transfer_countdown_) { sio0_transfer_countdown_ = 0; sio0_do_transfer(); }

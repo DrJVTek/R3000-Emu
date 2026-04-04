@@ -105,6 +105,8 @@ private:
     int32  VideoTexH_{0};
     int32  FramesSinceVideo_{0};
     bool   bVideoVisible_{false};
+    uint16 DmaX_{0};            // last DMA source X in VRAM (from CpuVramWriteInfo)
+    uint16 DmaY_{0};            // last DMA source Y in VRAM
 
     static constexpr int32 kVramW = 1024;
     static constexpr int32 kVramH = 512;
