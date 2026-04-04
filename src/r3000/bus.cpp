@@ -1,5 +1,8 @@
 #include "bus.h"
 
+// Disable heavyweight diagnostics for performance. Undefine to re-enable.
+#define R3000_NO_DIAG
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -38,6 +41,11 @@ static const char* stage67_watch_name(uint32_t phys)
     return nullptr;
 }
 
+#ifdef R3000_NO_DIAG
+// Stub out all diagnostic helpers when diagnostics are disabled
+static inline void log_stage67_watch(uint32_t&, const char*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+static inline bool stage67_global_name(uint32_t, const char**) { return false; }
+#else
 static void log_stage67_watch(
     uint32_t& log_count,
     const char* op,
@@ -106,7 +114,11 @@ static uint32_t stage67_ram_rd32(const uint8_t* ram, uint32_t ram_size, uint32_t
            ((uint32_t)ram[phys + 2u] << 16) |
            ((uint32_t)ram[phys + 3u] << 24);
 }
+#endif // R3000_NO_DIAG — static helpers
 
+#ifdef R3000_NO_DIAG
+void Bus::log_stage67_mmio_read(uint32_t, uint32_t, uint32_t) {}
+#else
 void Bus::log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size)
 {
     if (!stage67_watch_pc(cpu_pc_) || stage67_mmio_log_count_ >= 256u)
@@ -182,6 +194,7 @@ void Bus::log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size)
         (unsigned)i_mask_,
         stage67_mmio_log_count_);
 }
+#endif // R3000_NO_DIAG — log_stage67_mmio_read + static helpers
 
 void Bus::set_pad_buttons(uint16_t v) { g_pad_buttons.store(v, std::memory_order_relaxed); }
 uint16_t Bus::pad_buttons() const    { return g_pad_buttons.load(std::memory_order_relaxed); }
@@ -3075,6 +3088,7 @@ void Bus::tick(uint32_t cycles)
                 ++vblank_total_count_;
             }
 
+#ifndef R3000_NO_DIAG
             // Dump BIOS IRQ handler chain once at vblank 200
             // The BIOS stores priority chain head pointers at 0x0100-0x010F
             // Each entry: +0=next, +4=handler_func, +8=verifier
@@ -3111,6 +3125,8 @@ void Bus::tick(uint32_t cycles)
                 }
             }
 
+#endif // R3000_NO_DIAG — IRQ chain dump
+
             // Shadow 3D systems: swap buffers at VBlank
             // (handled by fire_vblank_external when external_vblank_ is active)
             if (!external_vblank_)
@@ -3119,6 +3135,11 @@ void Bus::tick(uint32_t cycles)
                 if (gpu_3d_) gpu_3d_->on_vblank();
             }
 
+            // Fire VBlank hooks (handled by fire_vblank_external when external)
+            if (!external_vblank_ && hooks_ && hooks_->has_vblank())
+                hooks_->fire_vblank(vblank_total_count_);
+
+#ifndef R3000_NO_DIAG
             // Per-VBlank: scan CDROM event status fields, log when any changes to 0x4000
             // Events[0-4] at 0xE028+i*0x1C, status at offset+4
             {
@@ -3141,10 +3162,6 @@ void Bus::tick(uint32_t cycles)
                     }
                 }
             }
-
-            // Fire VBlank hooks (handled by fire_vblank_external when external)
-            if (!external_vblank_ && hooks_ && hooks_->has_vblank())
-                hooks_->fire_vblank(vblank_total_count_);
 
             // DMA2 no-token diagnostics: build per-vblank summary and optionally log top PCs.
             if (dma2_nohint_words_ > 0)
@@ -3466,6 +3483,7 @@ void Bus::tick(uint32_t cycles)
             {
                 vblank_no_mask_count_ = 0;
             }
+#endif // R3000_NO_DIAG — end of VBlank diagnostics
     }
 
     // Tick CDROM
