@@ -2054,7 +2054,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 if (dma0_log < 10)
                                 {
                                     dma0_log++;
-                                    emu::logf(emu::LogLevel::warn, "BUS",
+                                    emu::logf(emu::LogLevel::debug, "BUS",
                                         "DMA0 MDEC_IN #%d: madr=0x%08X words=%u",
                                         dma0_log, dma_[0].madr, words);
                                 }
@@ -2068,7 +2068,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 static int dma1_log = 0;
                                 if (dma1_log < 3) {
                                     dma1_log++;
-                                    emu::logf(emu::LogLevel::warn, "BUS",
+                                    emu::logf(emu::LogLevel::debug, "BUS",
                                         "DMA1 MDEC_OUT #%d: madr=0x%08X words=%u",
                                         dma1_log, dma_[1].madr, words);
                                 }
@@ -2320,7 +2320,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                         if (cdrom_->is_fifo_empty())
                         {
                             dma3_pending_ = 1;
-                            emu::logf(emu::LogLevel::warn, "BUS",
+                            emu::logf(emu::LogLevel::debug, "BUS",
                                 "DMA3 deferred (FIFO empty): madr=0x%08X bcr=0x%08X PC=0x%08X",
                                 dma_[3].madr, dma_[3].bcr, cpu_pc_);
                             // CHCR bit 24 stays set — game sees DMA as in-progress.
@@ -2341,7 +2341,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
 
                         {
                             uint32_t ot_lowest = (words > 0) ? ((ma - (words - 1) * 4) & 0x1FFFFF) : ma;
-                            emu::logf(emu::LogLevel::warn, "BUS",
+                            emu::logf(emu::LogLevel::debug, "BUS",
                                 "DMA6 OTC: madr=0x%08X words=%u range=[0x%06X - 0x%06X] ring=0x1F61E0 %s",
                                 dma_[ch].madr, words, ot_lowest, ma,
                                 (ot_lowest <= 0x1F61E0 && ma >= 0x1F61E0) ? "**OVERLAP!**" : "ok");
@@ -2622,7 +2622,7 @@ void Bus::exec_dma3_transfer()
     // kernel area with game-specific code (e.g., Tekken's Galaga sub-EXE at KUSEG 0).
     if (ma < 0x200u)
     {
-        emu::logf(emu::LogLevel::warn, "BUS",
+        emu::logf(emu::LogLevel::debug, "BUS",
             "DMA3 low-RAM: madr=0x%05X words=%u (intentional kernel overwrite?) PC=0x%08X",
             ma, words, cpu_pc_);
     }
@@ -2679,7 +2679,7 @@ void Bus::exec_dma3_transfer()
         }
         asciibuf[16] = '\0';
 
-        emu::logf(emu::LogLevel::warn, "BUS",
+        emu::logf(emu::LogLevel::debug, "BUS",
             "DMA3 BIOS RAM dump pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X words=%u read_lba=%u data_lba=%u last_cmd=0x%02X data=%s ascii='%s'",
             cpu_pc_, dma_[3].madr, start_ma, end_addr, words,
             cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
@@ -2702,7 +2702,7 @@ void Bus::exec_dma3_transfer()
                               | ((uint32_t)ram_[probe0+2]<<16) | ((uint32_t)ram_[probe0+3]<<24);
             const uint32_t v1 = (uint32_t)ram_[probe1] | ((uint32_t)ram_[probe1+1]<<8)
                               | ((uint32_t)ram_[probe1+2]<<16) | ((uint32_t)ram_[probe1+3]<<24);
-            emu::logf(emu::LogLevel::warn, "BUS",
+            emu::logf(emu::LogLevel::debug, "BUS",
                 "DMA3 BIOS scratch hit pc=0x%08X madr=0x%08X start=0x%05X end=0x%05X read_lba=%u data_lba=%u b888=0x%08X b88c=0x%08X",
                 cpu_pc_, dma_[3].madr, start_ma, end_addr,
                 cdrom_ ? (unsigned)cdrom_->debug_read_lba() : 0u,
