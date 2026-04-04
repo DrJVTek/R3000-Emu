@@ -1076,7 +1076,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         // Unconditional read trace: start_slot gate variable (any reader, any PC)
         if (mp0 == 0x001130D4u)
         {
-            emu::logf(emu::LogLevel::warn, "STAGE67",
+            emu::logf(emu::LogLevel::debug, "STAGE67",
                 "START_SLOT_GATE_READ pc=0x%08X val=0x%08X (%d signed)",
                 cpu_pc_, out, (int32_t)out);
         }
@@ -1325,7 +1325,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
             if (stage67_global_name(mp, &gname) && stage67_watch_log_count_ < 500u)
             {
                 ++stage67_watch_log_count_;
-                emu::logf(emu::LogLevel::warn, "STAGE67",
+                emu::logf(emu::LogLevel::debug, "STAGE67",
                     "GWR8 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%02X %s (#%u)",
                     cpu_pc_, addr, mp, (unsigned)v, gname, stage67_watch_log_count_);
             }
@@ -1336,7 +1336,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         {
             const uint32_t cur = (uint32_t)ram_[0x1EF68Cu] | ((uint32_t)ram_[0x1EF68Du]<<8)
                                | ((uint32_t)ram_[0x1EF68Eu]<<16) | ((uint32_t)ram_[0x1EF68Fu]<<24);
-            emu::logf(emu::LogLevel::warn, "INT3CB",
+            emu::logf(emu::LogLevel::debug, "INT3CB",
                 "INT3_CB_WR8 pc=0x%08X byte@%08X=0x%02X (u32_before=0x%08X)",
                 cpu_pc_, mp, (unsigned)v, cur);
         }
@@ -1345,7 +1345,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         {
             const uint32_t cur = (uint32_t)ram_[0x1CB33Cu] | ((uint32_t)ram_[0x1CB33Du]<<8)
                                | ((uint32_t)ram_[0x1CB33Eu]<<16) | ((uint32_t)ram_[0x1CB33Fu]<<24);
-            emu::logf(emu::LogLevel::warn, "EXEDST",
+            emu::logf(emu::LogLevel::debug, "EXEDST",
                 "EXE_DST_WR8 pc=0x%08X byte@%08X=0x%02X (u32_before=0x%08X)",
                 cpu_pc_, mp, (unsigned)v, cur);
         }
@@ -1357,7 +1357,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
             const uint32_t vbl = vblank_total_count_;
             if (b9d0_u8_cnt < 10u || (vbl >= 2420u && vbl <= 2560u))
             {
-                emu::logf(emu::LogLevel::warn, "B9D0WATCH",
+                emu::logf(emu::LogLevel::debug, "B9D0WATCH",
                     "WR8 pc=0x%08X byte@%05X=0x%02X vblank=%u (#%u)",
                     cpu_pc_, mp, (unsigned)v, vbl, ++b9d0_u8_cnt);
             }
@@ -1371,7 +1371,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
             if (evt_u8_cnt < 256u && mp >= 0x0000E028u && mp < 0x0000E0B4u)
             {
                 ++evt_u8_cnt;
-                emu::logf(emu::LogLevel::warn, "EVT_TBL",
+                emu::logf(emu::LogLevel::debug, "EVT_TBL",
                     "U8[%u] phys=0x%05X val=0x%02X pc=0x%08X",
                     evt_u8_cnt, mp, (unsigned)v, cpu_pc_);
             }
@@ -1614,7 +1614,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
             if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 500u)
             {
                 ++stage67_watch_log_count_;
-                emu::logf(emu::LogLevel::warn, "STAGE67",
+                emu::logf(emu::LogLevel::debug, "STAGE67",
                     "GWR16 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%04X %s (#%u)",
                     cpu_pc_, addr, mp0, (unsigned)v, gname, stage67_watch_log_count_);
             }
@@ -1625,7 +1625,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         {
             const uint32_t cur = (uint32_t)ram_[0x1EF68Cu] | ((uint32_t)ram_[0x1EF68Du]<<8)
                                | ((uint32_t)ram_[0x1EF68Eu]<<16) | ((uint32_t)ram_[0x1EF68Fu]<<24);
-            emu::logf(emu::LogLevel::warn, "INT3CB",
+            emu::logf(emu::LogLevel::debug, "INT3CB",
                 "INT3_CB_WR16 pc=0x%08X half@%08X=0x%04X (u32_before=0x%08X)",
                 cpu_pc_, mp0, (unsigned)v, cur);
         }
@@ -1633,7 +1633,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         {
             const uint32_t cur = (uint32_t)ram_[0x1CB33Cu] | ((uint32_t)ram_[0x1CB33Du]<<8)
                                | ((uint32_t)ram_[0x1CB33Eu]<<16) | ((uint32_t)ram_[0x1CB33Fu]<<24);
-            emu::logf(emu::LogLevel::warn, "EXEDST",
+            emu::logf(emu::LogLevel::debug, "EXEDST",
                 "EXE_DST_WR16 pc=0x%08X half@%08X=0x%04X (u32_before=0x%08X)",
                 cpu_pc_, mp0, (unsigned)v, cur);
         }
@@ -1645,7 +1645,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
             const uint32_t vbl = vblank_total_count_;
             if (b9d0_u16_cnt < 10u || (vbl >= 2420u && vbl <= 2560u))
             {
-                emu::logf(emu::LogLevel::warn, "B9D0WATCH",
+                emu::logf(emu::LogLevel::debug, "B9D0WATCH",
                     "WR16 pc=0x%08X half@%05X=0x%04X vblank=%u (#%u)",
                     cpu_pc_, mp0, (unsigned)v, vbl, ++b9d0_u16_cnt);
             }
@@ -1658,7 +1658,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
             if (evt_u16_cnt < 256u && mp0 >= 0x0000E028u && mp0 < 0x0000E0B4u)
             {
                 ++evt_u16_cnt;
-                emu::logf(emu::LogLevel::warn, "EVT_TBL",
+                emu::logf(emu::LogLevel::debug, "EVT_TBL",
                     "U16[%u] phys=0x%05X val=0x%04X pc=0x%08X",
                     evt_u16_cnt, mp0, (unsigned)v, cpu_pc_);
             }
@@ -1877,7 +1877,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         // Unconditional watch: start_slot gate variable (any writer, any PC)
         if (mp0 == 0x001130D4u)
         {
-            emu::logf(emu::LogLevel::warn, "STAGE67",
+            emu::logf(emu::LogLevel::debug, "STAGE67",
                 "START_SLOT_GATE_WRITE pc=0x%08X val=0x%08X (%d signed)",
                 cpu_pc_, v, (int32_t)v);
         }
@@ -1886,7 +1886,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         {
             const uint32_t old_cb = (uint32_t)ram_[0x1EF68Cu] | ((uint32_t)ram_[0x1EF68Du]<<8)
                                   | ((uint32_t)ram_[0x1EF68Eu]<<16) | ((uint32_t)ram_[0x1EF68Fu]<<24);
-            emu::logf(emu::LogLevel::warn, "INT3CB",
+            emu::logf(emu::LogLevel::debug, "INT3CB",
                 "INT3_CB_WRITE pc=0x%08X old=0x%08X new=0x%08X",
                 cpu_pc_, old_cb, v);
         }
@@ -1894,7 +1894,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         {
             const uint32_t old_dst = (uint32_t)ram_[0x1CB33Cu] | ((uint32_t)ram_[0x1CB33Du]<<8)
                                    | ((uint32_t)ram_[0x1CB33Eu]<<16) | ((uint32_t)ram_[0x1CB33Fu]<<24);
-            emu::logf(emu::LogLevel::warn, "EXEDST",
+            emu::logf(emu::LogLevel::debug, "EXEDST",
                 "EXE_DST_WRITE pc=0x%08X old=0x%08X new=0x%08X",
                 cpu_pc_, old_dst, v);
         }
@@ -1925,7 +1925,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
             // Log all writes near the transition window, plus first 10 ever.
             if (b9d0_cnt < 10u || (vbl >= 2420u && vbl <= 2560u))
             {
-                emu::logf(emu::LogLevel::warn, "B9D0WATCH",
+                emu::logf(emu::LogLevel::debug, "B9D0WATCH",
                     "WRITE pc=0x%08X val=0x%08X vblank=%u (#%u)",
                     cpu_pc_, v, vbl, ++b9d0_cnt);
             }
@@ -1942,7 +1942,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
             if (evt_u32_cnt < 512u && mp0 >= 0x0000E028u && mp0 < 0x0000E0B4u)
             {
                 ++evt_u32_cnt;
-                emu::logf(emu::LogLevel::warn, "EVT_TBL",
+                emu::logf(emu::LogLevel::debug, "EVT_TBL",
                     "U32[%u] phys=0x%05X val=0x%08X pc=0x%08X",
                     evt_u32_cnt, mp0, v, cpu_pc_);
             }
@@ -1953,7 +1953,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
             if (stage67_global_name(mp0, &gname) && stage67_watch_log_count_ < 500u)
             {
                 ++stage67_watch_log_count_;
-                emu::logf(emu::LogLevel::warn, "STAGE67",
+                emu::logf(emu::LogLevel::debug, "STAGE67",
                     "GWR32 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%08X %s (#%u)",
                     cpu_pc_, addr, mp0, v, gname, stage67_watch_log_count_);
             }
@@ -2399,7 +2399,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     {
         // DICR write: bits 0-14 force enable, bit 15 force IRQ, bits 16-22 channel enable,
         // bit 23 master enable, bits 24-30 write-1-to-acknowledge (clear flag), bit 31 read-only.
-        emu::logf(emu::LogLevel::warn, "DICR", "[DICR] write pc=0x%08X v=0x%08X old=0x%08X master_en_new=%d",
+        emu::logf(emu::LogLevel::debug, "DICR", "[DICR] write pc=0x%08X v=0x%08X old=0x%08X master_en_new=%d",
                   cpu_pc_, v, dicr_, (v >> 23) & 1);
         const uint32_t ack_mask = v & 0x7F000000u; // bits 24-30: writing 1 clears flag
         const uint32_t wr_mask  = 0x00FF803Fu;     // bits 0-5, 15-23: writable directly
@@ -2611,7 +2611,7 @@ void Bus::exec_dma3_transfer()
             const uint32_t cd_cb   = rd32_safe(0x1ef68cu);
             const uint32_t ldst    = rd32_safe(0x1cb3d4u);
             const uint32_t exe_dst = rd32_safe(0x1cb33cu);
-            emu::logf(emu::LogLevel::warn, "DMA3_SNAP",
+            emu::logf(emu::LogLevel::debug, "DMA3_SNAP",
                 "[%u] PC=0x%08X madr=0x%08X words=%u cd_dest=0x%08X cd_cb=0x%08X ldst=%d exe_dst=0x%08X",
                 dma3_game_count, cpu_pc_, dma_[3].madr, words,
                 cd_dest, cd_cb, (int32_t)ldst, exe_dst);
@@ -2641,7 +2641,7 @@ void Bus::exec_dma3_transfer()
             if (dma3_evt_hit < 16u)
             {
                 ++dma3_evt_hit;
-                emu::logf(emu::LogLevel::warn, "DMA3_EVT",
+                emu::logf(emu::LogLevel::debug, "DMA3_EVT",
                     "[%u] DMA3 writing phys=0x%05X val=0x%08X madr_orig=0x%08X word=%u/%u pc=0x%08X",
                     dma3_evt_hit, ma, w, dma_[3].madr, i, words, cpu_pc_);
             }
@@ -3099,14 +3099,14 @@ void Bus::tick(uint32_t cycles)
                     return (uint32_t)ram_[p] | ((uint32_t)ram_[p+1]<<8)
                          | ((uint32_t)ram_[p+2]<<16) | ((uint32_t)ram_[p+3]<<24);
                 };
-                emu::logf(emu::LogLevel::warn, "IRQ_CHAIN",
+                emu::logf(emu::LogLevel::debug, "IRQ_CHAIN",
                     "VBL#200 i_stat=0x%04X i_mask=0x%04X",
                     i_stat_, i_mask_);
                 // Dump priority chain heads (4 priorities × 4 bytes at 0x100)
                 for (int p = 0; p < 4; p++)
                 {
                     uint32_t head = rd32(0x100 + p * 4);
-                    emu::logf(emu::LogLevel::warn, "IRQ_CHAIN",
+                    emu::logf(emu::LogLevel::debug, "IRQ_CHAIN",
                         "  Priority[%d] head=0x%08X", p, head);
                     // Walk chain (max 8 entries)
                     uint32_t ptr = head;
@@ -3117,7 +3117,7 @@ void Bus::tick(uint32_t cycles)
                         uint32_t next = rd32(phys);
                         uint32_t func = rd32(phys + 4);
                         uint32_t verf = rd32(phys + 8);
-                        emu::logf(emu::LogLevel::warn, "IRQ_CHAIN",
+                        emu::logf(emu::LogLevel::debug, "IRQ_CHAIN",
                             "    [%d] @0x%08X next=0x%08X func=0x%08X verifier=0x%08X",
                             j, ptr, next, func, verf);
                         ptr = next;
@@ -3154,7 +3154,7 @@ void Bus::tick(uint32_t cycles)
                     if (st != last_cdrom_status[ei] && cdrom_flip_count < 64u)
                     {
                         ++cdrom_flip_count;
-                        emu::logf(emu::LogLevel::warn, "EVT_FLIP",
+                        emu::logf(emu::LogLevel::debug, "EVT_FLIP",
                             "[%u] Event[%d]@0x%05X status 0x%04X->0x%04X vblank=%u pc=0x%08X",
                             cdrom_flip_count, ei, bases[ei], last_cdrom_status[ei], st,
                             vblank_total_count_, cpu_pc_);
@@ -3267,7 +3267,7 @@ void Bus::tick(uint32_t cycles)
                     const uint32_t exe_remain = rd32(0x1cb334u);
                     // exe_dst: target RAM address for current EXE write (0x1CB33C)
                     const uint32_t exe_dst = rd32(0x1cb33cu);
-                    emu::logf(emu::LogLevel::warn, "STAGE67ST",
+                    emu::logf(emu::LogLevel::debug, "STAGE67ST",
                         "vblank=%u pc=0x%08X sound=%d ldst=%d ldsub=%d loopctr=%d vsync_ctr=%u vblank_cb=0x%08X"
                         " cd_stat=%u game_imask=0x%04X cd_cb=0x%08X hw_istat=0x%04X hw_imask=0x%04X"
                         " d6190=0x%08X dyn=%d exe_remain=%u exe_dst=0x%08X",
@@ -3341,7 +3341,7 @@ void Bus::tick(uint32_t cycles)
 
                     // Log comprehensive state dump (warn level so it appears in normal runs)
                     emu::logf(emu::LogLevel::warn, "BUS", "===== VSYNC STUCK DETECTED =====");
-                    emu::logf(emu::LogLevel::warn, "BUS", "VBlank #%u: stuck for %u VBlanks (no primitives)",
+                    emu::logf(emu::LogLevel::debug, "BUS", "VBlank #%u: stuck for %u VBlanks (no primitives)",
                         vblank_total_count_, vblank_stuck_count_);
                     emu::logf(emu::LogLevel::warn, "BUS", "Last real frame: VBlank #%u", vblank_last_frame_);
                     emu::logf(emu::LogLevel::warn, "BUS", "I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X",
