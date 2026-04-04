@@ -1366,14 +1366,14 @@ int main(int argc, char** argv)
     //   ~34s (2040 vb) = press X (car select / start race)
     //   ~50s (3000 vb) = press X (accelerate — hold for a few seconds)
     AutoInput auto_inputs[] = {
-        { 1800, 1830, kPadX },      // X press ~30s
-        { 1920, 1950, kPadX },      // X press ~32s
-        { 2040, 2070, kPadX },      // X press ~34s
-        { 2200, 2230, kPadX },      // X press ~36.7s
-        { 2400, 2430, kPadX },      // X press ~40s
-        { 2600, 2630, kPadX },      // X press ~43.3s
-        { 2800, 2830, kPadX },      // X press ~46.7s
-        { 3000, 6000, kPadX },      // Hold X ~50s-100s (accelerate!)
+        { 350,  500,  kPadX },      // Hold X right after SIO0 starts
+        { 600,  700,  kPadX },      // X press again
+        { 800,  900,  kPadX },      // X press
+        { 1000, 1100, kPadX },      // X press
+        { 1200, 1300, kPadX },      // X press
+        { 1500, 1600, kPadX },      // X press
+        { 1800, 1830, kPadX },      // X press
+        { 3000, 6000, kPadX },      // Hold X (accelerate!)
     };
     const int auto_input_count = (int)(sizeof(auto_inputs) / sizeof(auto_inputs[0]));
     const int use_auto_input = has_flag(argc, argv, "--auto-input");
