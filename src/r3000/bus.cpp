@@ -607,8 +607,26 @@ void Bus::sio0_write_ctrl(uint16_t v)
         i_stat_ &= ~(1u << 7); // clear I_STAT SIO0 bit (like DuckStation SetLineState false)
     }
 
-    // Bit 1 (0x0002) = SELECT: if deasserted, reset device transfer state
-    if (!(v & 0x0002u))
+    // Log CTRL writes for debugging
+    {
+        static uint32_t ctrl_log = 0;
+        if (ctrl_log < 30 && vblank_total_count_ > 300)
+        {
+            ++ctrl_log;
+            emu::logf(emu::LogLevel::warn, "SIO0_CTRL",
+                "[%u] v=0x%04X old=0x%04X sel=%d txen=%d ack=%d state=%d phase=%u vbl=%u",
+                ctrl_log, v, sio0_ctrl_,
+                (v >> 1) & 1, v & 1, (v >> 4) & 1,
+                (int)sio0_state_, sio0_tx_phase_, vblank_total_count_);
+        }
+    }
+
+    // DuckStation: JOY_CTRL is a full write register. The BIOS writes the
+    // ENTIRE value each time (including SELECT, TXEN, ACKINTEN etc.).
+    // Only reset the device when SELECT transitions from 1 to 0.
+    const bool old_select = (sio0_ctrl_ & 0x0002u) != 0;
+    const bool new_select = (v & 0x0002u) != 0;
+    if (old_select && !new_select)
     {
         sio0_tx_phase_ = 0u; // reset protocol phase (device deselected)
     }
