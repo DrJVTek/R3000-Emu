@@ -1414,6 +1414,14 @@ int main(int argc, char** argv)
 
     uint64_t steps = 0;
     const auto run_start = std::chrono::steady_clock::now();
+
+    // Decouple peripherals from CPU: Bus::tick() is skipped, peripherals
+    // are ticked every ~1024 cycles for speed.
+    if (core.bus())
+        core.bus()->set_external_vblank(true);
+    uint32_t periph_accum = 0;
+    constexpr uint32_t kPeriphBatch = 1024;
+
     for (;;)
     {
         const auto res = core.step();
@@ -1434,6 +1442,20 @@ int main(int argc, char** argv)
                 core.set_pad_buttons(pad);
             }
         }
+        // Tick peripherals every ~1024 cycles
+        {
+            const uint32_t cyc = core.last_cycles();
+            periph_accum += cyc;
+            if (periph_accum >= kPeriphBatch)
+            {
+                if (core.bus())
+                    core.bus()->tick_peripherals(periph_accum);
+                // Fire VBlank from peripheral tick (gpu tick_vblank inside tick_peripherals)
+                // The VBlank IRQ is set by tick_peripherals via the normal gpu path
+                periph_accum = 0;
+            }
+        }
+
         if (res.kind == r3000::Cpu::StepResult::Kind::ok)
         {
             ++steps;
