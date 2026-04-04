@@ -223,18 +223,9 @@ public:
                     Bus->tick_peripherals(PeriphAccum);
             }
 
-            // Fire VBlank at fixed rate (independent of CPU speed)
-            if (Now - LastVblTime >= kVblPeriod)
-            {
-                LastVblTime += kVblPeriod;
-                // Prevent accumulation if we're behind
-                if (Now - LastVblTime > kVblPeriod * 2.0)
-                    LastVblTime = Now;
-
-                r3000::Bus* Bus = Core->bus();
-                if (Bus)
-                    Bus->fire_vblank_external();
-            }
+            // VBlank is handled by tick_peripherals via gpu_->tick_vblank().
+            // No separate fire_vblank_external needed — it caused double-swap
+            // which cleared the draw list before UE5 could read it.
 
             // Update owner stats (atomic)
             Owner->UpdateStepsExecuted(LocalSteps, LocalTotalCycles);
