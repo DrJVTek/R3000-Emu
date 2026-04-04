@@ -534,16 +534,18 @@ void Bus::timer_check_irq(int ch, uint32_t old_count)
 }
 
 // ------------------ SIO0 (minimal controller) ------------------
-uint16_t Bus::sio0_stat_value() const
+uint16_t Bus::sio0_stat_value()
 {
     // Base: TX Ready 1 (bit 0) | TX Ready 2 (bit 2)
     uint16_t stat = (uint16_t)(sio0_stat_ | 0x0005u);
-    // Bit 7: /ACK input level. HIGH (1) = idle, LOW (0) = ACK asserted.
-    // When sio0_ack_countdown_ > 0, ACK is asserted (LOW/0).
-    // When countdown is 0, ACK is idle (HIGH/1).
-    if (sio0_ack_countdown_ == 0)
-        stat |= 0x0080u; // /ACK HIGH (idle)
-    // else: /ACK LOW (asserted) - bit 7 stays 0
+
+    // Bit 7: ACKINPUT — latched flag, set by do_ack(), cleared on read.
+    // DuckStation: set in DoACK(), cleared when BIOS reads JOY_STAT.
+    if (sio0_ack_input_flag_)
+    {
+        stat |= 0x0080u;
+        sio0_ack_input_flag_ = 0; // clear on read
+    }
 
     if (sio0_rx_ready_)
         stat |= 0x0002u; // RXRDY (bit 1)
@@ -552,7 +554,7 @@ uint16_t Bus::sio0_stat_value() const
     return stat;
 }
 
-uint16_t Bus::sio0_stat_debug() const { return sio0_stat_value(); }
+uint16_t Bus::sio0_stat_debug() const { return const_cast<Bus*>(this)->sio0_stat_value(); }
 
 uint16_t Bus::sio0_read_data()
 {
@@ -578,7 +580,7 @@ uint16_t Bus::sio0_read_data()
 
 void Bus::sio0_write_ctrl(uint16_t v)
 {
-    sio0_ctrl_ = v;
+    const uint16_t old_ctrl = sio0_ctrl_; // save BEFORE overwrite
 
     // Bit 6 (0x0040) = Reset: soft-reset SIO (like DuckStation SoftReset)
     if (v & 0x0040u)
@@ -597,7 +599,11 @@ void Bus::sio0_write_ctrl(uint16_t v)
         sio0_transfer_countdown_ = 0;
         sio0_tx_buf_full_ = 0;
         sio0_tx_value_ = 0;
+        sio0_ack_input_flag_ = 0;
+        return; // reset clears everything, nothing more to do
     }
+
+    sio0_ctrl_ = v; // apply new value AFTER edge detection saved old_ctrl
 
     // Bit 4 (0x0010) = Acknowledge: clears STAT IRQ flag (bit 9) AND I_STAT bit 7.
     // This matches DuckStation: JOY_CTRL ACK clears INTR + SetLineState(false).
@@ -607,24 +613,10 @@ void Bus::sio0_write_ctrl(uint16_t v)
         i_stat_ &= ~(1u << 7); // clear I_STAT SIO0 bit (like DuckStation SetLineState false)
     }
 
-    // Log CTRL writes for debugging
-    {
-        static uint32_t ctrl_log = 0;
-        if (ctrl_log < 30 && vblank_total_count_ > 300)
-        {
-            ++ctrl_log;
-            emu::logf(emu::LogLevel::warn, "SIO0_CTRL",
-                "[%u] v=0x%04X old=0x%04X sel=%d txen=%d ack=%d state=%d phase=%u vbl=%u",
-                ctrl_log, v, sio0_ctrl_,
-                (v >> 1) & 1, v & 1, (v >> 4) & 1,
-                (int)sio0_state_, sio0_tx_phase_, vblank_total_count_);
-        }
-    }
-
     // DuckStation: JOY_CTRL is a full write register. The BIOS writes the
     // ENTIRE value each time (including SELECT, TXEN, ACKINTEN etc.).
     // Only reset the device when SELECT transitions from 1 to 0.
-    const bool old_select = (sio0_ctrl_ & 0x0002u) != 0;
+    const bool old_select = (old_ctrl & 0x0002u) != 0;
     const bool new_select = (v & 0x0002u) != 0;
     if (old_select && !new_select)
     {
@@ -811,9 +803,11 @@ void Bus::sio0_do_transfer()
     }
 }
 
-// ACK pulse completed: set IRQ flag, trigger I_STAT if ACKINTEN
+// ACK pulse completed: set ACKINPUT flag + IRQ
 void Bus::sio0_do_ack()
 {
+    sio0_ack_input_flag_ = 1; // Latched — cleared when BIOS reads STAT
+
     // ACKINTEN: CTRL bit 12 (0x1000)
     sio0_irq_flag_ = 1;
     if (sio0_ctrl_ & 0x1000u)

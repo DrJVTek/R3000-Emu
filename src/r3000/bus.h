@@ -202,7 +202,7 @@ class Bus
     void log_mem(const char* op, uint32_t addr, uint32_t v) const;
     void sio0_write_data(uint8_t v);
     uint16_t sio0_read_data();
-    uint16_t sio0_stat_value() const;
+    uint16_t sio0_stat_value(); // non-const: clears ACKINPUT on read
 
     uint8_t* ram_{nullptr};
     uint32_t ram_size_{0};
@@ -326,6 +326,7 @@ class Bus
     uint8_t sio0_tx_buf_full_{0}; // TX buffer has data waiting
     uint32_t sio0_transfer_countdown_{0}; // ticks until transfer completes
     uint32_t sio0_ack_countdown_{0};      // ticks until ACK pulse ends
+    uint8_t  sio0_ack_input_flag_{0};    // ACKINPUT latched flag (set by do_ack, cleared on STAT read)
 
     // pad_buttons_ member REMOVED — now uses global g_pad_buttons in bus.cpp
     // to avoid Hot Reload class-layout offset mismatch.
