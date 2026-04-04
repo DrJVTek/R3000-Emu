@@ -252,16 +252,12 @@ void UR3000GpuComponent::RebuildMesh()
 
     if (NumCmds == 0)
     {
-        // PS1 games often skip GPU commands on some VBlanks (e.g. Ridge Racer
-        // draws 2 frames then skips 1 in 30fps interlaced mode). Keep the
-        // previous mesh for a few empty frames to avoid flickering.
-        // But if many consecutive frames are empty (e.g. during STR video
-        // playback where the GPU has no draw commands), clear the mesh to
-        // avoid stale polygons remaining visible.
+        // PS1 double-buffer: every other VBlank the "ready" draw list may be
+        // the one currently being drawn into (empty). Keep the previous mesh
+        // until we see a significant run of empty frames (e.g. STR video).
         EmptyFrameCount_++;
-        if (EmptyFrameCount_ < 3)
+        if (EmptyFrameCount_ < 10)
             return;
-        // Clear stale mesh after 3+ consecutive empty frames
         if (MeshComp_)
             MeshComp_->ClearAllMeshSections();
         return;
