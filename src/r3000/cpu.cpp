@@ -1152,6 +1152,32 @@ Cpu::StepResult Cpu::step()
     // of taking the branch after RFE.
     branch_just_scheduled_ = false;
 
+    // Workaround: detect BIOS IRQ handler stuck in acknowledge loop.
+    // The BIOS handler at 0xF80 does MTC0 then jumps to 0x1014 for RFE.
+    // After RFE, if I_STAT is still pending, the IRQ fires again immediately.
+    // Detect repeated RFE at 0x1014 with unchanged I_STAT and force-clear.
+    if (pc_ == 0x0000'1014u) // RFE instruction in BIOS handler
+    {
+        const uint32_t cur_istat = bus_.irq_stat_raw() & bus_.irq_mask_raw();
+        if (cur_istat == irq_loop_istat_ && cur_istat != 0)
+        {
+            ++irq_loop_count_;
+            if (irq_loop_count_ >= 8)
+            {
+                // Force-clear the stuck I_STAT bits
+                Bus::MemFault wf{};
+                const uint32_t clear_mask = ~cur_istat;
+                bus_.write_u32(0x1F80'1070u, clear_mask, wf);
+                irq_loop_count_ = 0;
+            }
+        }
+        else
+        {
+            irq_loop_istat_ = cur_istat;
+            irq_loop_count_ = 0;
+        }
+    }
+
     // -----------------------------
     // 0) IRQ (PS1) - check between instructions
     // -----------------------------

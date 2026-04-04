@@ -346,6 +346,7 @@ class Bus
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
     bool external_vblank_{false}; // When true, VBlank is fired externally, not from tick()
+    std::atomic<uint8_t> vblank_ext_pending_{0}; // Deferred VBlank flag (set by timer thread, consumed by CPU thread)
     // DMA3 DREQ gating: if CDROM FIFO is empty when DMA3 starts, defer until FIFO fills.
     uint8_t dma3_pending_{0};
     mdec::Mdec* mdec_{nullptr};     // Real MDEC decoder (owned by Core)

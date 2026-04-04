@@ -2928,17 +2928,16 @@ void Bus::check_cdrom_irq_edge()
 
 void Bus::fire_vblank_external()
 {
-    // Fire VBlank IRQ — same as the gpu_vblank_fired path in tick() but
-    // called from the worker thread timer at a fixed rate (50Hz PAL / 60Hz NTSC).
-    // This decouples VBlank from CPU speed.
-    i_stat_ |= (1u << 0);
-    ++vblank_total_count_;
+    // Signal VBlank from the external timer thread.
+    // We do NOT set i_stat_ here — that causes race conditions with the BIOS
+    // exception handler (handler clears I_STAT, but timer thread re-sets it
+    // before the next instruction, causing infinite IRQ loop).
+    // Instead, set a deferred flag consumed by tick_peripherals() on the CPU thread.
+    vblank_ext_pending_.store(1, std::memory_order_release);
 
-    // GPU draw list swap (needed for UE5 rendering bridge)
+    // GPU draw list swap (needed for UE5 rendering bridge — safe from any thread)
     if (gpu_)
-    {
         gpu_->tick_vblank_swap_only();
-    }
 
     // Shadow 3D systems
     if (gte_3d_) gte_3d_->swap_frame();
@@ -2967,6 +2966,14 @@ void Bus::tick(uint32_t cycles)
     // tick_peripherals() called every ~256 cycles from the worker thread.
     if (external_vblank_)
     {
+        // Consume deferred VBlank from timer thread (race-free: only CPU thread writes i_stat_)
+        if (vblank_ext_pending_.exchange(0, std::memory_order_acquire))
+        {
+            if (!(i_stat_ & (1u << 0))) // edge-triggered: don't re-set if still pending
+                i_stat_ |= (1u << 0);
+            ++vblank_total_count_;
+        }
+
         if (sio0_state_ == Sio0State::Transmitting && sio0_transfer_countdown_ > 0)
         {
             if (cycles >= sio0_transfer_countdown_) { sio0_transfer_countdown_ = 0; sio0_do_transfer(); }
@@ -3150,7 +3157,8 @@ void Bus::tick(uint32_t cycles)
     {
             if (!external_vblank_)
             {
-                i_stat_ |= (1u << 0); // VBlank IRQ (bit 0)
+                if (!(i_stat_ & (1u << 0))) // edge-triggered: don't re-set if pending
+                    i_stat_ |= (1u << 0);
                 ++vblank_total_count_;
             }
 

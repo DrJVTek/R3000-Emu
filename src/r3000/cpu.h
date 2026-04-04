@@ -548,6 +548,8 @@ class Cpu
     uint32_t spin_pc_{0};
     uint32_t spin_count_{0};
     uint32_t pc_sample_counter_{0};
+    uint32_t irq_loop_istat_{0};  // IRQ loop detector: last pending I_STAT
+    uint32_t irq_loop_count_{0};  // IRQ loop detector: consecutive entries
     // NOTE: pas de "skip loop" ici: on préfère corriger l'émulation plutôt que patcher le flow du BIOS.
 
     // COP2 = GTE (PS1). Séparé du CPU pour garder le code propre.
