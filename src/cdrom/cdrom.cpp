@@ -3001,7 +3001,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     // Previously only Pause(0x09)/Stop(0x08) did this, but games
                     // like Soul Reaver send SetLoc during ReadN and expect it to
                     // interrupt the read immediately.
-                    if (reading_active_ && pending_irq_type_ != 0 && pending_irq_reason_ == 0xFFu)
+                    if (reading_active_ && pending_irq_type_ != 0)
                     {
                         cancel_pending_read_advance();
                         emu::logf(emu::LogLevel::info, "CD",
@@ -3312,18 +3312,25 @@ void Cdrom::tick(uint32_t cycles)
             }
         }
 
-        // If a pending ReadN advance blocks command execution, cancel it.
-        // Commands like SetLoc/Pause MUST be able to interrupt ReadN.
+        // If a pending IRQ blocks command execution during active reading,
+        // cancel it. Commands MUST be able to interrupt ReadN/ReadS.
+        // This covers both ReadN advance (reason=0xFF) and any other
+        // pending INT1 that might block the pipeline.
         if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&
-            pending_irq_type_ != 0 && pending_irq_reason_ == 0xFFu &&
+            pending_irq_type_ != 0 &&
             reading_active_ &&
             !read_pending_irq1_ && !async_stat_pending_)
         {
-            cancel_pending_read_advance();
-            next_read_due_cycle_ = 0;
             emu::logf(emu::LogLevel::info, "CD",
-                "cmd_exec: cancelled pending ReadN advance for CMD 0x%02X", cmd_exec_cmd_);
+                "cmd_exec: cancelled pending IRQ type=%u reason=0x%02X for CMD 0x%02X",
+                pending_irq_type_, pending_irq_reason_, cmd_exec_cmd_);
+            pending_irq_type_ = 0;
+            pending_irq_due_cycle_ = 0;
+            pending_irq_live_status_ = 0;
+            pending_irq_reason_ = 0;
+            pending_irq_extra_len_ = 0;
+            next_read_due_cycle_ = 0;
         }
         if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&

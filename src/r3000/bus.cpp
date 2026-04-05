@@ -3639,44 +3639,16 @@ void Bus::tick(uint32_t cycles)
             if (sr_trace < 3 && cdrom_->read_lba_debug() >= 1023 && cdrom_->read_lba_debug() <= 1030)
             {
                 ++sr_trace;
-                // StCdInterrupt key variables
-                const uint32_t dd9c0 = *(uint32_t*)(ram_ + (0x800dd9c0u & (ram_size_ - 1))); // frame_done flag
-                const uint32_t dd9ac = *(uint32_t*)(ram_ + (0x800dd9acu & (ram_size_ - 1))); // MDEC decode flag
-                const uint32_t dma1_chcr = dma_[1].chcr;  // DMA1 MDEC OUT
-                const uint32_t cd9a0 = *(uint32_t*)(ram_ + (0x800cd9a0u & (ram_size_ - 1))); // status
-                // BIOS IntRP chain root for priority 0 (CDROM) at 0x100
-                const uint32_t intrp0_func = *(uint32_t*)(ram_ + 0x100);
-                const uint32_t intrp0_next = *(uint32_t*)(ram_ + 0x108);
-                // BIOS CD callback stored by CdReadyCallback at kernel area
-                // Typical: 0x00000914-0x00000960 range
-                // BIOS IntRP chain: head at 0x100 -> handler struct
-                const uint32_t head0 = *(uint32_t*)(ram_ + 0x100);
-                const uint32_t phys0 = head0 & (ram_size_ - 1);
-                const uint32_t h0_func = (phys0 + 4 <= ram_size_) ? *(uint32_t*)(ram_ + phys0) : 0;
-                const uint32_t h0_next = (phys0 + 12 <= ram_size_) ? *(uint32_t*)(ram_ + phys0 + 8) : 0;
-                // Follow next pointer if non-null
-                uint32_t h1_func = 0;
-                if (h0_next != 0) {
-                    const uint32_t p1 = h0_next & (ram_size_ - 1);
-                    h1_func = (p1 + 4 <= ram_size_) ? *(uint32_t*)(ram_ + p1) : 0;
-                }
-                const uint32_t s1540 = *(uint32_t*)(ram_ + (0x800d1540u & (ram_size_ - 1)));
-                const uint32_t s1528 = *(uint32_t*)(ram_ + (0x800d1528u & (ram_size_ - 1)));
-                const uint32_t s1530 = *(uint32_t*)(ram_ + (0x800d1530u & (ram_size_ - 1)));
-                const uint32_t s1568 = *(uint32_t*)(ram_ + (0x800d1568u & (ram_size_ - 1)));
-                const uint32_t s152c = *(uint32_t*)(ram_ + (0x800d152cu & (ram_size_ - 1)));
-                const uint32_t cd_status = *(uint32_t*)(ram_ + (0x800cd2ecu & (ram_size_ - 1)));
                 const uint32_t cd_sync = *(uint32_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
-                const uint32_t event_flag = *(uint16_t*)(ram_ + (0x800cb782u & (ram_size_ - 1)));
-                // IntRP struct: {next(4), func(4), flag(4)}
-                const uint32_t h0_next = *(uint32_t*)(ram_ + phys0 + 0);
-                const uint32_t h0_func2 = *(uint32_t*)(ram_ + phys0 + 4);
-                const uint32_t h0_flag = *(uint32_t*)(ram_ + phys0 + 8);
+                // IRQ handler table: CDROM handler at index 2 (offset 8)
+                const uint32_t cdrom_handler = *(uint32_t*)(ram_ + (0x800cb78Cu & (ram_size_ - 1)));
+                // Game's own IRQ mask shadow
+                const uint32_t irq_mask_game = *(uint32_t*)(ram_ + (0x800cb7b0u & (ram_size_ - 1)));
                 emu::logf(emu::LogLevel::warn, "SR_DEBUG",
-                    "LBA=%u sync=%u evt=%u irq=0x%02X IntRP0=[next=0x%08X func=0x%08X flag=%d] pc=0x%08X",
-                    cdrom_->read_lba_debug(), cd_sync, event_flag,
+                    "LBA=%u sync=%u irq=0x%02X cd_handler=0x%08X mask_game=0x%04X i_mask=0x%04X pc=0x%08X",
+                    cdrom_->read_lba_debug(), cd_sync,
                     cdrom_->irq_flags_debug(),
-                    h0_next, h0_func2, h0_flag, cpu_pc_);
+                    cdrom_handler, irq_mask_game, i_mask_, cpu_pc_);
             }
         }
     }
