@@ -449,8 +449,20 @@ void Bus::timer_update_counting(int ch)
         const uint8_t sync_mode = (t.mode >> 1) & 3u;
         if (ch == 2)
         {
-            // Timer 2 sync modes: 0 or 3 = stop counter, 1 or 2 = free run
-            t.counting_enabled = (sync_mode == 1 || sync_mode == 2);
+            // Timer 2 has no gate input. DuckStation treats it like other timers
+            // with gate=false: mode 0 (PauseWhileGateActive) → counts when !gate = true
+            // mode 1 (ResetOnGateEnd) → always counts
+            // mode 2 (ResetAndRunOnGateStart) → counts when gate = false → stopped
+            // mode 3 (FreeRunOnGateEnd) → counts when gate = false → stopped
+            // PSX-SPX says 0,3=stop and 1,2=free run, but DuckStation disagrees:
+            // mode 0 counts (gate=false → !false=true), mode 3 stops (gate=false).
+            switch (sync_mode)
+            {
+                case 0: t.counting_enabled = true; break;  // DuckStation: !gate = true
+                case 1: t.counting_enabled = true; break;  // free run
+                case 2: t.counting_enabled = false; break;  // gate=false → stopped
+                case 3: t.counting_enabled = false; break;  // gate=false → stopped
+            }
         }
         else
         {
@@ -3652,6 +3664,19 @@ void Bus::tick(uint32_t cycles)
         // Soul Reaver debug: dump game flags when CD advances past LBA 1022
         {
             static int sr_trace = 0;
+            // Trace game PC during stall (after loading completes at ~14s)
+            static uint64_t pc_trace_last = 0;
+            if (vblank_total_count_ > 700 && vblank_total_count_ < 705
+                && cpu_pc_ >= 0x80010000u && cpu_pc_ < 0x80100000u
+                && vblank_total_count_ != pc_trace_last)
+            {
+                pc_trace_last = vblank_total_count_;
+                const auto& t2 = timers_[2];
+                emu::logf(emu::LogLevel::warn, "SR_PC",
+                    "VBL=%u pc=0x%08X T2: cnt=%u mode=0x%04X target=%u enabled=%d extclk=%d",
+                    vblank_total_count_, cpu_pc_,
+                    t2.count, t2.mode, t2.target, (int)t2.counting_enabled, (int)t2.use_external_clock);
+            }
             if (sr_trace < 5 && cdrom_->read_lba_debug() >= 1023 && cdrom_->read_lba_debug() <= 1030)
             {
                 ++sr_trace;
