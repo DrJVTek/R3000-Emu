@@ -949,7 +949,6 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
                 (unsigned)i_mask_);
         }
         // Check if CDROM IRQ edge occurred (e.g., after reading status that clears IRQ)
-        check_cdrom_irq_edge();
         return true;
     }
 
@@ -1257,7 +1256,6 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         {
             out = 0;
         }
-        check_cdrom_irq_edge();
         return true;
     }
 
@@ -1489,7 +1487,6 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
             cdrom_->mmio_write8(phys, v);
         }
         // Check for IRQ edge after write (command execution, IRQ ack, etc.)
-        check_cdrom_irq_edge();
         return true;
     }
 
