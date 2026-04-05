@@ -3633,7 +3633,7 @@ void Bus::tick(uint32_t cycles)
         // Soul Reaver debug: dump game flags when CD advances past LBA 1022
         {
             static int sr_trace = 0;
-            if (sr_trace < 3 && cdrom_->read_lba_debug() >= 1023 && cdrom_->read_lba_debug() <= 1030)
+            if (sr_trace < 5 && cdrom_->read_lba_debug() >= 1023 && cdrom_->read_lba_debug() <= 1030)
             {
                 ++sr_trace;
                 const uint8_t cd_sync = *(uint8_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
@@ -3643,10 +3643,10 @@ void Bus::tick(uint32_t cycles)
                 // Game's own IRQ mask shadow
                 const uint32_t irq_mask_game = *(uint32_t*)(ram_ + (0x800cb7b0u & (ram_size_ - 1)));
                 emu::logf(emu::LogLevel::warn, "SR_DEBUG",
-                    "LBA=%u sync=%u ready=%u irq=0x%02X cd_handler=0x%08X pc=0x%08X",
-                    cdrom_->read_lba_debug(), cd_sync, cd_ready,
+                    "LBA=%u sync=%u irq=0x%02X i_stat=0x%04X i_mask=0x%04X pc=0x%08X",
+                    cdrom_->read_lba_debug(), cd_sync,
                     cdrom_->irq_flags_debug(),
-                    cdrom_handler, irq_mask_game, i_mask_, cpu_pc_);
+                    i_stat_, i_mask_, cpu_pc_);
             }
         }
     }
