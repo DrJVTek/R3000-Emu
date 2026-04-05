@@ -2953,7 +2953,12 @@ void Bus::check_cdrom_irq_edge()
     const uint8_t cdirq = cdrom_->irq_line();
     if (cdirq && !cdrom_irq_prev_)
     {
-        i_stat_ |= (1u << 2);
+        // Only latch if not already set. This prevents the BIOS
+        // exception handler's while(i_stat & i_mask) loop from
+        // being trapped by back-to-back CD INT1s that re-set the
+        // bit between the handler's clear and its loop condition check.
+        if (!(i_stat_ & (1u << 2)))
+            i_stat_ |= (1u << 2);
         emu::logf(emu::LogLevel::debug, "BUS", "CDROM IRQ edge: i_stat=0x%04X", (unsigned)i_stat_);
         cdrom_->debug_log_bus_irq_latched(i_stat_, i_mask_);
     }
@@ -3639,14 +3644,15 @@ void Bus::tick(uint32_t cycles)
             if (sr_trace < 3 && cdrom_->read_lba_debug() >= 1023 && cdrom_->read_lba_debug() <= 1030)
             {
                 ++sr_trace;
-                const uint32_t cd_sync = *(uint32_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
+                const uint8_t cd_sync = *(uint8_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
+                const uint8_t cd_ready = *(uint8_t*)(ram_ + (0x800cd5bdu & (ram_size_ - 1)));
                 // IRQ handler table: CDROM handler at index 2 (offset 8)
                 const uint32_t cdrom_handler = *(uint32_t*)(ram_ + (0x800cb78Cu & (ram_size_ - 1)));
                 // Game's own IRQ mask shadow
                 const uint32_t irq_mask_game = *(uint32_t*)(ram_ + (0x800cb7b0u & (ram_size_ - 1)));
                 emu::logf(emu::LogLevel::warn, "SR_DEBUG",
-                    "LBA=%u sync=%u irq=0x%02X cd_handler=0x%08X mask_game=0x%04X i_mask=0x%04X pc=0x%08X",
-                    cdrom_->read_lba_debug(), cd_sync,
+                    "LBA=%u sync=%u ready=%u irq=0x%02X cd_handler=0x%08X pc=0x%08X",
+                    cdrom_->read_lba_debug(), cd_sync, cd_ready,
                     cdrom_->irq_flags_debug(),
                     cdrom_handler, irq_mask_game, i_mask_, cpu_pc_);
             }
