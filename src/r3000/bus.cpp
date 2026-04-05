@@ -3660,14 +3660,15 @@ void Bus::tick(uint32_t cycles)
                     const uint32_t p1 = h0_next & (ram_size_ - 1);
                     h1_func = (p1 + 4 <= ram_size_) ? *(uint32_t*)(ram_ + p1) : 0;
                 }
-                const uint32_t cd_callback = *(uint32_t*)(ram_ + (0x800cd2e4u & (ram_size_ - 1)));
-                const uint32_t loader_state = *(uint32_t*)(ram_ + (0x800d1540u & (ram_size_ - 1)));
-                const uint32_t loader_pos = *(uint32_t*)(ram_ + (0x800d151cu & (ram_size_ - 1)));
-                const uint32_t loader_end = *(uint32_t*)(ram_ + (0x800d1518u & (ram_size_ - 1)));
+                const uint32_t s1540 = *(uint32_t*)(ram_ + (0x800d1540u & (ram_size_ - 1)));
+                const uint32_t s1528 = *(uint32_t*)(ram_ + (0x800d1528u & (ram_size_ - 1)));
+                const uint32_t s1530 = *(uint32_t*)(ram_ + (0x800d1530u & (ram_size_ - 1)));
+                const uint32_t s1568 = *(uint32_t*)(ram_ + (0x800d1568u & (ram_size_ - 1)));
+                const uint32_t s152c = *(uint32_t*)(ram_ + (0x800d152cu & (ram_size_ - 1)));
+                const uint32_t timer_stamp = *(uint32_t*)(ram_ + (0x800d154cu & (ram_size_ - 1)));
                 emu::logf(emu::LogLevel::warn, "SR_DEBUG",
-                    "LBA=%u irq_flags=0x%02X cb=0x%08X loader_state=%u pos=%u end=%u",
-                    cdrom_->read_lba_debug(), cdrom_->irq_flags_debug(),
-                    cd_callback, loader_state, loader_pos, loader_end);
+                    "LBA=%u state=%u next=%u timer_stamp=%u vbl=%u",
+                    cdrom_->read_lba_debug(), s1540, s1528, timer_stamp, vblank_total_count_);
             }
         }
     }
