@@ -1339,6 +1339,18 @@ void Gpu::gp0_vram_to_vram()
 
     frame_stats_.vram_to_vram++;
     vram_write_seq_++;
+    record_cpu_vram_write(dx, dy, w, h);
+
+    if (w >= 256 || h >= 200)
+    {
+        static uint32_t v2v_log = 0;
+        if (v2v_log < 30)
+        {
+            ++v2v_log;
+            emu::logf(emu::LogLevel::warn, "CORE", "VRAM->VRAM #%u (%u,%u)->(%u,%u) %ux%u frame=%u",
+                v2v_log, sx, sy, dx, dy, w, h, frame_count_);
+        }
+    }
     emu::logf(emu::LogLevel::debug, "GPU", "GP0 VRAM->VRAM (%u,%u)->(%u,%u) %ux%u",
         sx, sy, dx, dy, w, h);
 }
@@ -1365,6 +1377,18 @@ void Gpu::gp0_cpu_to_vram_start()
 
     gp0_state_ = Gp0State::receiving_vram_data;
     frame_stats_.cpu_to_vram++;
+
+    // Trace LoadImage >=256 wide OR >=200 tall (video frames, not small CLUTs)
+    if (cpu_vram_w_ >= 256 || cpu_vram_h_ >= 200)
+    {
+        static uint32_t li_count = 0;
+        if (li_count < 30)
+        {
+            ++li_count;
+            emu::logf(emu::LogLevel::warn, "CORE", "LoadImage #%u (%u,%u) %ux%u frame=%u",
+                li_count, cpu_vram_x_, cpu_vram_y_, cpu_vram_w_, cpu_vram_h_, frame_count_);
+        }
+    }
 
     emu::logf(emu::LogLevel::debug, "GPU", "GP0 CPU->VRAM (%u,%u) %ux%u [%u pixels, %u words]",
         cpu_vram_x_, cpu_vram_y_, cpu_vram_w_, cpu_vram_h_,

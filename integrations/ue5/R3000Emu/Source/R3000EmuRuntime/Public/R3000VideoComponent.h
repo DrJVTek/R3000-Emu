@@ -109,6 +109,7 @@ private:
     bool   bHasRealContent_{false}; // true when frame has >5% non-black pixels
     uint32 DumpedFrames_{0};        // PPM dump counter
     uint32 LastCpuWriteSeq_{0};    // track CPU→VRAM writes for 15-bit detection
+    uint32 LastVramSeq_{0};        // track vram_write_seq for rapid-update detection
     uint32 ConsecutiveWrites_{0};  // consecutive CPU→VRAM writes (rapid = video)
     uint32 FramesSinceLastWrite_{0}; // ticks since last new CPU→VRAM write
     uint16 SrcX_{0};               // VRAM source X for current frame (DMA or display)

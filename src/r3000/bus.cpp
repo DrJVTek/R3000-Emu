@@ -2150,6 +2150,8 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 ram_[ma + 3] = (uint8_t)(buf[i] >> 24);
                                 ma = (ma + 4) & 0x1FFFFF;
                             }
+                            // Notify GPU that MDEC has produced output
+                            if (gpu_) gpu_->notify_mdec_output();
                         }
                         dma_finish(ch);
                     }
@@ -2973,6 +2975,12 @@ void Bus::tick(uint32_t cycles)
                 i_stat_ |= (1u << 0);
             ++vblank_total_count_;
         }
+
+        // CDROM IRQ edge: the CDROM may have fired an IRQ (INT1 DataReady, etc.)
+        // between tick_peripherals() calls. Detect the rising edge and set I_STAT.
+        // Without this, CDROM callbacks never fire in external_vblank mode because
+        // check_cdrom_irq_edge() is only in the full tick() path.
+        check_cdrom_irq_edge();
 
         // DMA3 deferred check: if DMA3 was triggered but CDROM FIFO was empty,
         // check if FIFO is now populated and execute the transfer.

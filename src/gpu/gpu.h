@@ -245,7 +245,28 @@ class Gpu
         last_cpu_vram_write_.w = w;
         last_cpu_vram_write_.h = h;
         last_cpu_vram_write_.display = display_;
+
+        // Check if this write overlaps the current display area
+        if (display_.display_enabled && display_.width() > 0 && display_.height() > 0)
+        {
+            const uint16_t dx = display_.display_x;
+            const uint16_t dy = display_.display_y;
+            const uint16_t dw = display_.width();
+            const uint16_t dh = display_.height();
+            // Overlap test
+            if (x < dx + dw && x + w > dx && y < dy + dh && y + h > dy)
+                display_area_written_ = true;
+        }
     }
+
+    // MDEC activity: called from bus when DMA1 (MDEC out) completes
+    void notify_mdec_output() { mdec_active_ = true; }
+
+    // Query: has MDEC decoded AND a write touched the display area since last reset?
+    bool has_mdec_display_content() const { return mdec_active_ && display_area_written_; }
+
+    // Reset after VideoComponent consumes the state
+    void reset_mdec_display_flags() { mdec_active_ = false; display_area_written_ = false; }
 
     /// Get the ready draw list (previous frame's commands).
     /// WARNING: Not thread-safe if called from UE5 while emulator is running.
@@ -396,6 +417,8 @@ class Gpu
     CpuVramWriteInfo last_cpu_vram_write_{};
     uint32_t vram_write_seq_{0};
     uint32_t cpu_vram_write_seq_{0};
+    bool mdec_active_{false};        // MDEC has produced output since last reset
+    bool display_area_written_{false}; // A write overlapped the display area
 
     // Double-buffered draw command lists for UE5 bridge
     FrameDrawList draw_lists_[2];

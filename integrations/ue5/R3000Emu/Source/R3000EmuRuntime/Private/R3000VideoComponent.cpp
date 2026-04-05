@@ -76,84 +76,18 @@ void UR3000VideoComponent::TickComponent(
         return;
     }
 
-    // Detect video mode:
-    // 1) 24-bit display = STR FMV (e.g. hello_strplay)
-    // 2) 15-bit display + recent CPU→VRAM writes covering the display area = MDEC 15-bit (e.g. Tekken)
-    bool bIsVideo = false;
-    bool bIs24Bit = disp.color_24bit;
+    // Simple detection: MDEC has decoded AND a write touched the display area
+    const bool bMdecDisplay = Gpu_->has_mdec_display_content();
 
-    if (bIs24Bit)
-    {
-        bIsVideo = true;
-    }
-    else
-    {
-        // Check for 15-bit MDEC video: detect CPU→VRAM writes that keep changing
-        // (video = new write every few ticks, static image = one write then stops)
-        gpu::CpuVramWriteInfo Write{};
-        Gpu_->copy_last_cpu_vram_write(Write);
-        if (Write.seq != 0 && Write.seq != LastCpuWriteSeq_)
-        {
-            LastCpuWriteSeq_ = Write.seq;
-            ++ConsecutiveWrites_;
-            FramesSinceLastWrite_ = 0;
-        }
-        else
-        {
-            ++FramesSinceLastWrite_;
-            // If no new write for 10+ ticks, reset — it was a static image
-            if (FramesSinceLastWrite_ > 10)
-                ConsecutiveWrites_ = 0;
-        }
-
-        // Video = 5+ different writes with no long gap between them
-        if (ConsecutiveWrites_ >= 5)
-            bIsVideo = true;
-        else if (bVideoVisible_ && bIsVideo15Bit_ && FramesSinceLastWrite_ < 10)
-            bIsVideo = true;
-    }
-
-    // Log first detection
-    if (bIsVideo && !bVideoVisible_)
-    {
-        UE_LOG(LogR3000Video, Warning,
-            TEXT("VideoComponent: VIDEO DETECTED disp_xy=(%u,%u) w=%u h=%u 24bit=%d enabled=%d"),
-            disp.display_x, disp.display_y,
-            disp.width(), disp.height(),
-            disp.color_24bit ? 1 : 0,
-            disp.display_enabled ? 1 : 0);
-    }
-
-    if (bIsVideo)
+    if (bMdecDisplay)
     {
         FramesSinceVideo_ = 0;
-        bIsVideo15Bit_ = !bIs24Bit;
+        bIsVideo15Bit_ = !disp.color_24bit;
 
-        // Always use display dimensions for texture/mesh size
         const int32 W = disp.width();
         const int32 H = disp.height();
-
-        if (bIs24Bit)
-        {
-            SrcX_ = disp.display_x;
-            SrcY_ = disp.display_y;
-        }
-        else
-        {
-            // 15-bit: source from DMA coords (LoadImage area)
-            gpu::CpuVramWriteInfo wr{};
-            Gpu_->copy_last_cpu_vram_write(wr);
-            if (wr.seq != 0 && wr.w > 0 && wr.h > 0)
-            {
-                SrcX_ = wr.x;
-                SrcY_ = wr.y;
-            }
-            else
-            {
-                SrcX_ = disp.display_x;
-                SrcY_ = disp.display_y;
-            }
-        }
+        SrcX_ = disp.display_x;
+        SrcY_ = disp.display_y;
 
         // Resize texture + plane if dimensions changed
         if (W != VideoTexW_ || H != VideoTexH_)
@@ -165,11 +99,20 @@ void UR3000VideoComponent::TickComponent(
         // Upload new frame from VRAM
         UploadVideoFrame(W, H);
 
-        // Only show when we have real pixel content (not MDEC init with empty/black data)
         if (bHasRealContent_ && !bVideoVisible_)
+        {
+            UE_LOG(LogR3000Video, Warning,
+                TEXT("VideoComponent: MDEC DISPLAY detected disp=(%u,%u %ux%u 24=%d)"),
+                disp.display_x, disp.display_y, W, H, disp.color_24bit ? 1 : 0);
             SetVideoVisible(true);
+        }
         else if (!bHasRealContent_ && bVideoVisible_)
+        {
             SetVideoVisible(false);
+        }
+
+        // Reset flags so we detect NEXT frame's MDEC + write
+        Gpu_->reset_mdec_display_flags();
     }
     else
     {
