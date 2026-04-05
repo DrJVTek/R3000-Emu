@@ -1273,15 +1273,12 @@ void Cdrom::try_fill_data_fifo()
             (data_lba == 16 || data_lba == 60642 || data_lba == 60643)
                 ? flog::Level::info
                 : flog::Level::trace;
-        // Log first 8 bytes from the buffer just written (sb_w_ was advanced)
         const uint8_t prev_w = (sb_w_ + kNumSB - 1) % kNumSB;
         const uint8_t* fb = sb_[prev_w].data;
         cd_log(log_cd_, log_io_, clock_, has_clock_, fifo_log_level,
             "FIFO LBA=%u %s [%02X%02X%02X%02X %02X%02X%02X%02X]",
             (unsigned)data_lba, whole_sector ? "RAW2340" : "USR2048",
             fb[0],fb[1],fb[2],fb[3],fb[4],fb[5],fb[6],fb[7]);
-        // Note: Don't send error here - bounds checking is done in tick()
-        // during continuous reading. This can fail early for other reasons.
     }
 }
 
@@ -3424,12 +3421,14 @@ void Cdrom::tick(uint32_t cycles)
                 head_lba_ = read_lba_;
                 const uint8_t sb_w_before = sb_w_;
                 try_fill_data_fifo();
-                // If try_fill actually wrote a sector, point read to it
                 if (sb_w_ != sb_w_before)
+                {
+                    // Sector was written to buffer — point read to it
                     sb_r_ = (sb_w_ + kNumSB - 1) % kNumSB;
+                }
                 else if (is_read_advance && reading_active_)
                 {
-                    // try_fill skipped this sector (XA audio or error).
+                    // try_fill skipped this sector (XA audio, null pad, or error).
                     // Don't deliver INT1 — schedule the next sector instead.
                     const uint32_t next_delay = read_sector_ticks();
                     pending_irq_type_ = 0x01;
