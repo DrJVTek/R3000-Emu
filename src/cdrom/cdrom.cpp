@@ -1070,6 +1070,7 @@ void Cdrom::stop_reading_with_error(uint8_t reason)
 
     // Clear reading state
     reading_active_ = 0;
+    next_read_due_cycle_ = 0;
     data_ready_pending_ = 0;
     want_data_ = 0;
     set_secondary_idle(motor_spinning_ != 0);
@@ -2074,6 +2075,7 @@ void Cdrom::exec_command(uint8_t cmd)
 
             // Stop any active data reading
             reading_active_ = 0;
+    next_read_due_cycle_ = 0;
             read_pending_irq1_ = 0;
             data_ready_pending_ = 0;
             async_stat_pending_ = 0;
@@ -2157,6 +2159,7 @@ void Cdrom::exec_command(uint8_t cmd)
         case 0x08: // Stop
         {
             reading_active_ = 0;
+    next_read_due_cycle_ = 0;
             read_pending_irq1_ = 0;
             seek_in_progress_ = 0;
             pending_read_seek_commit_ = 0;
@@ -2184,6 +2187,7 @@ void Cdrom::exec_command(uint8_t cmd)
             queue_cmd_irq(0x03);
             // Clear reading and active flags
             reading_active_ = 0;
+    next_read_due_cycle_ = 0;
             read_pending_irq1_ = 0;
             seek_in_progress_ = 0;
             pending_read_seek_commit_ = 0;
@@ -3180,20 +3184,20 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // Don't advance loc_lba_ yet - the current sector data must remain
                 // available for DMA3. The advance happens when pending_irq fires in tick().
                 // Skip if a command is queued (e.g. Pause) — it will stop reading when executed.
+                // Hybrid model: ACK-driven (fast) + timer backup (Soul Reaver).
+                // Schedule next sector on ACK for fast delivery. The timer in
+                // tick() acts as a backup if the game doesn't ACK in time.
                 else if (reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
                 {
-                    // Queue next INT1 after read delay. loc_lba_ will be advanced
-                    // when this pending IRQ fires in tick().
-                    // Use reason=0xFF as a marker for "continuous read advance needed"
-                    pending_irq_type_ = 0x01; // INT1 (next sector ready)
+                    pending_irq_type_ = 0x01;
                     pending_irq_resp_ = status_;
                     pending_irq_live_status_ = 1;
-                    pending_irq_reason_ = 0xFFu; // marker: advance sector on delivery
+                    pending_irq_reason_ = 0xFFu;
                     const uint32_t irq_delay = read_sector_ticks();
                     arm_pending_irq_after(irq_delay);
                     pending_read_seek_commit_ = 0;
-                    emu::logf(emu::LogLevel::debug, "CD",
-                        "ReadN continuous: queued next INT1, current LBA=%u delay=%u", read_lba_, irq_delay);
+                    // Cancel the timer backup since ACK-driven took over
+                    next_read_due_cycle_ = 0;
                 }
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
@@ -3335,6 +3339,29 @@ void Cdrom::tick(uint32_t cycles)
     // Deliver pending async IRQs after delay expires.
     if (pending_irq_type_ != 0)
     {
+        // DuckStation-style timer-driven read: when the next sector is due,
+        // advance read_lba and queue a new pending IRQ, even if the previous
+        // INT1 hasn't been ACK'd. This matches real hardware where the drive
+        // reads at fixed intervals regardless of software acknowledgment.
+        if (next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
+        {
+            if (reading_active_ && pending_irq_type_ == 0)
+            {
+                next_read_due_cycle_ = 0;
+                pending_irq_type_ = 0x01;
+                pending_irq_reason_ = 0xFFu;
+                pending_irq_live_status_ = 1;
+                pending_irq_due_cycle_ = now_cycles_;
+                emu::logf(emu::LogLevel::info, "CD",
+                    "Timer-driven advance: LBA=%u -> %u (backup)", read_lba_, read_lba_ + 1);
+            }
+            else if (!reading_active_)
+            {
+                next_read_due_cycle_ = 0; // cancelled
+            }
+            // else: pending_irq_type_ != 0 — keep retrying next tick
+        }
+
         // Deliver once the absolute due cycle is reached and the minimum
         // post-ACK quiet time has elapsed.
         if (now_cycles_ >= pending_irq_due_cycle_ && (irq_flags_ & 0x1Fu) == 0u &&
@@ -3436,6 +3463,15 @@ void Cdrom::tick(uint32_t cycles)
                     pending_irq_live_status_ = 1;
                     arm_pending_irq_after(next_delay);
                     return;
+                }
+
+                // DuckStation-style timer-driven read: schedule the NEXT sector
+                // immediately after delivering ANY INT1 during active reading.
+                // On real hardware, the drive keeps reading at fixed intervals
+                // regardless of whether the game ACK'd or read the data.
+                if (reading_active_)
+                {
+                    next_read_due_cycle_ = now_cycles_ + read_sector_ticks();
                 }
             }
 

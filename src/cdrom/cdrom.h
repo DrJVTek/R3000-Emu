@@ -379,6 +379,7 @@ class Cdrom
     // New IRQs cannot be delivered until at least 1000 cycles after ACK.
     static constexpr uint32_t kMinInterruptDelay = 1000;
     uint64_t next_irq_ready_cycle_{0};
+    uint64_t next_read_due_cycle_{0}; // DuckStation-style: next sector arrives at this cycle (timer-driven)
 
     // Trace counters (per-instance, not static, so they reset between PIE sessions).
     int mmio_rd_trace_{0};
