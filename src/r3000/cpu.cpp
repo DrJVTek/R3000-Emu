@@ -1164,10 +1164,15 @@ Cpu::StepResult Cpu::step()
             ++irq_loop_count_;
             if (irq_loop_count_ >= 8)
             {
-                // Force-clear the stuck I_STAT bits
+                // Force-clear the stuck I_STAT bits.
+                // PS1 I_STAT write: I_STAT &= written_value (AND semantics).
+                // So writing ~cur_istat clears the stuck bits.
                 Bus::MemFault wf{};
                 const uint32_t clear_mask = ~cur_istat;
                 bus_.write_u32(0x1F80'1070u, clear_mask, wf);
+                emu::logf(emu::LogLevel::warn, "IRQ_LOOP",
+                    "Force-cleared stuck I_STAT=0x%04X mask=0x%08X after %u loops at PC=0x1014",
+                    cur_istat, clear_mask, irq_loop_count_);
                 irq_loop_count_ = 0;
             }
         }

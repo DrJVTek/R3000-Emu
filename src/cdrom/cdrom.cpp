@@ -3184,23 +3184,10 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // Don't advance loc_lba_ yet - the current sector data must remain
                 // available for DMA3. The advance happens when pending_irq fires in tick().
                 // Skip if a command is queued (e.g. Pause) — it will stop reading when executed.
-                // Hybrid: ACK-driven (fast) coexists with timer backup.
-                // Both schedule the next sector. The first to fire wins.
-                // For normal reads, ACK fires first (fast BIOS loading).
-                // For partial reads (Soul Reaver), the timer fires independently
-                // even if the game is stuck in an IRQ handler loop.
-                else if (reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
-                {
-                    pending_irq_type_ = 0x01;
-                    pending_irq_resp_ = status_;
-                    pending_irq_live_status_ = 1;
-                    pending_irq_reason_ = 0xFFu;
-                    const uint32_t irq_delay = read_sector_ticks();
-                    arm_pending_irq_after(irq_delay);
-                    pending_read_seek_commit_ = 0;
-                    // Do NOT cancel the timer (next_read_due_cycle_).
-                    // Both paths coexist — timer is the safety net.
-                }
+                // Timer-only model: don't schedule from ACK. The timer in
+                // tick() handles all continuous sector advancement.
+                // This prevents the ACK→schedule→INT1→ACK infinite loop
+                // that traps games doing partial sector reads (Soul Reaver).
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
                 if (async_stat_pending_ && ((old_flags & 0x07u) != 0u) && ((irq_flags_ & 0x07u) == 0u))
@@ -3347,6 +3334,14 @@ void Cdrom::tick(uint32_t cycles)
         // reads at fixed intervals regardless of software acknowledgment.
         if (next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
         {
+            static int blocked_trace = 0;
+            if (reading_active_ && pending_irq_type_ != 0 && blocked_trace < 3)
+            {
+                ++blocked_trace;
+                emu::logf(emu::LogLevel::warn, "CD_TIMER",
+                    "BLOCKED: pend_type=%u reason=0x%02X flags=0x%02X reading=%d LBA=%u",
+                    pending_irq_type_, pending_irq_reason_, irq_flags_, (int)reading_active_, read_lba_);
+            }
             if (reading_active_ && pending_irq_type_ == 0)
             {
                 next_read_due_cycle_ = 0;
@@ -3474,6 +3469,9 @@ void Cdrom::tick(uint32_t cycles)
                 if (reading_active_)
                 {
                     next_read_due_cycle_ = now_cycles_ + read_sector_ticks();
+                    emu::logf(emu::LogLevel::warn, "CD_TIMER",
+                        "ARM: LBA=%u due_in=%u reading=%d pend=%d",
+                        read_lba_, read_sector_ticks(), (int)reading_active_, (int)pending_irq_type_);
                 }
             }
 
