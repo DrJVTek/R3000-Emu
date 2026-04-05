@@ -2826,6 +2826,25 @@ void Bus::exec_dma3_transfer()
         }
     }
 
+    // Dump DMA3 content for BIGFILE.DAT analysis (first 5 transfers after LBA 400)
+    {
+        static int dma3_dump_count = 0;
+        const uint32_t data_lba = cdrom_ ? cdrom_->debug_data_lba() : 0;
+        if (dma3_dump_count < 8 && data_lba >= 410 && data_lba <= 1025)
+        {
+            ++dma3_dump_count;
+            const uint32_t base = start_ma;
+            const uint32_t w0 = *(uint32_t*)(ram_ + base);
+            const uint32_t w1 = *(uint32_t*)(ram_ + base + 4);
+            const uint32_t w2 = *(uint32_t*)(ram_ + base + 8);
+            const uint32_t w3 = (words > 3) ? *(uint32_t*)(ram_ + base + 12) : 0;
+            emu::logf(emu::LogLevel::warn, "DMA3_DUMP",
+                "[%d] lba=%u madr=0x%08X words=%u RAM[0:16]=%08X %08X %08X %08X",
+                dma3_dump_count, data_lba, dma_[3].madr, words,
+                w0, w1, w2, w3);
+        }
+    }
+
     dma_finish(3);
     cdrom_->debug_log_dma3_end(dma_[3].madr, words, 0);
 
