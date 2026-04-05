@@ -754,12 +754,12 @@ void Bus::sio0_do_transfer()
         }
     }
 
-    // RXINTEN: trigger IRQ when RX data arrives (CTRL bit 11, 0x0800)
-    if (sio0_ctrl_ & 0x0800u)
-    {
-        sio0_irq_flag_ = 1;
-        i_stat_ |= (1u << 7); // SIO0 IRQ
-    }
+    // SIO0 IRQ: fire on every transfer completion.
+    // The PS1 SIO0 fires IRQ7 whenever a byte transfer completes.
+    // Games (especially Soul Reaver's custom MC driver) poll i_stat
+    // bit 7 directly without necessarily setting RXINTEN/ACKINTEN.
+    sio0_irq_flag_ = 1;
+    i_stat_ |= (1u << 7); // SIO0 IRQ
 
     // Does the device ACK this byte? All bytes except the last one.
     bool ack = (sio0_tx_phase_ != 0u);
