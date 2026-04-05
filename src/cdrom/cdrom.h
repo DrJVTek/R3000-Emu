@@ -132,6 +132,7 @@ class Cdrom
     // Used by Bus to defer DMA3 until the sector is ready.
     bool is_fifo_empty() const { return sb_[sb_r_].pos >= sb_[sb_r_].sz; }
     uint32_t read_lba_debug() const { return read_lba_; }
+    uint8_t irq_flags_debug() const { return irq_flags_; }
     void check_sector_read_complete();
 
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).

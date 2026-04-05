@@ -3644,10 +3644,20 @@ void Bus::tick(uint32_t cycles)
                 const uint32_t dd9ac = *(uint32_t*)(ram_ + (0x800dd9acu & (ram_size_ - 1))); // MDEC decode flag
                 const uint32_t dma1_chcr = dma_[1].chcr;  // DMA1 MDEC OUT
                 const uint32_t cd9a0 = *(uint32_t*)(ram_ + (0x800cd9a0u & (ram_size_ - 1))); // status
+                // BIOS IntRP chain root for priority 0 (CDROM) at 0x100
+                const uint32_t intrp0_func = *(uint32_t*)(ram_ + 0x100);
+                const uint32_t intrp0_next = *(uint32_t*)(ram_ + 0x108);
+                // BIOS CD callback stored by CdReadyCallback at kernel area
+                // Typical: 0x00000914-0x00000960 range
+                const uint32_t cd_cb_0914 = *(uint32_t*)(ram_ + 0x914);
+                const uint32_t cd_cb_0918 = *(uint32_t*)(ram_ + 0x918);
+                const uint32_t cd_cb_091c = *(uint32_t*)(ram_ + 0x91c);
                 emu::logf(emu::LogLevel::warn, "SR_DEBUG",
-                    "LBA=%u dd9c0=%u(frame_done) dd9ac=%u(mdec_flag) dma1_chcr=0x%08X(mdec_busy=%d) status=%u",
-                    cdrom_->read_lba_debug(), dd9c0, dd9ac, dma1_chcr,
-                    (dma1_chcr >> 24) & 1, cd9a0);
+                    "LBA=%u dd9c0=%u dd9ac=%u dma1=0x%08X status=%u IntRP0=0x%08X->0x%08X cb[914-91c]=0x%08X 0x%08X 0x%08X irq_flags=0x%02X",
+                    cdrom_->read_lba_debug(), dd9c0, dd9ac, dma1_chcr, cd9a0,
+                    intrp0_func, intrp0_next,
+                    cd_cb_0914, cd_cb_0918, cd_cb_091c,
+                    cdrom_->irq_flags_debug());
             }
         }
     }
