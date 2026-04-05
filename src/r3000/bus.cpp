@@ -673,6 +673,28 @@ void Bus::sio0_do_transfer()
             resp = 0xFFu;
             if (v == 0x01u)
                 sio0_tx_phase_ = 1u;
+            else if (v == 0x81u)
+            {
+                // Memory card (slot 1) — NOT IMPLEMENTED
+                // No ACK → game sees "no card connected" and won't send more bytes.
+                // Log every attempt prominently so we know what the game wants.
+                ++mc_access_count_;
+                emu::logf(emu::LogLevel::warn, "SIO0_MEMCARD",
+                    "========================================");
+                emu::logf(emu::LogLevel::warn, "SIO0_MEMCARD",
+                    "  MEMORY CARD ACCESS #%u  (NO CARD)",
+                    mc_access_count_);
+                emu::logf(emu::LogLevel::warn, "SIO0_MEMCARD",
+                    "  device=0x81 slot=1 vbl=%u ctrl=0x%04X",
+                    vblank_total_count_, sio0_ctrl_);
+                emu::logf(emu::LogLevel::warn, "SIO0_MEMCARD",
+                    "  STUB: returning 0xFF, no ACK");
+                emu::logf(emu::LogLevel::warn, "SIO0_MEMCARD",
+                    "  (Memory card emulation not yet implemented)");
+                emu::logf(emu::LogLevel::warn, "SIO0_MEMCARD",
+                    "========================================");
+                // Stay in phase 0, no ACK → game detects absence
+            }
             break;
         case 1:
             (void)v;
@@ -2152,6 +2174,18 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             }
                             // Notify GPU that MDEC has produced output
                             if (gpu_) gpu_->notify_mdec_output();
+
+                            // Count MDEC output frames for debugging
+                            {
+                                static uint32_t mdec_out_count = 0;
+                                ++mdec_out_count;
+                                if (mdec_out_count <= 5 || (mdec_out_count % 50 == 0))
+                                {
+                                    emu::logf(emu::LogLevel::warn, "CORE",
+                                        "MDEC OUT #%u: %u words madr=0x%08X vbl=%u",
+                                        mdec_out_count, words, dma_[1].madr, vblank_total_count_);
+                                }
+                            }
                         }
                         dma_finish(ch);
                     }

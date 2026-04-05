@@ -160,6 +160,82 @@ struct Cdrom::Disc
 
     uint32_t disc_sectors{0};
 
+    // ─── SBI / LibCrypt subchannel replacement ───────────────────────
+    // Plain sorted array — no STL containers (UE5 allocator crash with unordered_map).
+    struct SbiEntry { uint32_t lba; uint8_t subq[12]; };
+    static constexpr int kMaxSbiEntries = 1024;
+    SbiEntry sbi_entries[kMaxSbiEntries]{};
+    int sbi_count{0};
+
+    bool load_sbi(const char* sbi_path)
+    {
+        std::FILE* f = fopen_utf8(sbi_path, "rb");
+        if (!f) return false;
+
+        char header[4]{};
+        if (std::fread(header, 1, 4, f) != 4 ||
+            header[0] != 'S' || header[1] != 'B' || header[2] != 'I' || header[3] != '\0')
+        { std::fclose(f); return false; }
+
+        sbi_count = 0;
+        for (;;)
+        {
+            uint8_t entry[14];
+            if (std::fread(entry, 1, 14, f) != 14) break;
+            if (entry[3] != 1) continue;
+            if (sbi_count >= kMaxSbiEntries) break;
+
+            const uint8_t mm = (entry[0] >> 4) * 10 + (entry[0] & 0x0F);
+            const uint8_t ss = (entry[1] >> 4) * 10 + (entry[1] & 0x0F);
+            const uint8_t ff = (entry[2] >> 4) * 10 + (entry[2] & 0x0F);
+            if (ss >= 60 || ff >= 75) continue;
+
+            const uint32_t lba = ((uint32_t)mm * 60 + (uint32_t)ss) * 75 + (uint32_t)ff - 150;
+            SbiEntry& e = sbi_entries[sbi_count];
+            e.lba = lba;
+            std::memcpy(e.subq, entry + 4, 10);
+            uint16_t crc = compute_subq_crc(e.subq) ^ 0xFFFFu;
+            e.subq[10] = (uint8_t)(crc & 0xFF);
+            e.subq[11] = (uint8_t)(crc >> 8);
+            ++sbi_count;
+        }
+
+        // Insertion sort by LBA for binary search
+        for (int i = 1; i < sbi_count; ++i)
+            for (int j = i; j > 0 && sbi_entries[j].lba < sbi_entries[j-1].lba; --j)
+            { SbiEntry tmp = sbi_entries[j]; sbi_entries[j] = sbi_entries[j-1]; sbi_entries[j-1] = tmp; }
+
+        std::fclose(f);
+        emu::logf(emu::LogLevel::info, "CD_SBI",
+            "Loaded SBI: %s (%d subchannel replacements)", sbi_path, sbi_count);
+        return sbi_count > 0;
+    }
+
+    static uint16_t compute_subq_crc(const uint8_t data[10])
+    {
+        uint16_t crc = 0;
+        for (int i = 0; i < 10; ++i)
+        {
+            crc ^= (uint16_t)data[i] << 8;
+            for (int bit = 0; bit < 8; ++bit)
+                crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u) : (uint16_t)(crc << 1);
+        }
+        return crc;
+    }
+
+    // Binary search for replacement SubQ at given LBA
+    const uint8_t* get_replacement_subq(uint32_t lba) const
+    {
+        int lo = 0, hi = sbi_count - 1;
+        while (lo <= hi)
+        {
+            const int mid = (lo + hi) / 2;
+            if (sbi_entries[mid].lba == lba) return sbi_entries[mid].subq;
+            if (sbi_entries[mid].lba < lba) lo = mid + 1; else hi = mid - 1;
+        }
+        return nullptr;
+    }
+
     static int ends_with_ci(const char* s, const char* suffix)
     {
         if (!s || !suffix)
@@ -689,6 +765,37 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
     // Build LBA → filename map for log annotation (see lba_to_filename()).
     build_file_map();
 
+    // Auto-discover and load SBI file (LibCrypt subchannel replacement).
+    // Search for <basename>.sbi next to the CUE/BIN file.
+    {
+        char sbi_path[1024]{};
+        std::strncpy(sbi_path, path, sizeof(sbi_path) - 1);
+        // Replace extension with .sbi
+        char* dot = std::strrchr(sbi_path, '.');
+        if (dot)
+            std::strcpy(dot, ".sbi");
+        else
+            std::strcat(sbi_path, ".sbi");
+
+        if (disc_->load_sbi(sbi_path))
+        {
+            emu::logf(emu::LogLevel::warn, "CD_SBI",
+                "========================================");
+            emu::logf(emu::LogLevel::warn, "CD_SBI",
+                "  LibCrypt SBI loaded: %s", sbi_path);
+            emu::logf(emu::LogLevel::warn, "CD_SBI",
+                "  %u subchannel replacements active",
+                disc_->sbi_count);
+            emu::logf(emu::LogLevel::warn, "CD_SBI",
+                "========================================");
+        }
+        else
+        {
+            emu::logf(emu::LogLevel::debug, "CD_SBI",
+                "No SBI file found at %s (LibCrypt not needed or missing)", sbi_path);
+        }
+    }
+
     // PSX-SPX: Shell close INT5 should only be sent when the shell transitions
     // from open to closed. At cold boot with disc already present, the shell was
     // never opened, so no shell close event should be sent.
@@ -1112,6 +1219,30 @@ void Cdrom::try_fill_data_fifo()
                     spu_->push_xa_samples(xa_left, xa_right, n);
             }
             return;
+        }
+
+        // XA interleave null sector filter: Mode 2 sectors with submode=0x00
+        // are empty padding in XA streams (replacing audio slots after the audio
+        // track ends). Skip them — delivering to CPU confuses STR decoders that
+        // expect only video data in the stream (e.g. Tekken's Namco logo).
+        if (submode == 0x00u)
+        {
+            emu::logf(emu::LogLevel::debug, "CD",
+                "XA null sector skipped: LBA=%u subhdr=[%02X %02X %02X %02X]",
+                data_lba, last_sector_subheader_[0], last_sector_subheader_[1],
+                last_sector_subheader_[2], last_sector_subheader_[3]);
+            return;
+        }
+
+        // EOF detection: when submode has EOF bit (0x80) set, the file/record
+        // has ended. Reset XA file tracking (like DuckStation). The sector data
+        // is still delivered to the CPU — the game decides what to do.
+        if (submode & 0x80u)
+        {
+            emu::logf(emu::LogLevel::warn, "CD",
+                "*** EOF SECTOR *** LBA=%u submode=0x%02X subhdr=[%02X %02X %02X %02X]",
+                data_lba, submode, last_sector_subheader_[0], last_sector_subheader_[1],
+                last_sector_subheader_[2], last_sector_subheader_[3]);
         }
     }
 
@@ -2178,7 +2309,39 @@ void Cdrom::exec_command(uint8_t cmd)
             // - Relative MM:SS:FF within track (BCD)
             // - Absolute MM:SS:FF (BCD)
             //
-            // We compute relative position by finding the current track and subtracting its start.
+            // LibCrypt protection: if an SBI file provides replacement SubQ
+            // for the current head position, return the SBI data instead.
+            // This is how LibCrypt-protected games verify disc authenticity.
+            const uint32_t current_lba = reading_active_ ? read_lba_ : head_lba_;
+
+            // Check SBI replacement first (LibCrypt)
+            if (disc_)
+            {
+                const auto* sbi = disc_->get_replacement_subq(current_lba);
+                if (sbi)
+                {
+                    // SBI provides the full SubQ payload — return bytes 1-7
+                    // SubQ layout: [0]=ctrl/adr [1]=track [2]=index
+                    //   [3]=rel_mm [4]=rel_ss [5]=rel_ff [6]=reserved
+                    //   [7]=abs_mm [8]=abs_ss [9]=abs_ff
+                    push_resp(sbi[1]); // Track (BCD)
+                    push_resp(sbi[2]); // Index (BCD)
+                    push_resp(sbi[3]); // Relative MM (BCD)
+                    push_resp(sbi[4]); // Relative SS (BCD)
+                    push_resp(sbi[5]); // Relative FF (BCD)
+                    push_resp(sbi[7]); // Absolute MM (BCD)
+                    push_resp(sbi[8]); // Absolute SS (BCD)
+                    push_resp(sbi[9]); // Absolute FF (BCD)
+                    queue_cmd_irq(0x03);
+                    emu::logf(emu::LogLevel::warn, "CD_SBI",
+                        "GetLocP SBI REPLACEMENT at LBA=%u: track=%02X idx=%02X abs=%02X:%02X:%02X",
+                        current_lba, sbi[1], sbi[2],
+                        sbi[7], sbi[8], sbi[9]);
+                    break;
+                }
+            }
+
+            // Normal GetLocP: compute from current position
             uint8_t track_bcd = 0x01;
             uint8_t index_bcd = 0x01;
             uint8_t rel_mm = 0x00;
@@ -2187,14 +2350,12 @@ void Cdrom::exec_command(uint8_t cmd)
 
             if (disc_ && disc_->track_count != 0)
             {
-                // Find which track contains loc_lba_
                 uint32_t track_start_lba = 0;
                 uint8_t track_num = 1;
                 for (uint32_t i = 0; i < disc_->track_count; ++i)
                 {
-                    if (disc_->tracks[i].start_lba <= loc_lba_)
+                    if (disc_->tracks[i].start_lba <= current_lba)
                     {
-                        // Check if this is the best match (highest start <= loc_lba_)
                         if (disc_->tracks[i].start_lba >= track_start_lba)
                         {
                             track_start_lba = disc_->tracks[i].start_lba;
@@ -2204,11 +2365,9 @@ void Cdrom::exec_command(uint8_t cmd)
                 }
                 track_bcd = u8_to_bcd(track_num);
 
-                // Relative position = current LBA - track start LBA
-                const uint32_t rel_lba = (loc_lba_ >= track_start_lba) ? (loc_lba_ - track_start_lba) : 0;
-                const uint32_t rel_frames = rel_lba;
-                const uint32_t mm = rel_frames / (60u * 75u);
-                const uint32_t rem = rel_frames % (60u * 75u);
+                const uint32_t rel_lba = (current_lba >= track_start_lba) ? (current_lba - track_start_lba) : 0;
+                const uint32_t mm = rel_lba / (60u * 75u);
+                const uint32_t rem = rel_lba % (60u * 75u);
                 const uint32_t ss = rem / 75u;
                 const uint32_t ff = rem % 75u;
                 rel_mm = u8_to_bcd((uint8_t)mm);
@@ -2216,14 +2375,23 @@ void Cdrom::exec_command(uint8_t cmd)
                 rel_ff = u8_to_bcd((uint8_t)ff);
             }
 
-            push_resp(track_bcd);   // Track
-            push_resp(index_bcd);   // Index
-            push_resp(rel_mm);      // Relative MM
-            push_resp(rel_ss);      // Relative SS
-            push_resp(rel_ff);      // Relative FF
-            push_resp(loc_msf_[0]); // Absolute MM
-            push_resp(loc_msf_[1]); // Absolute SS
-            push_resp(loc_msf_[2]); // Absolute FF
+            // Absolute position: convert current LBA to MSF BCD
+            {
+                const uint32_t abs_lba_adj = current_lba + 150u; // MSF offset
+                const uint32_t abs_mm = abs_lba_adj / (60u * 75u);
+                const uint32_t abs_rem = abs_lba_adj % (60u * 75u);
+                const uint32_t abs_ss = abs_rem / 75u;
+                const uint32_t abs_ff = abs_rem % 75u;
+
+                push_resp(track_bcd);
+                push_resp(index_bcd);
+                push_resp(rel_mm);
+                push_resp(rel_ss);
+                push_resp(rel_ff);
+                push_resp(u8_to_bcd((uint8_t)abs_mm));
+                push_resp(u8_to_bcd((uint8_t)abs_ss));
+                push_resp(u8_to_bcd((uint8_t)abs_ff));
+            }
             queue_cmd_irq(0x03);
             break;
         }
@@ -2548,76 +2716,65 @@ void Cdrom::exec_command(uint8_t cmd)
         case 0x1D: // GetQ
         {
             // GetQ: Read Q subchannel data from current position.
-            //
-            // Q subchannel format (Mode 1, standard audio/data):
-            // [0] Control/ADR: upper 4 bits = control, lower 4 bits = ADR (usually 1)
-            //     Control: bit2 = data track (1) or audio (0)
-            // [1] Track number (BCD)
-            // [2] Index (BCD, usually 01)
-            // [3] Relative minute (BCD)
-            // [4] Relative second (BCD)
-            // [5] Relative frame (BCD)
-            // [6] Zero
-            // [7] Absolute minute (BCD)
-            // [8] Absolute second (BCD)
-            // [9] Absolute frame (BCD)
-            //
-            // We construct this from our current position and track info.
-            uint8_t ctrl_adr = 0x01; // ADR=1 (standard position)
+            // LibCrypt: SBI replacement applies here too.
+            const uint32_t current_lba = reading_active_ ? read_lba_ : head_lba_;
+
+            // Check SBI replacement first (LibCrypt)
+            if (disc_)
+            {
+                const auto* sbi = disc_->get_replacement_subq(current_lba);
+                if (sbi)
+                {
+                    // Return full 10 SubQ bytes from SBI data
+                    for (int i = 0; i < 10; ++i)
+                        push_resp(sbi[i]);
+                    queue_cmd_irq(0x03);
+                    emu::logf(emu::LogLevel::warn, "CD_SBI",
+                        "GetQ SBI REPLACEMENT at LBA=%u", current_lba);
+                    break;
+                }
+            }
+
+            // Normal GetQ: construct from position and track info
+            uint8_t ctrl_adr = 0x01;
             uint8_t track_bcd = 0x01;
             uint8_t index_bcd = 0x01;
-            uint8_t rel_mm = 0x00;
-            uint8_t rel_ss = 0x00;
-            uint8_t rel_ff = 0x00;
-            uint8_t abs_mm = loc_msf_[0];
-            uint8_t abs_ss = loc_msf_[1];
-            uint8_t abs_ff = loc_msf_[2];
+            uint8_t rel_mm = 0x00, rel_ss = 0x00, rel_ff = 0x00;
 
             if (disc_ && disc_->track_count != 0)
             {
-                // Find current track
                 uint32_t track_start_lba = 0;
                 uint8_t track_num = 1;
                 uint8_t is_audio = 0;
-
                 for (uint32_t i = 0; i < disc_->track_count; ++i)
                 {
-                    if (disc_->tracks[i].start_lba <= loc_lba_)
+                    if (disc_->tracks[i].start_lba <= current_lba &&
+                        disc_->tracks[i].start_lba >= track_start_lba)
                     {
-                        if (disc_->tracks[i].start_lba >= track_start_lba)
-                        {
-                            track_start_lba = disc_->tracks[i].start_lba;
-                            track_num = disc_->tracks[i].number;
-                            is_audio = disc_->tracks[i].is_audio;
-                        }
+                        track_start_lba = disc_->tracks[i].start_lba;
+                        track_num = disc_->tracks[i].number;
+                        is_audio = disc_->tracks[i].is_audio;
                     }
                 }
-
-                // Control nibble: bit2 = data track
                 ctrl_adr = (uint8_t)(0x01u | (is_audio ? 0x00u : 0x40u));
                 track_bcd = u8_to_bcd(track_num);
-
-                // Relative position within track
-                const uint32_t rel_lba = (loc_lba_ >= track_start_lba) ? (loc_lba_ - track_start_lba) : 0;
-                const uint32_t mm = rel_lba / (60u * 75u);
-                const uint32_t rem = rel_lba % (60u * 75u);
-                const uint32_t ss = rem / 75u;
-                const uint32_t ff = rem % 75u;
-                rel_mm = u8_to_bcd((uint8_t)mm);
-                rel_ss = u8_to_bcd((uint8_t)ss);
-                rel_ff = u8_to_bcd((uint8_t)ff);
+                const uint32_t rel_lba = (current_lba >= track_start_lba) ? (current_lba - track_start_lba) : 0;
+                rel_mm = u8_to_bcd((uint8_t)(rel_lba / 4500u));
+                rel_ss = u8_to_bcd((uint8_t)((rel_lba % 4500u) / 75u));
+                rel_ff = u8_to_bcd((uint8_t)(rel_lba % 75u));
             }
 
-            push_resp(ctrl_adr);   // [0] Control/ADR
-            push_resp(track_bcd);  // [1] Track
-            push_resp(index_bcd);  // [2] Index
-            push_resp(rel_mm);     // [3] Relative MM
-            push_resp(rel_ss);     // [4] Relative SS
-            push_resp(rel_ff);     // [5] Relative FF
-            push_resp(0x00);       // [6] Zero
-            push_resp(abs_mm);     // [7] Absolute MM
-            push_resp(abs_ss);     // [8] Absolute SS
-            push_resp(abs_ff);     // [9] Absolute FF
+            const uint32_t abs_adj = current_lba + 150u;
+            push_resp(ctrl_adr);
+            push_resp(track_bcd);
+            push_resp(index_bcd);
+            push_resp(rel_mm);
+            push_resp(rel_ss);
+            push_resp(rel_ff);
+            push_resp(0x00);
+            push_resp(u8_to_bcd((uint8_t)(abs_adj / 4500u)));
+            push_resp(u8_to_bcd((uint8_t)((abs_adj % 4500u) / 75u)));
+            push_resp(u8_to_bcd((uint8_t)(abs_adj % 75u)));
             queue_cmd_irq(0x03);
             break;
         }
@@ -2832,9 +2989,18 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                             "QUEUE HIGH MSF: cmd=0x02 params=[%02X,%02X,%02X] param_count=%u",
                             param_fifo_[0], param_fifo_[1], param_fifo_[2], param_count_);
                     }
-                    if (v == 0x08 || v == 0x09)
+                    // Any command queued during active reading must cancel the
+                    // pending read-advance IRQ, otherwise the queued command can
+                    // never execute (pending_irq_type_ stays non-zero forever).
+                    // Previously only Pause(0x09)/Stop(0x08) did this, but games
+                    // like Soul Reaver send SetLoc during ReadN and expect it to
+                    // interrupt the read immediately.
+                    if (reading_active_ && pending_irq_type_ != 0 && pending_irq_reason_ == 0xFFu)
                     {
                         cancel_pending_read_advance();
+                        emu::logf(emu::LogLevel::info, "CD",
+                            "Queued CMD 0x%02X cancelled pending read advance (LBA=%u)",
+                            v, read_lba_);
                     }
                     busy_ = 1;
                 }
@@ -3199,15 +3365,22 @@ void Cdrom::tick(uint32_t cycles)
                 // and never generate INT1.
                 read_lba_++;
 
-                // XA audio filter: check the sector we're about to deliver.
+                // XA sector pre-filter: peek at the next sector's header to skip
+                // XA audio and null padding sectors BEFORE clearing the FIFO.
+                // This avoids the slower try_fill→skip→reschedule path.
                 if ((mode_ & 0x40u) && disc_)
                 {
-                    uint8_t xa_raw[24]; uint32_t xa_ss = 0;
+                    uint8_t xa_raw[2352]; uint32_t xa_ss = 0;
                     if (disc_->read_sector_raw(read_lba_, xa_raw, sizeof(xa_raw), &xa_ss) && xa_ss >= 24)
                     {
-                        if (xa_raw[15] == 2 && (xa_raw[18] & 0x04u) && (xa_raw[18] & 0x40u))
+                        const uint8_t mode_byte = xa_raw[15];
+                        const uint8_t submode = xa_raw[18];
+                        const bool is_mode2 = (mode_byte == 2);
+                        const bool is_xa_audio = is_mode2 && (submode & 0x04u) && (submode & 0x40u);
+                        const bool is_null_pad = is_mode2 && (submode == 0x00u);
+                        if (is_xa_audio || is_null_pad)
                         {
-                            // XA audio sector: skip INT1, schedule next sector
+                            // XA audio or null padding sector: skip INT1, schedule next
                             const uint32_t next_delay = read_sector_ticks();
                             pending_irq_type_ = 0x01;
                             pending_irq_reason_ = 0xFFu;

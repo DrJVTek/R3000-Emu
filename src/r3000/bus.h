@@ -323,6 +323,13 @@ class Bus
     uint8_t sio0_irq_flag_{0};    // IRQ flag (STAT bit 9): cleared by CTRL ACK bit
     uint8_t sio0_tx_phase_{0};    // protocol phase: 0=idle, 1-4=pad transfer bytes
     uint8_t sio0_tx_value_{0};    // value being transmitted (buffered from write)
+
+    // Memory card stub state (device 0x81)
+    uint8_t  mc_phase_{0};        // 0=idle, 1+=protocol phases
+    uint8_t  mc_cmd_{0};          // command byte (0x52=Read, 0x57=Write, 0x53=ID)
+    uint16_t mc_addr_{0};         // sector address (MSB:LSB)
+    uint8_t  mc_data_idx_{0};     // byte index within 128-byte data transfer
+    uint32_t mc_access_count_{0}; // total memory card access attempts
     uint8_t sio0_tx_buf_full_{0}; // TX buffer has data waiting
     uint32_t sio0_transfer_countdown_{0}; // ticks until transfer completes
     uint32_t sio0_ack_countdown_{0};      // ticks until ACK pulse ends

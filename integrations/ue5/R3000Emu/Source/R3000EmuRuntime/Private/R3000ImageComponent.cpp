@@ -112,6 +112,14 @@ void UR3000ImageComponent::TickComponent(
         return;
     }
 
+    // Hide image immediately if MDEC video takes over (VideoComponent handles it)
+    if (bImageVisible_ && Gpu_->has_mdec_display_content())
+    {
+        UE_LOG(LogR3000Image, Log, TEXT("ImageComponent: hiding — MDEC video active"));
+        SetImageVisible(false);
+        return;
+    }
+
     if (bImageVisible_ && !DoesCurrentDisplayMatchLatch())
     {
         UE_LOG(LogR3000Image, Log,
@@ -156,6 +164,11 @@ void UR3000ImageComponent::TickComponent(
             LastUploadedVramSeq_ = CurrentVramSeq;
         }
     }
+
+    // Don't show static images while MDEC video is active — the VideoComponent
+    // handles that. Without this check, both components display the same content.
+    if (Gpu_->has_mdec_display_content())
+        return;
 
     gpu::CpuVramWriteInfo Write{};
     Gpu_->copy_last_cpu_vram_write(Write);
