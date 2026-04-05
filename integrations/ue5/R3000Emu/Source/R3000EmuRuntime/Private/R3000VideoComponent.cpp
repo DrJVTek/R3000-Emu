@@ -4,6 +4,8 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ProceduralMeshComponent.h"
 #include "Logging/LogMacros.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 #include "gpu/gpu.h"
 #include "log/emu_log.h"
@@ -66,13 +68,53 @@ void UR3000VideoComponent::TickComponent(
         return;
 
     const gpu::DisplayConfig& disp = Gpu_->display_config();
+    if (!disp.display_enabled || disp.width() == 0 || disp.height() == 0)
+    {
+        ++FramesSinceVideo_;
+        if (bVideoVisible_ && FramesSinceVideo_ > HideDelayFrames)
+            SetVideoVisible(false);
+        return;
+    }
 
-    // Video mode = 24-bit color depth AND display enabled AND valid dimensions
-    const bool bIsVideo = disp.color_24bit && disp.display_enabled
-                          && disp.width() > 0 && disp.height() > 0;
+    // Detect video mode:
+    // 1) 24-bit display = STR FMV (e.g. hello_strplay)
+    // 2) 15-bit display + recent CPU→VRAM writes covering the display area = MDEC 15-bit (e.g. Tekken)
+    bool bIsVideo = false;
+    bool bIs24Bit = disp.color_24bit;
 
-    // Log first detection of video mode
-    if (bIsVideo && !bVideoVisible_ && FramesSinceVideo_ > 0)
+    if (bIs24Bit)
+    {
+        bIsVideo = true;
+    }
+    else
+    {
+        // Check for 15-bit MDEC video: detect CPU→VRAM writes that keep changing
+        // (video = new write every few ticks, static image = one write then stops)
+        gpu::CpuVramWriteInfo Write{};
+        Gpu_->copy_last_cpu_vram_write(Write);
+        if (Write.seq != 0 && Write.seq != LastCpuWriteSeq_)
+        {
+            LastCpuWriteSeq_ = Write.seq;
+            ++ConsecutiveWrites_;
+            FramesSinceLastWrite_ = 0;
+        }
+        else
+        {
+            ++FramesSinceLastWrite_;
+            // If no new write for 10+ ticks, reset — it was a static image
+            if (FramesSinceLastWrite_ > 10)
+                ConsecutiveWrites_ = 0;
+        }
+
+        // Video = 5+ different writes with no long gap between them
+        if (ConsecutiveWrites_ >= 5)
+            bIsVideo = true;
+        else if (bVideoVisible_ && bIsVideo15Bit_ && FramesSinceLastWrite_ < 10)
+            bIsVideo = true;
+    }
+
+    // Log first detection
+    if (bIsVideo && !bVideoVisible_)
     {
         UE_LOG(LogR3000Video, Warning,
             TEXT("VideoComponent: VIDEO DETECTED disp_xy=(%u,%u) w=%u h=%u 24bit=%d enabled=%d"),
@@ -85,22 +127,49 @@ void UR3000VideoComponent::TickComponent(
     if (bIsVideo)
     {
         FramesSinceVideo_ = 0;
+        bIsVideo15Bit_ = !bIs24Bit;
 
+        // Always use display dimensions for texture/mesh size
         const int32 W = disp.width();
         const int32 H = disp.height();
 
-        // Resize texture + plane if the display area changed
+        if (bIs24Bit)
+        {
+            SrcX_ = disp.display_x;
+            SrcY_ = disp.display_y;
+        }
+        else
+        {
+            // 15-bit: source from DMA coords (LoadImage area)
+            gpu::CpuVramWriteInfo wr{};
+            Gpu_->copy_last_cpu_vram_write(wr);
+            if (wr.seq != 0 && wr.w > 0 && wr.h > 0)
+            {
+                SrcX_ = wr.x;
+                SrcY_ = wr.y;
+            }
+            else
+            {
+                SrcX_ = disp.display_x;
+                SrcY_ = disp.display_y;
+            }
+        }
+
+        // Resize texture + plane if dimensions changed
         if (W != VideoTexW_ || H != VideoTexH_)
         {
             CreateOrResizeTexture(W, H);
             RebuildPlaneMesh(W, H);
         }
 
-        // Upload new frame from VRAM (only when VRAM was actually written)
+        // Upload new frame from VRAM
         UploadVideoFrame(W, H);
 
-        if (!bVideoVisible_)
+        // Only show when we have real pixel content (not MDEC init with empty/black data)
+        if (bHasRealContent_ && !bVideoVisible_)
             SetVideoVisible(true);
+        else if (!bHasRealContent_ && bVideoVisible_)
+            SetVideoVisible(false);
     }
     else
     {
@@ -160,14 +229,10 @@ void UR3000VideoComponent::CreateOrResizeTexture(int32 W, int32 H)
 }
 
 // ===================================================================
-// UploadVideoFrame — convert PS1 24-bit VRAM region to RGBA8 texture
+// UploadVideoFrame — convert PS1 VRAM region to RGBA8 texture
 // ===================================================================
-//
-// PS1 24-bit format: pixels stored as a byte stream (R,G,B per pixel) inside
-// the 16-bit VRAM words. VRAM is treated as contiguous bytes:
-//   row_stride_bytes = 1024 * 2 = 2048
-//   display area starts at byte offset: display_y * 2048 + display_x * 2
-//   pixel x: bytes [x*3, x*3+1, x*3+2] from row start = [R, G, B]
+// Supports both 24-bit (3 bytes/pixel in VRAM byte stream) and
+// 15-bit (BGR555 in 16-bit VRAM words) display modes.
 //
 void UR3000VideoComponent::UploadVideoFrame(int32 W, int32 H)
 {
@@ -178,30 +243,89 @@ void UR3000VideoComponent::UploadVideoFrame(int32 W, int32 H)
     uint32 CopySeq = 0;
     Gpu_->copy_vram(VramCopyBuffer_, CopySeq);
 
-    const gpu::DisplayConfig& disp = Gpu_->display_config();
-
-    // VRAM as byte stream (each 16-bit word = 2 bytes: low byte first on little-endian host)
-    const uint8* VramBytes = reinterpret_cast<const uint8*>(VramCopyBuffer_);
-    constexpr uint32 kRowStrideBytes = kVramW * 2u; // 2048 bytes per VRAM row
-
-    const uint32 BaseOff = (uint32)disp.display_y * kRowStrideBytes
-                         + (uint32)disp.display_x * 2u;
-
     uint8* Dst = PixelBuffer_;
-    for (int32 y = 0; y < H; ++y)
+
+    if (bIsVideo15Bit_)
     {
-        const uint8* Row = VramBytes + BaseOff + (uint32)y * kRowStrideBytes;
-        for (int32 x = 0; x < W; ++x)
+        // 15-bit BGR555: read from LoadImage DMA area (SrcX_/SrcY_)
+        for (int32 y = 0; y < H; ++y)
         {
-            // 3 bytes per pixel: R at [x*3], G at [x*3+1], B at [x*3+2]
-            const uint8* Px = Row + x * 3;
-            Dst[0] = Px[0]; // R
-            Dst[1] = Px[1]; // G
-            Dst[2] = Px[2]; // B
-            Dst[3] = 0xFF;  // A
-            Dst += 4;
+            const uint32 Vy = ((uint32)SrcY_ + (uint32)y) % kVramH;
+            for (int32 x = 0; x < W; ++x)
+            {
+                const uint32 Vx = ((uint32)SrcX_ + (uint32)x) % kVramW;
+                const uint16 Pixel = VramCopyBuffer_[Vy * kVramW + Vx];
+                Dst[0] = static_cast<uint8>(((Pixel      ) & 0x1F) << 3 | ((Pixel      ) & 0x1F) >> 2);
+                Dst[1] = static_cast<uint8>(((Pixel >>  5) & 0x1F) << 3 | ((Pixel >>  5) & 0x1F) >> 2);
+                Dst[2] = static_cast<uint8>(((Pixel >> 10) & 0x1F) << 3 | ((Pixel >> 10) & 0x1F) >> 2);
+                Dst[3] = 0xFF;
+                Dst += 4;
+            }
         }
     }
+    else
+    {
+        // 24-bit: read from display area as byte stream (R,G,B)
+        const uint8* VramBytes = reinterpret_cast<const uint8*>(VramCopyBuffer_);
+        constexpr uint32 kRowStrideBytes = kVramW * 2u;
+        const uint32 BaseOff = (uint32)SrcY_ * kRowStrideBytes
+                             + (uint32)SrcX_ * 2u;
+
+        for (int32 y = 0; y < H; ++y)
+        {
+            const uint8* Row = VramBytes + BaseOff + (uint32)y * kRowStrideBytes;
+            for (int32 x = 0; x < W; ++x)
+            {
+                const uint8* Px = Row + x * 3;
+                Dst[0] = Px[0];
+                Dst[1] = Px[1];
+                Dst[2] = Px[2];
+                Dst[3] = 0xFF;
+                Dst += 4;
+            }
+        }
+    }
+
+    // Count non-black pixels — don't upload/show if frame is empty (MDEC init, no real data)
+    uint32 NonBlack = 0;
+    const uint8* Check = PixelBuffer_;
+    const int32 Total = W * H;
+    for (int32 i = 0; i < Total; ++i)
+    {
+        if (Check[0] | Check[1] | Check[2])
+            ++NonBlack;
+        Check += 4;
+    }
+
+    bHasRealContent_ = (NonBlack > static_cast<uint32>(Total / 20)); // >5% non-black
+
+    // Dump first video frames as PPM for debugging
+    if (DumpedFrames_ < 8)
+    {
+        ++DumpedFrames_;
+        TArray<uint8> Ppm;
+        const FString Header = FString::Printf(TEXT("P6\n%d %d\n255\n"), W, H);
+        FTCHARToUTF8 Hdr(*Header);
+        Ppm.Append(reinterpret_cast<const uint8*>(Hdr.Get()), Hdr.Length());
+        Ppm.Reserve(Ppm.Num() + W * H * 3);
+        for (int32 i = 0; i < W * H; ++i)
+        {
+            Ppm.Add(PixelBuffer_[i * 4]);
+            Ppm.Add(PixelBuffer_[i * 4 + 1]);
+            Ppm.Add(PixelBuffer_[i * 4 + 2]);
+        }
+        const FString Path = FPaths::Combine(
+            FPaths::ProjectLogDir(),
+            FString::Printf(TEXT("video_dump_%02u_%dx%d_src%u_%u_%s_nb%u.ppm"),
+                DumpedFrames_, W, H, SrcX_, SrcY_,
+                bIsVideo15Bit_ ? TEXT("15bit") : TEXT("24bit"), NonBlack));
+        FFileHelper::SaveArrayToFile(Ppm, *Path);
+        UE_LOG(LogR3000Video, Warning, TEXT("VideoComponent: dumped frame #%u to %s (nonblack=%u/%d real=%d)"),
+            DumpedFrames_, *Path, NonBlack, Total, bHasRealContent_ ? 1 : 0);
+    }
+
+    if (!bHasRealContent_)
+        return;
 
     VideoTexture_->UpdateTextureRegions(
         0,             // MipIndex

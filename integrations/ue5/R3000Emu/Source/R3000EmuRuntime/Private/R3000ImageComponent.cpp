@@ -195,6 +195,11 @@ void UR3000ImageComponent::TickComponent(
     }
 
     UploadImageFrame(W, H);
+
+    // Don't show if content is mostly black (VRAM not ready or empty MDEC init)
+    if (!bHasRealContent_)
+        return;
+
     LastUploadedVramSeq_ = Write.vram_write_seq;
     LatchedDisplayX_ = Disp.display_x;
     LatchedDisplayY_ = Disp.display_y;
@@ -329,6 +334,9 @@ void UR3000ImageComponent::UploadImageFrame(int32 W, int32 H)
             }
         }
     }
+
+    // Check if frame has real content (>5% non-black)
+    bHasRealContent_ = (NonBlackPixels > static_cast<uint32>(W * H / 20));
 
     bool bUploadedToTexture = false;
     if (FTexturePlatformData* PlatformData = ImageTexture_->GetPlatformData())

@@ -76,6 +76,7 @@ private:
     int32 ImageTexW_{0};
     int32 ImageTexH_{0};
     bool bImageVisible_{false};
+    bool bHasRealContent_{false};
     uint32 ImageVisibleFrames_{0};
     uint32 LastSeenCpuWriteSeq_{0};
     uint32 LastUploadedVramSeq_{0};

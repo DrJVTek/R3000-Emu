@@ -105,8 +105,14 @@ private:
     int32  VideoTexH_{0};
     int32  FramesSinceVideo_{0};
     bool   bVideoVisible_{false};
-    uint16 DmaX_{0};            // last DMA source X in VRAM (from CpuVramWriteInfo)
-    uint16 DmaY_{0};            // last DMA source Y in VRAM
+    bool   bIsVideo15Bit_{false};  // true when showing 15-bit MDEC video
+    bool   bHasRealContent_{false}; // true when frame has >5% non-black pixels
+    uint32 DumpedFrames_{0};        // PPM dump counter
+    uint32 LastCpuWriteSeq_{0};    // track CPU→VRAM writes for 15-bit detection
+    uint32 ConsecutiveWrites_{0};  // consecutive CPU→VRAM writes (rapid = video)
+    uint32 FramesSinceLastWrite_{0}; // ticks since last new CPU→VRAM write
+    uint16 SrcX_{0};               // VRAM source X for current frame (DMA or display)
+    uint16 SrcY_{0};               // VRAM source Y for current frame
 
     static constexpr int32 kVramW = 1024;
     static constexpr int32 kVramH = 512;
