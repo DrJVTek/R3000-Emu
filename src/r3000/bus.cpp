@@ -3665,10 +3665,18 @@ void Bus::tick(uint32_t cycles)
                 const uint32_t s1530 = *(uint32_t*)(ram_ + (0x800d1530u & (ram_size_ - 1)));
                 const uint32_t s1568 = *(uint32_t*)(ram_ + (0x800d1568u & (ram_size_ - 1)));
                 const uint32_t s152c = *(uint32_t*)(ram_ + (0x800d152cu & (ram_size_ - 1)));
-                const uint32_t timer_stamp = *(uint32_t*)(ram_ + (0x800d154cu & (ram_size_ - 1)));
+                const uint32_t cd_status = *(uint32_t*)(ram_ + (0x800cd2ecu & (ram_size_ - 1)));
+                const uint32_t cd_sync = *(uint32_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
+                const uint32_t event_flag = *(uint16_t*)(ram_ + (0x800cb782u & (ram_size_ - 1)));
+                // IntRP struct: {next(4), func(4), flag(4)}
+                const uint32_t h0_next = *(uint32_t*)(ram_ + phys0 + 0);
+                const uint32_t h0_func2 = *(uint32_t*)(ram_ + phys0 + 4);
+                const uint32_t h0_flag = *(uint32_t*)(ram_ + phys0 + 8);
                 emu::logf(emu::LogLevel::warn, "SR_DEBUG",
-                    "LBA=%u state=%u next=%u timer_stamp=%u vbl=%u",
-                    cdrom_->read_lba_debug(), s1540, s1528, timer_stamp, vblank_total_count_);
+                    "LBA=%u sync=%u evt=%u irq=0x%02X IntRP0=[next=0x%08X func=0x%08X flag=%d] pc=0x%08X",
+                    cdrom_->read_lba_debug(), cd_sync, event_flag,
+                    cdrom_->irq_flags_debug(),
+                    h0_next, h0_func2, h0_flag, cpu_pc_);
             }
         }
     }
