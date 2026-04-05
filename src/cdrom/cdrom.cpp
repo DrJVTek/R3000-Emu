@@ -3255,6 +3255,20 @@ void Cdrom::tick(uint32_t cycles)
 {
     now_cycles_ += cycles;
 
+    // DEBUG: trace timer state
+    {
+        static uint64_t last_trace = 0;
+        if (next_read_due_cycle_ != 0 && now_cycles_ > last_trace + 1000000)
+        {
+            last_trace = now_cycles_;
+            emu::logf(emu::LogLevel::warn, "CD_TIMER",
+                "TICK: now=%llu due=%llu diff=%lld pend=%d flags=0x%02X reading=%d",
+                (unsigned long long)now_cycles_, (unsigned long long)next_read_due_cycle_,
+                (long long)(now_cycles_ - next_read_due_cycle_),
+                (int)pending_irq_type_, irq_flags_, (int)reading_active_);
+        }
+    }
+
     // Execute a pending command after its command-event delay.
     // Unlike the previous model, the response FIFO becomes visible only here,
     // when the command actually executes, not at command-write time.
@@ -3325,14 +3339,10 @@ void Cdrom::tick(uint32_t cycles)
         queued_cmd_valid_ = 0;
     }
 
-    // Deliver pending async IRQs after delay expires.
-    if (pending_irq_type_ != 0)
-    {
-        // DuckStation-style timer-driven read: when the next sector is due,
-        // advance read_lba and queue a new pending IRQ, even if the previous
-        // INT1 hasn't been ACK'd. This matches real hardware where the drive
-        // reads at fixed intervals regardless of software acknowledgment.
-        if (next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
+    // DuckStation-style timer-driven read: when the next sector is due,
+    // queue a new pending IRQ. This runs OUTSIDE the pending_irq_type_ != 0
+    // block so it fires even when no pending IRQ exists.
+    if (next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
         {
             static int blocked_trace = 0;
             if (reading_active_ && pending_irq_type_ != 0 && blocked_trace < 3)
@@ -3359,6 +3369,9 @@ void Cdrom::tick(uint32_t cycles)
             // else: pending_irq_type_ != 0 — keep retrying next tick
         }
 
+    // Deliver pending async IRQs after delay expires.
+    if (pending_irq_type_ != 0)
+    {
         // Deliver once the absolute due cycle is reached and the minimum
         // post-ACK quiet time has elapsed.
         if (now_cycles_ >= pending_irq_due_cycle_ && (irq_flags_ & 0x1Fu) == 0u &&
