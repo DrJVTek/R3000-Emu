@@ -3632,6 +3632,24 @@ void Bus::tick(uint32_t cycles)
         // is set before the game can poll the CDROM for the IRQ type.
         // We still do a check here as a fallback for async IRQs (reads, etc.).
         check_cdrom_irq_edge();
+
+        // Soul Reaver debug: dump game flags when CD advances past LBA 1022
+        {
+            static int sr_trace = 0;
+            if (sr_trace < 3 && cdrom_->read_lba_debug() >= 1023 && cdrom_->read_lba_debug() <= 1030)
+            {
+                ++sr_trace;
+                // StCdInterrupt key variables
+                const uint32_t dd9c0 = *(uint32_t*)(ram_ + (0x800dd9c0u & (ram_size_ - 1))); // frame_done flag
+                const uint32_t dd9ac = *(uint32_t*)(ram_ + (0x800dd9acu & (ram_size_ - 1))); // MDEC decode flag
+                const uint32_t dma1_chcr = dma_[1].chcr;  // DMA1 MDEC OUT
+                const uint32_t cd9a0 = *(uint32_t*)(ram_ + (0x800cd9a0u & (ram_size_ - 1))); // status
+                emu::logf(emu::LogLevel::warn, "SR_DEBUG",
+                    "LBA=%u dd9c0=%u(frame_done) dd9ac=%u(mdec_flag) dma1_chcr=0x%08X(mdec_busy=%d) status=%u",
+                    cdrom_->read_lba_debug(), dd9c0, dd9ac, dma1_chcr,
+                    (dma1_chcr >> 24) & 1, cd9a0);
+            }
+        }
     }
 
     // If VBlank IRQ is not enabled in I_MASK, the game can stall indefinitely in

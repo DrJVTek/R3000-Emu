@@ -928,8 +928,13 @@ uint8_t Cdrom::pop_data()
 
 void Cdrom::clear_data()
 {
-    // Clear READ buffer only. Write buffer untouched.
+    // Track how much of the current sector was consumed before clearing.
+    // This is used to detect partial reads (Soul Reaver pattern).
     auto& b = sb_[sb_r_];
+    if (b.sz > 0 && b.pos > 0 && b.pos < (b.sz / 2))
+        prev_sector_partial_ = 1;
+    else
+        prev_sector_partial_ = 0;
     b.pos = 0;
     b.sz = 0;
 }
@@ -3184,10 +3189,20 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // Don't advance loc_lba_ yet - the current sector data must remain
                 // available for DMA3. The advance happens when pending_irq fires in tick().
                 // Skip if a command is queued (e.g. Pause) — it will stop reading when executed.
-                // Timer-only model: don't schedule from ACK. The timer in
-                // tick() handles all continuous sector advancement.
-                // This prevents the ACK→schedule→INT1→ACK infinite loop
-                // that traps games doing partial sector reads (Soul Reaver).
+                // ACK-driven (primary) + timer backup.
+                // If the previous sector was partially consumed, DON'T schedule
+                // from ACK — let the timer handle it. This gives the game time
+                // to send Pause/SetLoc before the next sector arrives.
+                else if (reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
+                {
+                    pending_irq_type_ = 0x01;
+                    pending_irq_resp_ = status_;
+                    pending_irq_live_status_ = 1;
+                    pending_irq_reason_ = 0xFFu;
+                    const uint32_t irq_delay = read_sector_ticks();
+                    arm_pending_irq_after(irq_delay);
+                    pending_read_seek_commit_ = 0;
+                }
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
                 if (async_stat_pending_ && ((old_flags & 0x07u) != 0u) && ((irq_flags_ & 0x07u) == 0u))
@@ -3297,6 +3312,19 @@ void Cdrom::tick(uint32_t cycles)
             }
         }
 
+        // If a pending ReadN advance blocks command execution, cancel it.
+        // Commands like SetLoc/Pause MUST be able to interrupt ReadN.
+        if (now_cycles_ >= cmd_exec_due_cycle_ &&
+            (irq_flags_ & 0x1Fu) == 0u &&
+            pending_irq_type_ != 0 && pending_irq_reason_ == 0xFFu &&
+            reading_active_ &&
+            !read_pending_irq1_ && !async_stat_pending_)
+        {
+            cancel_pending_read_advance();
+            next_read_due_cycle_ = 0;
+            emu::logf(emu::LogLevel::info, "CD",
+                "cmd_exec: cancelled pending ReadN advance for CMD 0x%02X", cmd_exec_cmd_);
+        }
         if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&
             pending_irq_type_ == 0 &&

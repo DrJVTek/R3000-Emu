@@ -131,6 +131,7 @@ class Cdrom
     // Returns true if the data FIFO is empty (DMA3 DREQ not yet asserted).
     // Used by Bus to defer DMA3 until the sector is ready.
     bool is_fifo_empty() const { return sb_[sb_r_].pos >= sb_[sb_r_].sz; }
+    uint32_t read_lba_debug() const { return read_lba_; }
     void check_sector_read_complete();
 
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).
@@ -380,6 +381,7 @@ class Cdrom
     static constexpr uint32_t kMinInterruptDelay = 1000;
     uint64_t next_irq_ready_cycle_{0};
     uint64_t next_read_due_cycle_{0}; // DuckStation-style: next sector arrives at this cycle (timer-driven)
+    uint8_t prev_sector_partial_{0}; // Previous sector was partially consumed (<50%)
 
     // Trace counters (per-instance, not static, so they reset between PIE sessions).
     int mmio_rd_trace_{0};
