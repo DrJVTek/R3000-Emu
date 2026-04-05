@@ -2953,12 +2953,7 @@ void Bus::check_cdrom_irq_edge()
     const uint8_t cdirq = cdrom_->irq_line();
     if (cdirq && !cdrom_irq_prev_)
     {
-        // Only latch if not already set. This prevents the BIOS
-        // exception handler's while(i_stat & i_mask) loop from
-        // being trapped by back-to-back CD INT1s that re-set the
-        // bit between the handler's clear and its loop condition check.
-        if (!(i_stat_ & (1u << 2)))
-            i_stat_ |= (1u << 2);
+        i_stat_ |= (1u << 2);
         emu::logf(emu::LogLevel::debug, "BUS", "CDROM IRQ edge: i_stat=0x%04X", (unsigned)i_stat_);
         cdrom_->debug_log_bus_irq_latched(i_stat_, i_mask_);
     }

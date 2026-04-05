@@ -3193,6 +3193,7 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // If the previous sector was partially consumed, DON'T schedule
                 // from ACK — let the timer handle it. This gives the game time
                 // to send Pause/SetLoc before the next sector arrives.
+                // ACK-driven: schedule next sector after ACK.
                 else if (reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     pending_irq_type_ = 0x01;
