@@ -3649,15 +3649,25 @@ void Bus::tick(uint32_t cycles)
                 const uint32_t intrp0_next = *(uint32_t*)(ram_ + 0x108);
                 // BIOS CD callback stored by CdReadyCallback at kernel area
                 // Typical: 0x00000914-0x00000960 range
-                const uint32_t cd_cb_0914 = *(uint32_t*)(ram_ + 0x914);
-                const uint32_t cd_cb_0918 = *(uint32_t*)(ram_ + 0x918);
-                const uint32_t cd_cb_091c = *(uint32_t*)(ram_ + 0x91c);
+                // BIOS IntRP chain: head at 0x100 -> handler struct
+                const uint32_t head0 = *(uint32_t*)(ram_ + 0x100);
+                const uint32_t phys0 = head0 & (ram_size_ - 1);
+                const uint32_t h0_func = (phys0 + 4 <= ram_size_) ? *(uint32_t*)(ram_ + phys0) : 0;
+                const uint32_t h0_next = (phys0 + 12 <= ram_size_) ? *(uint32_t*)(ram_ + phys0 + 8) : 0;
+                // Follow next pointer if non-null
+                uint32_t h1_func = 0;
+                if (h0_next != 0) {
+                    const uint32_t p1 = h0_next & (ram_size_ - 1);
+                    h1_func = (p1 + 4 <= ram_size_) ? *(uint32_t*)(ram_ + p1) : 0;
+                }
+                const uint32_t cd_callback = *(uint32_t*)(ram_ + (0x800cd2e4u & (ram_size_ - 1)));
+                const uint32_t loader_state = *(uint32_t*)(ram_ + (0x800d1540u & (ram_size_ - 1)));
+                const uint32_t loader_pos = *(uint32_t*)(ram_ + (0x800d151cu & (ram_size_ - 1)));
+                const uint32_t loader_end = *(uint32_t*)(ram_ + (0x800d1518u & (ram_size_ - 1)));
                 emu::logf(emu::LogLevel::warn, "SR_DEBUG",
-                    "LBA=%u dd9c0=%u dd9ac=%u dma1=0x%08X status=%u IntRP0=0x%08X->0x%08X cb[914-91c]=0x%08X 0x%08X 0x%08X irq_flags=0x%02X",
-                    cdrom_->read_lba_debug(), dd9c0, dd9ac, dma1_chcr, cd9a0,
-                    intrp0_func, intrp0_next,
-                    cd_cb_0914, cd_cb_0918, cd_cb_091c,
-                    cdrom_->irq_flags_debug());
+                    "LBA=%u irq_flags=0x%02X cb=0x%08X loader_state=%u pos=%u end=%u",
+                    cdrom_->read_lba_debug(), cdrom_->irq_flags_debug(),
+                    cd_callback, loader_state, loader_pos, loader_end);
             }
         }
     }
