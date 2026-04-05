@@ -3185,19 +3185,34 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // available for DMA3. The advance happens when pending_irq fires in tick().
                 // Skip if a command is queued (e.g. Pause) — it will stop reading when executed.
                 // Hybrid model: ACK-driven (fast) + timer backup (Soul Reaver).
-                // Schedule next sector on ACK for fast delivery. The timer in
-                // tick() acts as a backup if the game doesn't ACK in time.
+                // If the game consumed the sector data normally, use fast ACK-driven
+                // scheduling. If barely consumed (<50%), let the timer backup handle
+                // it — the game probably wants to stop reading soon.
                 else if (reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
                 {
-                    pending_irq_type_ = 0x01;
-                    pending_irq_resp_ = status_;
-                    pending_irq_live_status_ = 1;
-                    pending_irq_reason_ = 0xFFu;
-                    const uint32_t irq_delay = read_sector_ticks();
-                    arm_pending_irq_after(irq_delay);
-                    pending_read_seek_commit_ = 0;
-                    // Cancel the timer backup since ACK-driven took over
-                    next_read_due_cycle_ = 0;
+                    const auto& cur = sb_[sb_r_];
+                    const bool barely_consumed = (cur.sz > 0 && cur.pos < (cur.sz / 2));
+                    if (!barely_consumed)
+                    {
+                        // Normal read: ACK-driven fast scheduling
+                        pending_irq_type_ = 0x01;
+                        pending_irq_resp_ = status_;
+                        pending_irq_live_status_ = 1;
+                        pending_irq_reason_ = 0xFFu;
+                        const uint32_t irq_delay = read_sector_ticks();
+                        arm_pending_irq_after(irq_delay);
+                        pending_read_seek_commit_ = 0;
+                        next_read_due_cycle_ = 0; // ACK takes over, cancel timer
+                    }
+                    else
+                    {
+                        // Partial read: let the timer backup handle it.
+                        // The game has time to send Pause/SetLoc before the
+                        // timer fires and delivers the next sector.
+                        emu::logf(emu::LogLevel::info, "CD",
+                            "ReadN ACK partial: LBA=%u fifo=%u/%u — timer backup active",
+                            read_lba_, cur.pos, cur.sz);
+                    }
                 }
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
