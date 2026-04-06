@@ -3081,6 +3081,19 @@ void Bus::tick(uint32_t cycles)
             if (cycles >= sio0_ack_countdown_) { sio0_ack_countdown_ = 0; sio0_do_ack(); }
             else sio0_ack_countdown_ -= cycles;
         }
+        // Soul Reaver VSync trace (in fast path for UE5)
+        // Uses cdrom logger because emu::logf doesn't reach UE5 file logs
+        {
+            static uint32_t vsync_fp_last = 0;
+            if (cdrom_ && vblank_total_count_ >= 700 && vblank_total_count_ <= 703
+                && vblank_total_count_ != vsync_fp_last)
+            {
+                vsync_fp_last = vblank_total_count_;
+                const uint32_t gv = *(uint32_t*)(ram_ + (0x800cda48u & (ram_size_ - 1)));
+                cdrom_->log_external("SR_VSYNC VBL=%u game_vsync=%u i_stat=0x%04X i_mask=0x%04X",
+                    vblank_total_count_, gv, i_stat_, i_mask_);
+            }
+        }
         return;
     }
 
@@ -3695,6 +3708,19 @@ void Bus::tick(uint32_t cycles)
                     "VBL=%u pc=0x%08X T2: cnt=%u mode=0x%04X target=%u enabled=%d extclk=%d",
                     vblank_total_count_, cpu_pc_,
                     t2.count, t2.mode, t2.target, (int)t2.counting_enabled, (int)t2.use_external_clock);
+            }
+            // Dump game VSync counter once after loading
+            {
+                static int vsync_trace = 0;
+                if (vsync_trace < 3 && vblank_total_count_ > 700 && vblank_total_count_ < 710
+                    && vblank_total_count_ != (uint32_t)vsync_trace)
+                {
+                    vsync_trace = vblank_total_count_;
+                    const uint32_t game_vsync = *(uint32_t*)(ram_ + (0x800cda48u & (ram_size_ - 1)));
+                    emu::logf(emu::LogLevel::warn, "SR_VSYNC",
+                        "VBL=%u game_vsync=%u i_stat=0x%04X i_mask=0x%04X",
+                        vblank_total_count_, game_vsync, i_stat_, i_mask_);
+                }
             }
             if (sr_trace < 5 && cdrom_->read_lba_debug() >= 1023 && cdrom_->read_lba_debug() <= 1030)
             {

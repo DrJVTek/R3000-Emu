@@ -939,6 +939,16 @@ void Cdrom::clear_data()
     b.sz = 0;
 }
 
+void Cdrom::log_external(const char* fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn, "%s", buf);
+}
+
 void Cdrom::check_sector_read_complete()
 {
     auto& b = sb_[sb_r_];

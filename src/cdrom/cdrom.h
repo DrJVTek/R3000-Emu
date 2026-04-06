@@ -134,6 +134,7 @@ class Cdrom
     uint32_t read_lba_debug() const { return read_lba_; }
     uint8_t irq_flags_debug() const { return irq_flags_; }
     uint32_t resp_count_debug() const { return (resp_w_ >= resp_r_) ? (resp_w_ - resp_r_) : (32 - resp_r_ + resp_w_); }
+    void log_external(const char* fmt, ...);  // Log via cdrom file logger (for UE5)
     void check_sector_read_complete();
 
     // Lecture d'un secteur "user data" 2048 bytes (ISO9660).
