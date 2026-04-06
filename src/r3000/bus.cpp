@@ -223,7 +223,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::debug, "BUS", "BUS source v28 (session_2026_03_22)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v42 (complete_mmio_coverage)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -1007,6 +1007,51 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
         return true;
     }
 
+    // Timer registers (byte read)
+    if (phys >= kTimerBase && phys < kTimerBase + kTimerSpan)
+    {
+        const uint32_t aligned = phys & ~3u;
+        const uint32_t off = aligned - kTimerBase;
+        const int ch = off / kTimerBlock;
+        const int reg = (off % kTimerBlock) / 4;
+        if (ch < 3)
+        {
+            uint32_t val32 = 0;
+            switch (reg)
+            {
+            case 0: val32 = timers_[ch].count & 0xFFFFu; break;
+            case 1: val32 = timers_[ch].mode; timers_[ch].mode &= ~0x1800u; break;
+            case 2: val32 = timers_[ch].target; break;
+            }
+            out = (uint8_t)(val32 >> ((phys & 3) * 8));
+            return true;
+        }
+    }
+
+    // GPU registers (byte read)
+    if (phys >= kGpuBase && phys < kGpuBase + 8)
+    {
+        const uint32_t val32 = gpu_ ? gpu_->mmio_read32(phys & ~3u) : 0x14802000u;
+        out = (uint8_t)(val32 >> ((phys & 3) * 8));
+        return true;
+    }
+
+    // DMA registers (byte read)
+    if (phys >= 0x1F801080u && phys < 0x1F801100u)
+    {
+        const uint32_t aligned = phys & ~3u;
+        const uint32_t dma_off = aligned - 0x1F801080u;
+        const int ch = dma_off / 0x10;
+        const int reg = (dma_off % 0x10) / 4;
+        if (ch < 7)
+        {
+            uint32_t val32 = 0;
+            switch (reg) { case 0: val32 = dma_[ch].madr; break; case 1: val32 = dma_[ch].bcr; break; case 2: val32 = dma_[ch].chcr; break; }
+            out = (uint8_t)(val32 >> ((phys & 3) * 8));
+            return true;
+        }
+    }
+
     // EXP1 (open bus 0xFF)
     if (phys >= kExp1Base && phys < kExp1Base + kExp1Size)
     {
@@ -1099,6 +1144,67 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
             default: out = 0; break;
         }
         return true;
+    }
+
+    // DMA registers (16-bit read)
+    if (phys >= 0x1F801080u && phys < 0x1F801100u)
+    {
+        const uint32_t off = phys - 0x1F801080u;
+        const int ch = off / 0x10;
+        const int reg = (off % 0x10) / 4;
+        const bool lo = ((off % 4) == 0); // low or high halfword
+        if (ch < 7)
+        {
+            uint32_t val32 = 0;
+            switch (reg)
+            {
+            case 0: val32 = dma_[ch].madr; break;
+            case 1: val32 = dma_[ch].bcr; break;
+            case 2: val32 = dma_[ch].chcr; break;
+            }
+            out = lo ? (uint16_t)(val32 & 0xFFFFu) : (uint16_t)(val32 >> 16);
+            return true;
+        }
+    }
+    if (phys == 0x1F8010F0u || phys == 0x1F8010F2u)
+    {
+        out = (phys & 2) ? (uint16_t)(dpcr_ >> 16) : (uint16_t)(dpcr_ & 0xFFFFu);
+        return true;
+    }
+    if (phys == 0x1F8010F4u || phys == 0x1F8010F6u)
+    {
+        out = (phys & 2) ? (uint16_t)(dicr_ >> 16) : (uint16_t)(dicr_ & 0xFFFFu);
+        return true;
+    }
+
+    // GPU registers (16-bit read)
+    if (phys >= kGpuBase && phys < kGpuBase + 8)
+    {
+        const uint32_t val32 = gpu_ ? gpu_->mmio_read32(phys & ~3u) : 0x14802000u;
+        out = (phys & 2) ? (uint16_t)(val32 >> 16) : (uint16_t)(val32 & 0xFFFFu);
+        return true;
+    }
+
+    // Timer registers (16-bit read — BIOS chkRC2wait uses LHU on Timer 2)
+    if (phys >= kTimerBase && phys < kTimerBase + kTimerSpan)
+    {
+        const uint32_t off = phys - kTimerBase;
+        const int ch = off / kTimerBlock;
+        const int reg = (off % kTimerBlock) / 4;
+        if (ch < 3)
+        {
+            switch (reg)
+            {
+            case 0: out = (uint16_t)(timers_[ch].count & 0xFFFFu); break;
+            case 1:
+                out = (uint16_t)timers_[ch].mode;
+                timers_[ch].mode &= ~0x1800u;
+                break;
+            case 2: out = (uint16_t)timers_[ch].target; break;
+            default: out = 0; break;
+            }
+            return true;
+        }
     }
 
     // SPU registers (0x1F801C00 - 0x1F801DFF)
@@ -1629,6 +1735,29 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         return true;
     }
 
+    // Timer registers (byte write — read-modify-write)
+    if (phys >= kTimerBase && phys < kTimerBase + kTimerSpan)
+    {
+        const uint32_t aligned = phys & ~3u;
+        const uint32_t off = aligned - kTimerBase;
+        const int ch = off / kTimerBlock;
+        const int reg = (off % kTimerBlock) / 4;
+        if (ch < 3)
+        {
+            const uint32_t shift = (phys & 3) * 8;
+            uint32_t cur = 0;
+            switch (reg) { case 0: cur = timers_[ch].count; break; case 1: cur = timers_[ch].mode; break; case 2: cur = timers_[ch].target; break; }
+            cur = (cur & ~(0xFFu << shift)) | ((uint32_t)v << shift);
+            switch (reg)
+            {
+            case 0: { const uint32_t old = timers_[ch].count; timers_[ch].count = cur & 0xFFFFu; timer_check_irq(ch, old); break; }
+            case 1: timer_write_mode(ch, (uint16_t)cur); break;
+            case 2: timers_[ch].target = cur & 0xFFFFu; timer_check_irq(ch, timers_[ch].count); break;
+            }
+        }
+        return true;
+    }
+
     // Scratchpad
     if (phys >= kScratchBase && phys < kScratchBase + kScratchSize)
     {
@@ -1820,6 +1949,43 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
             case 0x4: sio0_stat_ = v; break;  // STAT (rarely written)
             default: break;
         }
+        return true;
+    }
+
+    // DMA registers (16-bit write — promote to 32-bit read-modify-write)
+    if (phys >= 0x1F801080u && phys < 0x1F801100u)
+    {
+        const uint32_t aligned = phys & ~3u;
+        const uint32_t dma_off = aligned - 0x1F801080u;
+        const int ch = dma_off / 0x10;
+        const int reg = (dma_off % 0x10) / 4;
+        if (ch < 7)
+        {
+            uint32_t cur = 0;
+            switch (reg) { case 0: cur = dma_[ch].madr; break; case 1: cur = dma_[ch].bcr; break; case 2: cur = dma_[ch].chcr; break; }
+            if (phys & 2) cur = (cur & 0x0000FFFFu) | ((uint32_t)v << 16);
+            else          cur = (cur & 0xFFFF0000u) | (uint32_t)v;
+            switch (reg) { case 0: dma_[ch].madr = cur; break; case 1: dma_[ch].bcr = cur; break; case 2: dma_[ch].chcr = cur; break; }
+        }
+        return true;
+    }
+    if (phys == 0x1F8010F0u || phys == 0x1F8010F2u)
+    {
+        if (phys & 2) dpcr_ = (dpcr_ & 0x0000FFFFu) | ((uint32_t)v << 16);
+        else          dpcr_ = (dpcr_ & 0xFFFF0000u) | (uint32_t)v;
+        return true;
+    }
+    if (phys == 0x1F8010F4u || phys == 0x1F8010F6u)
+    {
+        if (phys & 2) dicr_ = (dicr_ & 0x0000FFFFu) | ((uint32_t)v << 16);
+        else          dicr_ = (dicr_ & 0xFFFF0000u) | (uint32_t)v;
+        return true;
+    }
+
+    // GPU registers (16-bit write — promote to 32-bit)
+    if (phys >= kGpuBase && phys < kGpuBase + 8)
+    {
+        if (gpu_) gpu_->mmio_write32(phys & ~3u, (uint32_t)v);
         return true;
     }
 
@@ -3016,11 +3182,172 @@ void Bus::fire_vblank_external()
 
 void Bus::tick_peripherals(uint32_t cycles)
 {
-    // Temporarily disable external_vblank_ so tick() processes everything
-    const bool was_external = external_vblank_;
-    external_vblank_ = false;
-    tick(cycles);
-    external_vblank_ = was_external;
+    // SR diagnostic: Timer 2 dump using static (no header change)
+    {
+        static uint32_t sr_tp_n = 0;
+        if (sr_tp_n == 0)
+        {
+            sr_tp_n = 1;
+            emu::logf(emu::LogLevel::warn, "BUS", "TP_ALIVE cycles=%u vbl=%u extv=%d",
+                cycles, vblank_total_count_, (int)external_vblank_);
+        }
+        if (sr_tp_n < 25 && vblank_total_count_ >= 200)
+        {
+            ++sr_tp_n;
+            const Timer& t2 = timers_[2];
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "TP_DIAG #%u VBL=%u pc=0x%08X istat=0x%04X imask=0x%04X T2:cnt=%u mode=0x%04X en=%d ext=%d",
+                sr_tp_n, vblank_total_count_, cpu_pc_, i_stat_, i_mask_,
+                t2.count, t2.mode, (int)t2.counting_enabled, (int)t2.use_external_clock);
+        }
+    }
+
+    // When external_vblank_ is active, the fast path in tick() already handles
+    // SIO0, CDROM, DMA3 deferred, and all timers (internal clock + Timer 2
+    // external clock) per-instruction.  tick_peripherals must NOT re-tick those
+    // or counters run at ~2x speed (causing Timer 2 overflow corruption in
+    // chkRC2wait, double CDROM sector delivery, etc.).
+    //
+    // We only tick what the fast path DOESN'T cover:
+    //   1. GPU (tick_vblank + scanline tracking)
+    //   2. Timer 0/1 external clock (dotclock / HBlank — needs GPU scanline)
+    //   3. SPU
+    //   4. VBlank handling (i_stat, hooks, 3D swap, diagnostics)
+
+    if (!external_vblank_)
+    {
+        // Non-external mode: tick everything via the full path (CLI mode).
+        tick(cycles);
+        return;
+    }
+
+    // ---- GPU tick ----
+    uint32_t gpu_scanline_delta = 0;
+    bool gpu_vblank_fired = false;
+
+    if (gpu_)
+    {
+        const uint32_t old_scanline = gpu_->current_scanline();
+        const uint32_t total_scanlines = gpu_->total_scanlines();
+        gpu_vblank_fired = gpu_->tick_vblank(cycles) != 0;
+        const uint32_t new_scanline = gpu_->current_scanline();
+        if (total_scanlines != 0u)
+            gpu_scanline_delta = (new_scanline + total_scanlines - old_scanline) % total_scanlines;
+    }
+
+    // ---- Timer 0/1 external clock only (fast path skips these) ----
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        Timer& t = timers_[ch];
+        if (!t.counting_enabled || !t.use_external_clock) continue;
+
+        uint32_t inc = 0;
+        if (ch == 0)
+        {
+            // Dotclock: ~8 CPU cycles per dot (320px mode)
+            timer_prescale_accum_[0] += cycles;
+            inc = timer_prescale_accum_[0] / 8;
+            timer_prescale_accum_[0] %= 8;
+        }
+        else // ch == 1
+        {
+            // HBlank: phase-lock Timer 1 to GPU scanline progression
+            if (gpu_)
+                inc = gpu_scanline_delta;
+            else
+            {
+                const uint32_t frame_cycles = 571088u;
+                const uint32_t lines_per_frame = 263u;
+                timer_prescale_accum_[1] += cycles * lines_per_frame;
+                inc = timer_prescale_accum_[1] / frame_cycles;
+                timer_prescale_accum_[1] %= frame_cycles;
+            }
+        }
+
+        if (inc == 0) continue;
+        const uint32_t old_count = t.count;
+        t.count += inc;
+        timer_check_irq(ch, old_count);
+    }
+
+    // ---- SPU ----
+    if (cycles != 0)
+    {
+        if (spu_apply_delay_ > 0)
+        {
+            if (cycles >= spu_apply_delay_) { spu_apply_delay_ = 0; spu_cnt_applied_ = spu_cnt_reg_; }
+            else spu_apply_delay_ -= cycles;
+        }
+        if (spu_busy_delay_ > 0)
+        {
+            if (cycles >= spu_busy_delay_) { spu_busy_delay_ = 0; spu_busy_ = 0; }
+            else spu_busy_delay_ -= cycles;
+        }
+    }
+    if (spu_)
+        spu_->tick_cycles(cycles);
+
+    // ---- VBlank handling ----
+    if (gpu_vblank_fired)
+    {
+        // In external_vblank mode, the deferred VBlank atomic handles i_stat.
+        // But tick_peripherals runs on the CPU thread, so we can set it directly
+        // since the fast path's atomic check won't race with us (same thread).
+        if (!(i_stat_ & (1u << 0)))
+            i_stat_ |= (1u << 0);
+        ++vblank_total_count_;
+
+        // Shadow 3D systems: swap buffers at VBlank
+        if (gte_3d_) gte_3d_->swap_frame();
+        if (gpu_3d_) gpu_3d_->on_vblank();
+
+        // Fire VBlank hooks
+        if (hooks_ && hooks_->has_vblank())
+            hooks_->fire_vblank(vblank_total_count_);
+
+#ifndef R3000_NO_DIAG
+        // VBlank diagnostics (same as in tick() full path)
+        {
+            static uint32_t last_cdrom_status[5] = {0,0,0,0,0};
+            static uint32_t cdrom_flip_count = 0;
+            const uint32_t bases[5] = {0xE028u, 0xE044u, 0xE060u, 0xE07Cu, 0xE098u};
+            for (int ei = 0; ei < 5; ++ei)
+            {
+                const uint32_t soff = bases[ei] + 4u;
+                const uint32_t st = (uint32_t)ram_[soff] | ((uint32_t)ram_[soff+1] << 8) |
+                                    ((uint32_t)ram_[soff+2] << 16) | ((uint32_t)ram_[soff+3] << 24);
+                if (st != last_cdrom_status[ei] && cdrom_flip_count < 64u)
+                {
+                    ++cdrom_flip_count;
+                    emu::logf(emu::LogLevel::debug, "EVT_FLIP",
+                        "[%u] Event[%d]@0x%05X status 0x%04X->0x%04X vblank=%u pc=0x%08X",
+                        cdrom_flip_count, ei, bases[ei], last_cdrom_status[ei], st,
+                        vblank_total_count_, cpu_pc_);
+                    last_cdrom_status[ei] = st;
+                }
+            }
+        }
+#endif // R3000_NO_DIAG
+
+        // VBlank stuck detection
+        if (gpu_)
+        {
+            const auto& stats = gpu_->prev_frame_stats();
+            const uint32_t real_prims = stats.triangles + stats.quads + stats.rects + stats.lines + stats.fills;
+            if (real_prims > 0)
+            {
+                vblank_last_frame_ = vblank_total_count_;
+                vblank_stuck_count_ = 0;
+                vblank_stuck_logged_ = 0;
+            }
+            else
+            {
+                vblank_stuck_count_++;
+                if (vblank_stuck_logged_ && (vblank_stuck_count_ % 200) == 0)
+                    vblank_stuck_logged_ = 0;
+            }
+        }
+    }
 }
 
 void Bus::tick(uint32_t cycles)
@@ -3081,17 +3408,45 @@ void Bus::tick(uint32_t cycles)
             if (cycles >= sio0_ack_countdown_) { sio0_ack_countdown_ = 0; sio0_do_ack(); }
             else sio0_ack_countdown_ -= cycles;
         }
-        // Soul Reaver VSync trace (in fast path for UE5)
-        // Uses cdrom logger because emu::logf doesn't reach UE5 file logs
+        // Soul Reaver trace: PC + key state every ~2M cycles during stall
         {
-            static uint32_t vsync_fp_last = 0;
-            if (cdrom_ && vblank_total_count_ >= 700 && vblank_total_count_ <= 703
-                && vblank_total_count_ != vsync_fp_last)
+            static uint64_t sr_last_cyc = 0;
+            // One-shot: log at VBL 100 to confirm fast path runs
             {
-                vsync_fp_last = vblank_total_count_;
-                const uint32_t gv = *(uint32_t*)(ram_ + (0x800cda48u & (ram_size_ - 1)));
-                cdrom_->log_external("SR_VSYNC VBL=%u game_vsync=%u i_stat=0x%04X i_mask=0x%04X",
-                    vblank_total_count_, gv, i_stat_, i_mask_);
+                static int fp_alive = 0;
+                if (!fp_alive && vblank_total_count_ >= 100)
+                {
+                    fp_alive = 1;
+                    emu::logf(emu::LogLevel::warn, "SR_ALIVE",
+                        "VBL=%u pc=0x%08X ext_vbl=%d cdrom=%d batch=%u",
+                        vblank_total_count_, cpu_pc_, (int)external_vblank_,
+                        cdrom_ ? 1 : 0, 0u);
+                }
+            }
+            if (cdrom_ && vblank_total_count_ >= 400 && vblank_total_count_ <= 2000)
+            {
+                static uint32_t sr_fp_cnt = 0;
+                const uint64_t now = cdrom_->now_cycles_debug();
+                if (sr_fp_cnt < 80 && now > sr_last_cyc + 2000000)
+                {
+                    sr_last_cyc = now;
+                    ++sr_fp_cnt;
+                    const uint32_t gv = *(uint32_t*)(ram_ + (0x800cda48u & (ram_size_ - 1)));
+                    const uint32_t evt = *(uint16_t*)(ram_ + (0x800cb782u & (ram_size_ - 1)));
+                    const uint32_t sync = *(uint8_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
+                    // Software IRQ mask used by BIOS handler: I_MASK & DAT_800cb7b0 & I_STAT
+                    const uint32_t sw_mask = *(uint32_t*)(ram_ + (0x800cb7b0u & (ram_size_ - 1)));
+                    // CDROM handler pointer (index 2 in handler table at 0x800cb784)
+                    const uint32_t cd_handler = *(uint32_t*)(ram_ + (0x800cb78cu & (ram_size_ - 1)));
+                    // Intr timeout counter
+                    const uint32_t intr_timeout = *(uint32_t*)(ram_ + (0x800cc818u & (ram_size_ - 1)));
+                    // Timer 2 state (chkRC2wait uses this for timeout)
+                    const Timer& t2 = timers_[2];
+                    cdrom_->log_external("SR_TRACE VBL=%u pc=0x%08X gvsync=%u evt=%u sync=%u irq=0x%02X istat=0x%04X imask=0x%04X sw_mask=0x%04X cd_h=0x%08X intr_to=%u T2:cnt=%u mode=0x%04X tgt=%u en=%d ext=%d",
+                        vblank_total_count_, cpu_pc_, gv, evt, sync,
+                        cdrom_->irq_flags_debug(), i_stat_, i_mask_, sw_mask, cd_handler, intr_timeout,
+                        t2.count, t2.mode, t2.target, (int)t2.counting_enabled, (int)t2.use_external_clock);
+                }
             }
         }
         return;

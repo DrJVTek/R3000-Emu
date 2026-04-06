@@ -3005,18 +3005,31 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                             "QUEUE HIGH MSF: cmd=0x02 params=[%02X,%02X,%02X] param_count=%u",
                             param_fifo_[0], param_fifo_[1], param_fifo_[2], param_count_);
                     }
-                    // Any command queued during active reading must cancel the
-                    // pending read-advance IRQ, otherwise the queued command can
-                    // never execute (pending_irq_type_ stays non-zero forever).
-                    // Previously only Pause(0x09)/Stop(0x08) did this, but games
-                    // like Soul Reaver send SetLoc during ReadN and expect it to
-                    // interrupt the read immediately.
-                    if (reading_active_ && pending_irq_type_ != 0)
+                    // Commands during active reading:
+                    // Info commands (GetStat, GetLocL, GetLocP) are executed
+                    // IMMEDIATELY without disturbing the pending sector INT1.
+                    // DuckStation uses two separate IRQ channels (command vs async)
+                    // so they never conflict. We emulate this by bypassing the
+                    // pending_irq pipeline for info commands.
+                    // Other commands (SetLoc, Pause, Stop) cancel pending reads.
                     {
-                        cancel_pending_read_advance();
-                        emu::logf(emu::LogLevel::info, "CD",
-                            "Queued CMD 0x%02X cancelled pending read advance (LBA=%u)",
-                            v, read_lba_);
+                        const bool is_info_cmd = (v == 0x01u || v == 0x10u || v == 0x11u);
+                        if (reading_active_ && is_info_cmd)
+                        {
+                            // Execute info command immediately — no queuing, no pending cancel.
+                            // Push response and set irq_flags directly (like DuckStation's SetInterrupt).
+                            clear_params();
+                            exec_command(v);
+                            // Don't set busy — info commands are instantaneous during reading.
+                            break; // skip normal queue path
+                        }
+                        if (reading_active_ && pending_irq_type_ != 0)
+                        {
+                            cancel_pending_read_advance();
+                            emu::logf(emu::LogLevel::info, "CD",
+                                "Queued CMD 0x%02X cancelled pending read advance (LBA=%u)",
+                                v, read_lba_);
+                        }
                     }
                     busy_ = 1;
                 }
@@ -3341,7 +3354,11 @@ void Cdrom::tick(uint32_t cycles)
             pending_irq_live_status_ = 0;
             pending_irq_reason_ = 0;
             pending_irq_extra_len_ = 0;
-            next_read_due_cycle_ = 0;
+            // Preserve next_read_due_cycle_ so timer-driven sector delivery
+            // can resume after the command completes. Clearing it here caused
+            // GetLocP/GetStat polling during ReadS to permanently kill sector
+            // delivery (Soul Reaver PUBLOGO.STR stall).
+            // next_read_due_cycle_ = 0;  // REMOVED — was starving STR reads
         }
         if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&
@@ -3408,11 +3425,19 @@ void Cdrom::tick(uint32_t cycles)
                 emu::logf(emu::LogLevel::warn, "CD",
                     "Timer-driven advance: LBA=%u -> %u (backup)", read_lba_, read_lba_ + 1);
             }
+            else if (reading_active_ && pending_irq_type_ == 0x03)
+            {
+                // Pending INT3 (GetLocP/GetStat response) must NOT block sector
+                // delivery. Re-arm the timer so the next sector fires after the
+                // INT3 is delivered. Without this, GetLocP polling during ReadS
+                // starves sector delivery indefinitely.
+                next_read_due_cycle_ = now_cycles_ + read_sector_ticks();
+            }
             else if (!reading_active_)
             {
                 next_read_due_cycle_ = 0; // cancelled
             }
-            // else: pending_irq_type_ != 0 — keep retrying next tick
+            // else: pending INT1/INT2 — keep retrying next tick
         }
 
     // Deliver pending async IRQs after delay expires.
