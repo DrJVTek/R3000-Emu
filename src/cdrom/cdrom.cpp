@@ -3013,78 +3013,16 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     // irq_flags_, while the pending sector INT1 stays
                     // undisturbed in pending_irq_type_.
                     // Other commands (SetLoc, Pause, Stop) DO cancel pending reads.
+                    // Cancel pending sector delivery for commands that change
+                    // drive state (SetLoc, Pause, Stop, etc.). Info commands
+                    // (GetStat, GetLocL, GetLocP) do NOT cancel pending sectors.
+                    // Commands now execute even with pending_irq_type_ != 0
+                    // (DuckStation-style dual IRQ channels), so info commands
+                    // don't need a special direct path.
+                    if (reading_active_ && pending_irq_type_ != 0)
                     {
                         const bool is_info_cmd = (v == 0x01u || v == 0x10u || v == 0x11u);
-                        if (reading_active_ && is_info_cmd && (irq_flags_ & 0x1Fu) == 0u && resp_r_ == resp_w_)
-                        {
-                            // Direct response path: build response WITHOUT clearing
-                            // the response FIFO (unlike exec_command which calls
-                            // clear_resp). This prevents destroying unread INT1
-                            // response data. Emulates DuckStation's separate
-                            // sync (command INT3) / async (sector INT1) channels.
-                            resp_r_ = resp_w_ = 0;
-                            if (v == 0x01u) // GetStat
-                            {
-                                push_resp(status_);
-                            }
-                            else if (v == 0x11u) // GetLocP
-                            {
-                                // Inline GetLocP response (same logic as exec_command case 0x11)
-                                const uint32_t current_lba = read_lba_;
-                                // SBI check
-                                if (disc_)
-                                {
-                                    const auto* sbi = disc_->get_replacement_subq(current_lba);
-                                    if (sbi)
-                                    {
-                                        push_resp(sbi[1]); push_resp(sbi[2]);
-                                        push_resp(sbi[3]); push_resp(sbi[4]); push_resp(sbi[5]);
-                                        push_resp(sbi[7]); push_resp(sbi[8]); push_resp(sbi[9]);
-                                        queue_cmd_irq(0x03);
-                                        break;
-                                    }
-                                }
-                                // Normal: compute from position
-                                uint8_t track_bcd = 0x01, index_bcd = 0x01;
-                                uint8_t rel_mm = 0, rel_ss = 0, rel_ff = 0;
-                                if (disc_ && disc_->track_count != 0)
-                                {
-                                    uint32_t tstart = 0; uint8_t tnum = 1;
-                                    for (uint32_t i = 0; i < disc_->track_count; ++i)
-                                        if (disc_->tracks[i].start_lba <= current_lba && disc_->tracks[i].start_lba >= tstart)
-                                            { tstart = disc_->tracks[i].start_lba; tnum = disc_->tracks[i].number; }
-                                    track_bcd = u8_to_bcd(tnum);
-                                    const uint32_t rl = current_lba - tstart;
-                                    rel_mm = u8_to_bcd((uint8_t)(rl / 4500u));
-                                    rel_ss = u8_to_bcd((uint8_t)((rl % 4500u) / 75u));
-                                    rel_ff = u8_to_bcd((uint8_t)(rl % 75u));
-                                }
-                                const uint32_t al = current_lba + 150u;
-                                push_resp(track_bcd); push_resp(index_bcd);
-                                push_resp(rel_mm); push_resp(rel_ss); push_resp(rel_ff);
-                                push_resp(u8_to_bcd((uint8_t)(al / 4500u)));
-                                push_resp(u8_to_bcd((uint8_t)((al % 4500u) / 75u)));
-                                push_resp(u8_to_bcd((uint8_t)(al % 75u)));
-                            }
-                            else if (v == 0x10u) // GetLocL
-                            {
-                                if (last_sector_header_valid_)
-                                {
-                                    for (int i = 0; i < 4; i++) push_resp(last_sector_header_[i]);
-                                    for (int i = 0; i < 4; i++) push_resp(last_sector_subheader_[i]);
-                                }
-                                else
-                                {
-                                    push_resp(status_ | 0x01u);
-                                    push_resp(0x80u);
-                                    queue_cmd_irq(0x05);
-                                    break;
-                                }
-                            }
-                            queue_cmd_irq(0x03);
-                            break; // skip normal queue path
-                        }
-                        if (reading_active_ && pending_irq_type_ != 0 && !is_info_cmd)
+                        if (!is_info_cmd)
                         {
                             cancel_pending_read_advance();
                             emu::logf(emu::LogLevel::info, "CD",
@@ -3397,33 +3335,15 @@ void Cdrom::tick(uint32_t cycles)
             }
         }
 
-        // If a pending IRQ blocks command execution during active reading,
-        // cancel it. Commands MUST be able to interrupt ReadN/ReadS.
-        // This covers both ReadN advance (reason=0xFF) and any other
-        // pending INT1 that might block the pipeline.
+        // Execute pending command when irq_flags is clear.
+        // DuckStation-style: commands execute even when a sector INT1 is
+        // pending in pending_irq_type_. The command's INT3 fires via
+        // set_irq (irq_flags_), while the sector INT1 stays queued in
+        // pending_irq_type_ and fires after the game acks the INT3.
+        // This eliminates the "cancel pending for command" step and
+        // prevents GetStat/SetMode from being blocked by sector delivery.
         if (now_cycles_ >= cmd_exec_due_cycle_ &&
             (irq_flags_ & 0x1Fu) == 0u &&
-            pending_irq_type_ != 0 &&
-            reading_active_ &&
-            !read_pending_irq1_ && !async_stat_pending_)
-        {
-            emu::logf(emu::LogLevel::info, "CD",
-                "cmd_exec: cancelled pending IRQ type=%u reason=0x%02X for CMD 0x%02X",
-                pending_irq_type_, pending_irq_reason_, cmd_exec_cmd_);
-            pending_irq_type_ = 0;
-            pending_irq_due_cycle_ = 0;
-            pending_irq_live_status_ = 0;
-            pending_irq_reason_ = 0;
-            pending_irq_extra_len_ = 0;
-            // Preserve next_read_due_cycle_ so timer-driven sector delivery
-            // can resume after the command completes. Clearing it here caused
-            // GetLocP/GetStat polling during ReadS to permanently kill sector
-            // delivery (Soul Reaver PUBLOGO.STR stall).
-            // next_read_due_cycle_ = 0;  // REMOVED — was starving STR reads
-        }
-        if (now_cycles_ >= cmd_exec_due_cycle_ &&
-            (irq_flags_ & 0x1Fu) == 0u &&
-            pending_irq_type_ == 0 &&
             !read_pending_irq1_ &&
             !async_stat_pending_)
         {
@@ -3451,11 +3371,11 @@ void Cdrom::tick(uint32_t cycles)
     // was still busy, then that busy condition was cleared without another MMIO
     // ACK path to restart it (UE5 hit this with Pause after LBA16).
     // Restart it here from the regular tick path once the pipeline is truly idle.
+    // Promote queued command to execution. Like the cmd_exec block above,
+    // pending_irq_type_ is NOT checked — commands execute over pending sectors.
     if (queued_cmd_valid_ &&
         (irq_flags_ & 0x1Fu) == 0u &&
-        pending_irq_type_ == 0 &&
         !cmd_exec_valid_ &&
-        // resp_r_ == resp_w_ intentionally removed: exec_command() calls clear_resp()
         !read_pending_irq1_ &&
         !async_stat_pending_)
     {

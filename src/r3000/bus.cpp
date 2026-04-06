@@ -223,7 +223,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v49 (restored_split_tick)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v51 (cmd_exec_over_pending)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -1062,6 +1062,12 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
     // I/O fallback
     if (phys >= kIoBase && phys < kIoBase + kIoSize)
     {
+        // Log unhandled MMIO reads that hit the fallback (potential bugs)
+        if (phys >= 0x1F801000u && phys < 0x1F802000u)
+        {
+            static uint32_t io_fb_r8 = 0;
+            if (io_fb_r8 < 50) { ++io_fb_r8; emu::logf(emu::LogLevel::warn, "CORE", "IO_FB_R8 phys=0x%08X val=0x%02X pc=0x%08X", phys, io_[phys - kIoBase], cpu_pc_); }
+        }
         out = io_[phys - kIoBase];
         return true;
     }
@@ -1235,6 +1241,11 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
     // I/O fallback
     if (phys >= kIoBase && phys + 2 <= kIoBase + kIoSize)
     {
+        if (phys >= 0x1F801000u && phys < 0x1F802000u)
+        {
+            static uint32_t io_fb_r16 = 0;
+            if (io_fb_r16 < 50) { ++io_fb_r16; emu::logf(emu::LogLevel::warn, "CORE", "IO_FB_R16 phys=0x%08X pc=0x%08X", phys, cpu_pc_); }
+        }
         const uint32_t off = phys - kIoBase;
         out = (uint16_t)io_[off] | ((uint16_t)io_[off + 1] << 8);
         return true;
@@ -1602,6 +1613,13 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
         }
         if (cdrom_)
         {
+            // Trace: log SetLoc zero params (the bug we're hunting)
+            if ((phys & 3) == 2 && v == 0x00)
+            {
+                emu::logf(emu::LogLevel::warn, "CORE",
+                    "CDWR pc=0x%08X param=0x00 reg=%u vbl=%u",
+                    cpu_pc_, (unsigned)(phys & 3), vblank_total_count_);
+            }
             cdrom_->mmio_write8(phys, v);
         }
         // Check for IRQ edge after write (command execution, IRQ ack, etc.)
