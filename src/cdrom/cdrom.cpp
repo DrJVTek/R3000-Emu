@@ -3006,24 +3006,85 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                             param_fifo_[0], param_fifo_[1], param_fifo_[2], param_count_);
                     }
                     // Commands during active reading:
-                    // Info commands (GetStat, GetLocL, GetLocP) are executed
-                    // IMMEDIATELY without disturbing the pending sector INT1.
-                    // DuckStation uses two separate IRQ channels (command vs async)
-                    // so they never conflict. We emulate this by bypassing the
-                    // pending_irq pipeline for info commands.
-                    // Other commands (SetLoc, Pause, Stop) cancel pending reads.
+                    // Info commands (GetStat, GetLocL, GetLocP) use a DIRECT
+                    // response path that bypasses the pending_irq pipeline.
+                    // This emulates DuckStation's separate sync/async IRQ
+                    // channels: the command INT3 fires immediately via
+                    // irq_flags_, while the pending sector INT1 stays
+                    // undisturbed in pending_irq_type_.
+                    // Other commands (SetLoc, Pause, Stop) DO cancel pending reads.
                     {
                         const bool is_info_cmd = (v == 0x01u || v == 0x10u || v == 0x11u);
-                        if (reading_active_ && is_info_cmd)
+                        if (reading_active_ && is_info_cmd && (irq_flags_ & 0x1Fu) == 0u && resp_r_ == resp_w_)
                         {
-                            // Execute info command immediately — no queuing, no pending cancel.
-                            // Push response and set irq_flags directly (like DuckStation's SetInterrupt).
-                            clear_params();
-                            exec_command(v);
-                            // Don't set busy — info commands are instantaneous during reading.
+                            // Direct response path: build response WITHOUT clearing
+                            // the response FIFO (unlike exec_command which calls
+                            // clear_resp). This prevents destroying unread INT1
+                            // response data. Emulates DuckStation's separate
+                            // sync (command INT3) / async (sector INT1) channels.
+                            resp_r_ = resp_w_ = 0;
+                            if (v == 0x01u) // GetStat
+                            {
+                                push_resp(status_);
+                            }
+                            else if (v == 0x11u) // GetLocP
+                            {
+                                // Inline GetLocP response (same logic as exec_command case 0x11)
+                                const uint32_t current_lba = read_lba_;
+                                // SBI check
+                                if (disc_)
+                                {
+                                    const auto* sbi = disc_->get_replacement_subq(current_lba);
+                                    if (sbi)
+                                    {
+                                        push_resp(sbi[1]); push_resp(sbi[2]);
+                                        push_resp(sbi[3]); push_resp(sbi[4]); push_resp(sbi[5]);
+                                        push_resp(sbi[7]); push_resp(sbi[8]); push_resp(sbi[9]);
+                                        queue_cmd_irq(0x03);
+                                        break;
+                                    }
+                                }
+                                // Normal: compute from position
+                                uint8_t track_bcd = 0x01, index_bcd = 0x01;
+                                uint8_t rel_mm = 0, rel_ss = 0, rel_ff = 0;
+                                if (disc_ && disc_->track_count != 0)
+                                {
+                                    uint32_t tstart = 0; uint8_t tnum = 1;
+                                    for (uint32_t i = 0; i < disc_->track_count; ++i)
+                                        if (disc_->tracks[i].start_lba <= current_lba && disc_->tracks[i].start_lba >= tstart)
+                                            { tstart = disc_->tracks[i].start_lba; tnum = disc_->tracks[i].number; }
+                                    track_bcd = u8_to_bcd(tnum);
+                                    const uint32_t rl = current_lba - tstart;
+                                    rel_mm = u8_to_bcd((uint8_t)(rl / 4500u));
+                                    rel_ss = u8_to_bcd((uint8_t)((rl % 4500u) / 75u));
+                                    rel_ff = u8_to_bcd((uint8_t)(rl % 75u));
+                                }
+                                const uint32_t al = current_lba + 150u;
+                                push_resp(track_bcd); push_resp(index_bcd);
+                                push_resp(rel_mm); push_resp(rel_ss); push_resp(rel_ff);
+                                push_resp(u8_to_bcd((uint8_t)(al / 4500u)));
+                                push_resp(u8_to_bcd((uint8_t)((al % 4500u) / 75u)));
+                                push_resp(u8_to_bcd((uint8_t)(al % 75u)));
+                            }
+                            else if (v == 0x10u) // GetLocL
+                            {
+                                if (last_sector_header_valid_)
+                                {
+                                    for (int i = 0; i < 4; i++) push_resp(last_sector_header_[i]);
+                                    for (int i = 0; i < 4; i++) push_resp(last_sector_subheader_[i]);
+                                }
+                                else
+                                {
+                                    push_resp(status_ | 0x01u);
+                                    push_resp(0x80u);
+                                    queue_cmd_irq(0x05);
+                                    break;
+                                }
+                            }
+                            queue_cmd_irq(0x03);
                             break; // skip normal queue path
                         }
-                        if (reading_active_ && pending_irq_type_ != 0)
+                        if (reading_active_ && pending_irq_type_ != 0 && !is_info_cmd)
                         {
                             cancel_pending_read_advance();
                             emu::logf(emu::LogLevel::info, "CD",

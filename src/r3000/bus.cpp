@@ -223,7 +223,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v42 (complete_mmio_coverage)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v49 (restored_split_tick)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -3182,41 +3182,13 @@ void Bus::fire_vblank_external()
 
 void Bus::tick_peripherals(uint32_t cycles)
 {
-    // SR diagnostic: Timer 2 dump using static (no header change)
-    {
-        static uint32_t sr_tp_n = 0;
-        if (sr_tp_n == 0)
-        {
-            sr_tp_n = 1;
-            emu::logf(emu::LogLevel::warn, "BUS", "TP_ALIVE cycles=%u vbl=%u extv=%d",
-                cycles, vblank_total_count_, (int)external_vblank_);
-        }
-        if (sr_tp_n < 25 && vblank_total_count_ >= 200)
-        {
-            ++sr_tp_n;
-            const Timer& t2 = timers_[2];
-            emu::logf(emu::LogLevel::warn, "BUS",
-                "TP_DIAG #%u VBL=%u pc=0x%08X istat=0x%04X imask=0x%04X T2:cnt=%u mode=0x%04X en=%d ext=%d",
-                sr_tp_n, vblank_total_count_, cpu_pc_, i_stat_, i_mask_,
-                t2.count, t2.mode, (int)t2.counting_enabled, (int)t2.use_external_clock);
-        }
-    }
-
     // When external_vblank_ is active, the fast path in tick() already handles
     // SIO0, CDROM, DMA3 deferred, and all timers (internal clock + Timer 2
-    // external clock) per-instruction.  tick_peripherals must NOT re-tick those
-    // or counters run at ~2x speed (causing Timer 2 overflow corruption in
-    // chkRC2wait, double CDROM sector delivery, etc.).
-    //
-    // We only tick what the fast path DOESN'T cover:
-    //   1. GPU (tick_vblank + scanline tracking)
-    //   2. Timer 0/1 external clock (dotclock / HBlank — needs GPU scanline)
-    //   3. SPU
-    //   4. VBlank handling (i_stat, hooks, 3D swap, diagnostics)
+    // external clock) per-instruction. We only tick what the fast path doesn't:
+    // GPU, SPU, Timer 0/1 external clock, VBlank handling.
 
     if (!external_vblank_)
     {
-        // Non-external mode: tick everything via the full path (CLI mode).
         tick(cycles);
         return;
     }
@@ -3240,30 +3212,18 @@ void Bus::tick_peripherals(uint32_t cycles)
     {
         Timer& t = timers_[ch];
         if (!t.counting_enabled || !t.use_external_clock) continue;
-
         uint32_t inc = 0;
         if (ch == 0)
         {
-            // Dotclock: ~8 CPU cycles per dot (320px mode)
             timer_prescale_accum_[0] += cycles;
             inc = timer_prescale_accum_[0] / 8;
             timer_prescale_accum_[0] %= 8;
         }
-        else // ch == 1
+        else
         {
-            // HBlank: phase-lock Timer 1 to GPU scanline progression
-            if (gpu_)
-                inc = gpu_scanline_delta;
-            else
-            {
-                const uint32_t frame_cycles = 571088u;
-                const uint32_t lines_per_frame = 263u;
-                timer_prescale_accum_[1] += cycles * lines_per_frame;
-                inc = timer_prescale_accum_[1] / frame_cycles;
-                timer_prescale_accum_[1] %= frame_cycles;
-            }
+            if (gpu_) inc = gpu_scanline_delta;
+            else { timer_prescale_accum_[1] += cycles * 263u; inc = timer_prescale_accum_[1] / 571088u; timer_prescale_accum_[1] %= 571088u; }
         }
-
         if (inc == 0) continue;
         const uint32_t old_count = t.count;
         t.count += inc;
@@ -3273,79 +3233,26 @@ void Bus::tick_peripherals(uint32_t cycles)
     // ---- SPU ----
     if (cycles != 0)
     {
-        if (spu_apply_delay_ > 0)
-        {
-            if (cycles >= spu_apply_delay_) { spu_apply_delay_ = 0; spu_cnt_applied_ = spu_cnt_reg_; }
-            else spu_apply_delay_ -= cycles;
-        }
-        if (spu_busy_delay_ > 0)
-        {
-            if (cycles >= spu_busy_delay_) { spu_busy_delay_ = 0; spu_busy_ = 0; }
-            else spu_busy_delay_ -= cycles;
-        }
+        if (spu_apply_delay_ > 0) { if (cycles >= spu_apply_delay_) { spu_apply_delay_ = 0; spu_cnt_applied_ = spu_cnt_reg_; } else spu_apply_delay_ -= cycles; }
+        if (spu_busy_delay_ > 0) { if (cycles >= spu_busy_delay_) { spu_busy_delay_ = 0; spu_busy_ = 0; } else spu_busy_delay_ -= cycles; }
     }
-    if (spu_)
-        spu_->tick_cycles(cycles);
+    if (spu_) spu_->tick_cycles(cycles);
 
     // ---- VBlank handling ----
     if (gpu_vblank_fired)
     {
-        // In external_vblank mode, the deferred VBlank atomic handles i_stat.
-        // But tick_peripherals runs on the CPU thread, so we can set it directly
-        // since the fast path's atomic check won't race with us (same thread).
-        if (!(i_stat_ & (1u << 0)))
-            i_stat_ |= (1u << 0);
+        if (!(i_stat_ & (1u << 0))) i_stat_ |= (1u << 0);
         ++vblank_total_count_;
-
-        // Shadow 3D systems: swap buffers at VBlank
         if (gte_3d_) gte_3d_->swap_frame();
         if (gpu_3d_) gpu_3d_->on_vblank();
+        if (hooks_ && hooks_->has_vblank()) hooks_->fire_vblank(vblank_total_count_);
 
-        // Fire VBlank hooks
-        if (hooks_ && hooks_->has_vblank())
-            hooks_->fire_vblank(vblank_total_count_);
-
-#ifndef R3000_NO_DIAG
-        // VBlank diagnostics (same as in tick() full path)
-        {
-            static uint32_t last_cdrom_status[5] = {0,0,0,0,0};
-            static uint32_t cdrom_flip_count = 0;
-            const uint32_t bases[5] = {0xE028u, 0xE044u, 0xE060u, 0xE07Cu, 0xE098u};
-            for (int ei = 0; ei < 5; ++ei)
-            {
-                const uint32_t soff = bases[ei] + 4u;
-                const uint32_t st = (uint32_t)ram_[soff] | ((uint32_t)ram_[soff+1] << 8) |
-                                    ((uint32_t)ram_[soff+2] << 16) | ((uint32_t)ram_[soff+3] << 24);
-                if (st != last_cdrom_status[ei] && cdrom_flip_count < 64u)
-                {
-                    ++cdrom_flip_count;
-                    emu::logf(emu::LogLevel::debug, "EVT_FLIP",
-                        "[%u] Event[%d]@0x%05X status 0x%04X->0x%04X vblank=%u pc=0x%08X",
-                        cdrom_flip_count, ei, bases[ei], last_cdrom_status[ei], st,
-                        vblank_total_count_, cpu_pc_);
-                    last_cdrom_status[ei] = st;
-                }
-            }
-        }
-#endif // R3000_NO_DIAG
-
-        // VBlank stuck detection
         if (gpu_)
         {
             const auto& stats = gpu_->prev_frame_stats();
             const uint32_t real_prims = stats.triangles + stats.quads + stats.rects + stats.lines + stats.fills;
-            if (real_prims > 0)
-            {
-                vblank_last_frame_ = vblank_total_count_;
-                vblank_stuck_count_ = 0;
-                vblank_stuck_logged_ = 0;
-            }
-            else
-            {
-                vblank_stuck_count_++;
-                if (vblank_stuck_logged_ && (vblank_stuck_count_ % 200) == 0)
-                    vblank_stuck_logged_ = 0;
-            }
+            if (real_prims > 0) { vblank_last_frame_ = vblank_total_count_; vblank_stuck_count_ = 0; vblank_stuck_logged_ = 0; }
+            else { vblank_stuck_count_++; if (vblank_stuck_logged_ && (vblank_stuck_count_ % 200) == 0) vblank_stuck_logged_ = 0; }
         }
     }
 }
