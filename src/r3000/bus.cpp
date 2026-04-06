@@ -3038,11 +3038,14 @@ void Bus::tick(uint32_t cycles)
             ++vblank_total_count_;
         }
 
-        // CDROM IRQ edge: the CDROM may have fired an IRQ (INT1 DataReady, etc.)
-        // between tick_peripherals() calls. Detect the rising edge and set I_STAT.
-        // Without this, CDROM callbacks never fire in external_vblank mode because
-        // check_cdrom_irq_edge() is only in the full tick() path.
-        check_cdrom_irq_edge();
+        // Tick CDROM every instruction (needed for timer-driven sector delivery,
+        // pending IRQ delivery, and command execution). Without this, CdSync loops
+        // forever because the CDROM timer never fires in external_vblank mode.
+        if (cdrom_)
+        {
+            cdrom_->tick(cycles);
+            check_cdrom_irq_edge();
+        }
 
         // DMA3 deferred check: if DMA3 was triggered but CDROM FIFO was empty,
         // check if FIFO is now populated and execute the transfer.
