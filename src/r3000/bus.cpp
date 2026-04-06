@@ -3038,13 +3038,29 @@ void Bus::tick(uint32_t cycles)
             ++vblank_total_count_;
         }
 
-        // Tick CDROM every instruction (needed for timer-driven sector delivery,
-        // pending IRQ delivery, and command execution). Without this, CdSync loops
-        // forever because the CDROM timer never fires in external_vblank mode.
+        // Tick CDROM + hardware timers every instruction in external_vblank mode.
+        // Without CDROM tick: CdSync loops forever (timer-driven delivery stalls).
+        // Without timer tick: chkRC2wait() timeout never fires (Timer 2 frozen).
         if (cdrom_)
         {
             cdrom_->tick(cycles);
             check_cdrom_irq_edge();
+        }
+        // Tick hardware timers (needed for SIO0 timeout via Timer 2)
+        for (int ch = 0; ch < 3; ++ch)
+        {
+            Timer& t = timers_[ch];
+            if (!t.counting_enabled) continue;
+            uint32_t inc = cycles;
+            if (t.use_external_clock)
+            {
+                if (ch == 2) { timer_prescale_accum_[2] += cycles; inc = timer_prescale_accum_[2] / 8; timer_prescale_accum_[2] %= 8; }
+                else continue; // dotclock/hblank handled in full tick
+            }
+            if (inc == 0) continue;
+            const uint32_t old_count = t.count;
+            t.count += inc;
+            timer_check_irq(ch, old_count);
         }
 
         // DMA3 deferred check: if DMA3 was triggered but CDROM FIFO was empty,
