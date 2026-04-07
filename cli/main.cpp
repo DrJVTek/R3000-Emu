@@ -1414,103 +1414,98 @@ int main(int argc, char** argv)
 
     uint64_t steps = 0;
     const auto run_start = std::chrono::steady_clock::now();
+    bool running = true;
 
-    // Decouple peripherals from CPU: Bus::tick() is skipped, peripherals
-    // are ticked every ~1024 cycles for speed.
+    // Same model as UE5: external VBlank + IRQ threads + wall-clock throttle.
     if (core.bus())
         core.bus()->set_external_vblank(true);
     uint32_t periph_accum = 0;
     constexpr uint32_t kPeriphBatch = 1024;
+    constexpr double kPS1CpuClock = 33868800.0;
+    double cycle_debt = 0.0;
+    auto last_time = std::chrono::steady_clock::now();
 
-    for (;;)
+    while (running)
     {
-        const auto res = core.step();
+        // Wall-clock throttle: accumulate cycle debt from real elapsed time
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(now - last_time).count();
+        last_time = now;
+        cycle_debt += std::min(dt, 0.05) * kPS1CpuClock;
 
-        // Auto-input: check vblank count and set pad buttons
-        if (use_auto_input && core.bus())
+        // Execute instructions until debt is paid
+        while (cycle_debt > 0.0 && running)
         {
-            const uint32_t vb = core.bus()->vblank_count();
-            if (vb != last_auto_vblank)
-            {
-                last_auto_vblank = vb;
-                uint16_t pad = kAllUp;
-                for (int i = 0; i < auto_input_count; ++i)
-                {
-                    if (vb >= auto_inputs[i].vblank_press && vb < auto_inputs[i].vblank_release)
-                        pad &= ~auto_inputs[i].buttons; // clear bit = pressed
-                }
-                core.set_pad_buttons(pad);
-            }
-        }
-        // Tick peripherals every ~1024 cycles
-        {
+            const auto res = core.step();
             const uint32_t cyc = core.last_cycles();
+            cycle_debt -= (double)cyc;
+
+            // Auto-input
+            if (use_auto_input && core.bus())
+            {
+                const uint32_t vb = core.bus()->vblank_count();
+                if (vb != last_auto_vblank)
+                {
+                    last_auto_vblank = vb;
+                    uint16_t pad = kAllUp;
+                    for (int i = 0; i < auto_input_count; ++i)
+                    {
+                        if (vb >= auto_inputs[i].vblank_press && vb < auto_inputs[i].vblank_release)
+                            pad &= ~auto_inputs[i].buttons;
+                    }
+                    core.set_pad_buttons(pad);
+                }
+            }
+
+            // Tick peripherals
             periph_accum += cyc;
             if (periph_accum >= kPeriphBatch)
             {
                 if (core.bus())
                     core.bus()->tick_peripherals(periph_accum);
-                // Fire VBlank from peripheral tick (gpu tick_vblank inside tick_peripherals)
-                // The VBlank IRQ is set by tick_peripherals via the normal gpu path
                 periph_accum = 0;
             }
-        }
 
-        if (res.kind == r3000::Cpu::StepResult::Kind::ok)
-        {
-            ++steps;
-            if (pc_sample != 0 && (steps % pc_sample) == 0)
+            if (res.kind == r3000::Cpu::StepResult::Kind::ok)
             {
-                const r3000::Cpu* cpu = core.cpu();
-                const r3000::Bus* bus = core.bus();
-                const uint32_t cause = cpu ? cpu->cop0(13) : 0u;
-                const uint32_t status = cpu ? cpu->cop0(12) : 0u;
-                const uint32_t epc = cpu ? cpu->cop0(14) : 0u;
-                const uint32_t exc = (cause >> 2) & 0x1Fu;
-                const uint32_t i_stat = bus ? bus->irq_stat_raw() : 0u;
-                const uint32_t i_mask = bus ? bus->irq_mask_raw() : 0u;
-                const uint32_t ipend = bus ? bus->irq_pending_masked() : 0u;
-                emu::logf(emu::LogLevel::info, "MAIN",
-                    "SAMPLE step=%" PRIu64 " PC=0x%08X INSTR=0x%08X exc=%u epc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%08X i_mask=0x%08X ipend=0x%08X",
-                    steps, res.pc, res.instr, exc, epc, cause, status, i_stat, i_mask, ipend);
-            }
-            if (max_steps != 0 && steps >= max_steps)
-            {
-                emu::logf(emu::LogLevel::info, "MAIN", "Stop: reached --max-steps=%" PRIu64, max_steps);
-                break;
-            }
-            if (max_time_s != 0 && (steps & 0xFFFF) == 0)
-            {
-                const auto now = std::chrono::steady_clock::now();
-                const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - run_start).count();
-                if ((uint64_t)elapsed >= max_time_s)
+                if (max_steps != 0 && steps >= max_steps)
                 {
-                    emu::logf(emu::LogLevel::info, "MAIN", "Stop: reached --max-time=%" PRIu64 "s (steps=%" PRIu64 ")", max_time_s, steps);
-                    break;
+                    emu::logf(emu::LogLevel::info, "MAIN", "Stop: reached --max-steps=%" PRIu64, max_steps);
+                    running = false;
+                }
+                if (max_time_s != 0 && (steps & 0xFFFF) == 0)
+                {
+                    const auto now2 = std::chrono::steady_clock::now();
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now2 - run_start).count();
+                    if ((uint64_t)elapsed >= max_time_s)
+                    {
+                        emu::logf(emu::LogLevel::info, "MAIN", "Stop: reached --max-time=%" PRIu64 "s", max_time_s);
+                        running = false;
+                    }
                 }
             }
-            continue;
+            else if (res.kind == r3000::Cpu::StepResult::Kind::halted)
+            {
+                emu::logf(emu::LogLevel::info, "MAIN", "HALT at PC=0x%08X", res.pc);
+                running = false;
+            }
+            else
+            {
+                emu::logf(emu::LogLevel::error, "MAIN", "Error at PC=0x%08X kind=%d", res.pc, (int)res.kind);
+                running = false;
+            }
+        } // inner while (cycle_debt)
+
+        // Flush remaining peripheral cycles
+        if (core.bus() && periph_accum > 0)
+        {
+            core.bus()->tick_peripherals(periph_accum);
+            periph_accum = 0;
         }
 
-        if (res.kind == r3000::Cpu::StepResult::Kind::halted)
-        {
-            emu::logf(emu::LogLevel::info, "MAIN", "HALT at PC=0x%08X", res.pc);
-            break;
-        }
-
-        if (res.kind == r3000::Cpu::StepResult::Kind::illegal_instr)
-        {
-            emu::logf(emu::LogLevel::error, "MAIN", "Illegal instruction at PC=0x%08X: 0x%08X (steps=%" PRIu64 ")",
-                res.pc, res.instr, steps);
-            break;
-        }
-
-        if (res.kind == r3000::Cpu::StepResult::Kind::mem_fault)
-        {
-            emu::logf(emu::LogLevel::error, "MAIN", "Mem fault at PC=0x%08X addr=0x%08X kind=%d (steps=%" PRIu64 ")",
-                res.pc, res.mem_fault.addr, (int)res.mem_fault.kind, steps);
-            break;
-        }
+        // Sleep when ahead of real time
+        if (running && cycle_debt <= 0.0)
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 
     // --- 3D diagnostic summary ---
