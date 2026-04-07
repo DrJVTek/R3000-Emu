@@ -359,6 +359,15 @@ class Bus
     uint8_t sio0_tx_buf_full_{0}; // TX buffer has data waiting
     uint32_t sio0_transfer_countdown_{0}; // ticks until transfer completes
     uint32_t sio0_ack_countdown_{0};      // ticks until ACK pulse ends
+
+    // SIO0 transfer thread
+    std::thread sio0_thread_;
+    std::atomic<bool> sio0_thread_running_{false};
+    std::atomic<uint8_t> sio0_transfer_signal_{0}; // 1=transfer done, 2=ACK done
+    std::atomic<uint32_t> sio0_transfer_delay_ns_{0}; // sleep duration for transfer
+    std::atomic<uint32_t> sio0_ack_delay_ns_{0};       // sleep duration for ACK
+    void start_sio0_thread();
+    void stop_sio0_thread();
     uint8_t  sio0_ack_input_flag_{0};    // ACKINPUT latched flag (set by do_ack, cleared on STAT read)
 
     // pad_buttons_ member REMOVED — now uses global g_pad_buttons in bus.cpp

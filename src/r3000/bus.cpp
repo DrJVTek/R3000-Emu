@@ -24,6 +24,11 @@
 // ---- Global pad button state (avoids Hot Reload class-layout issues) ----
 static std::atomic<uint16_t> g_pad_buttons{0xFFFFu};
 
+// ---- Clock period constants ----
+static constexpr double kSysclkPeriodNs = 1e9 / 33868800.0;  // ~29.5ns
+static constexpr double kSysclk8PeriodNs = kSysclkPeriodNs * 8.0; // ~236ns
+static constexpr double kDotclkPeriodNs = 1e9 / 5322240.0;   // ~188ns (320px)
+
 namespace r3000
 {
 
@@ -277,6 +282,7 @@ Bus::~Bus()
 {
     stop_gpu_thread();
     stop_timer_threads();
+    stop_sio0_thread();
 
     if (wav_writer_)
     {
@@ -674,11 +680,20 @@ void Bus::sio0_begin_transfer()
     sio0_state_ = Sio0State::Transmitting;
 
     // Transfer time = BAUD * 8 ticks (DuckStation: GetTransferTicks)
-    // BAUD is typically 0x0088 (136) for controllers → 136*8 = 1088 ticks
-    // Minimum: use 200 ticks if BAUD=0 (safety)
     uint32_t xfer_ticks = (uint32_t)sio0_baud_ * 8u;
     if (xfer_ticks < 200u) xfer_ticks = 200u;
-    sio0_transfer_countdown_ = xfer_ticks;
+
+    if (sio0_thread_running_.load(std::memory_order_relaxed))
+    {
+        // Signal SIO0 thread: sleep for transfer duration then signal back
+        sio0_transfer_delay_ns_.store((uint32_t)(xfer_ticks * kSysclkPeriodNs), std::memory_order_release);
+        sio0_transfer_signal_.store(0, std::memory_order_release); // clear previous
+    }
+    else
+    {
+        // Legacy: cycle-based countdown
+        sio0_transfer_countdown_ = xfer_ticks;
+    }
 }
 
 // Transfer complete: compute response, set RX buffer, schedule ACK
@@ -816,7 +831,10 @@ void Bus::sio0_do_transfer()
     {
         // Schedule ACK delay: 450 ticks for controllers (DuckStation)
         sio0_state_ = Sio0State::WaitingForACK;
-        sio0_ack_countdown_ = 450;
+        if (sio0_thread_running_.load(std::memory_order_relaxed))
+            sio0_ack_delay_ns_.store((uint32_t)(450.0 * kSysclkPeriodNs), std::memory_order_release);
+        else
+            sio0_ack_countdown_ = 450;
     }
 
     // Trace SIO0 transfers
@@ -3192,6 +3210,8 @@ void Bus::set_external_vblank(bool enabled)
         if (cdrom_) cdrom_->start_sector_thread();
         start_gpu_thread(true); // PAL default — TODO: detect from disc region
         start_timer_threads();
+        // SIO0 thread disabled: needs sub-µs signaling, 50µs poll too slow
+        // start_sio0_thread();
         emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM + Timers)");
     }
     else
@@ -3199,6 +3219,7 @@ void Bus::set_external_vblank(bool enabled)
         if (cdrom_) cdrom_->stop_sector_thread();
         stop_gpu_thread();
         stop_timer_threads();
+        stop_sio0_thread();
     }
 }
 
@@ -3317,11 +3338,61 @@ void Bus::stop_gpu_thread()
     }
 }
 
-// ================== TIMER THREADS ==================
+// ================== SIO0 THREAD ==================
 
-static constexpr double kSysclkPeriodNs = 1e9 / 33868800.0;  // ~29.5ns
-static constexpr double kSysclk8PeriodNs = kSysclkPeriodNs * 8.0; // ~236ns
-static constexpr double kDotclkPeriodNs = 1e9 / 5322240.0;   // ~188ns (320px)
+void Bus::start_sio0_thread()
+{
+    stop_sio0_thread();
+    sio0_thread_running_.store(true, std::memory_order_release);
+    sio0_thread_ = std::thread([this]() {
+        emu::logf(emu::LogLevel::warn, "SIO0_THREAD", "Started");
+        while (sio0_thread_running_.load(std::memory_order_acquire))
+        {
+            if (sio0_state_ != Sio0State::Transmitting && sio0_state_ != Sio0State::WaitingForACK)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                continue;
+            }
+
+            if (sio0_state_ == Sio0State::Transmitting)
+            {
+                // Sleep for transfer duration
+                const uint32_t ns = sio0_transfer_delay_ns_.load(std::memory_order_acquire);
+                if (ns > 0)
+                    std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+                sio0_transfer_signal_.store(1, std::memory_order_release); // transfer done
+                // Wait for CPU to consume
+                while (sio0_transfer_signal_.load(std::memory_order_acquire) != 0 &&
+                       sio0_thread_running_.load(std::memory_order_acquire))
+                    std::this_thread::sleep_for(std::chrono::microseconds(5));
+            }
+            else if (sio0_state_ == Sio0State::WaitingForACK)
+            {
+                // ACK delay: 450 ticks ≈ 13.3µs
+                const uint32_t ns = sio0_ack_delay_ns_.load(std::memory_order_acquire);
+                if (ns > 0)
+                    std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+                sio0_transfer_signal_.store(2, std::memory_order_release); // ACK done
+                while (sio0_transfer_signal_.load(std::memory_order_acquire) != 0 &&
+                       sio0_thread_running_.load(std::memory_order_acquire))
+                    std::this_thread::sleep_for(std::chrono::microseconds(5));
+            }
+        }
+        emu::logf(emu::LogLevel::warn, "SIO0_THREAD", "Stopped");
+    });
+}
+
+void Bus::stop_sio0_thread()
+{
+    if (sio0_thread_running_.load(std::memory_order_acquire))
+    {
+        sio0_thread_running_.store(false, std::memory_order_release);
+        if (sio0_thread_.joinable())
+            sio0_thread_.join();
+    }
+}
+
+// ================== TIMER THREADS ==================
 
 void Bus::timer_thread_func(int ch)
 {
@@ -3521,15 +3592,25 @@ void Bus::tick(uint32_t cycles)
             exec_dma3_transfer();
         }
 
-        if (sio0_state_ == Sio0State::Transmitting && sio0_transfer_countdown_ > 0)
+        // SIO0: thread signal or legacy cycle countdown
+        if (sio0_thread_running_.load(std::memory_order_relaxed))
         {
-            if (cycles >= sio0_transfer_countdown_) { sio0_transfer_countdown_ = 0; sio0_do_transfer(); }
-            else sio0_transfer_countdown_ -= cycles;
+            const uint8_t sig = sio0_transfer_signal_.load(std::memory_order_acquire);
+            if (sig == 1) { sio0_transfer_signal_.store(0, std::memory_order_release); sio0_do_transfer(); }
+            else if (sig == 2) { sio0_transfer_signal_.store(0, std::memory_order_release); sio0_do_ack(); }
         }
-        else if (sio0_state_ == Sio0State::WaitingForACK && sio0_ack_countdown_ > 0)
+        else
         {
-            if (cycles >= sio0_ack_countdown_) { sio0_ack_countdown_ = 0; sio0_do_ack(); }
-            else sio0_ack_countdown_ -= cycles;
+            if (sio0_state_ == Sio0State::Transmitting && sio0_transfer_countdown_ > 0)
+            {
+                if (cycles >= sio0_transfer_countdown_) { sio0_transfer_countdown_ = 0; sio0_do_transfer(); }
+                else sio0_transfer_countdown_ -= cycles;
+            }
+            else if (sio0_state_ == Sio0State::WaitingForACK && sio0_ack_countdown_ > 0)
+            {
+                if (cycles >= sio0_ack_countdown_) { sio0_ack_countdown_ = 0; sio0_do_ack(); }
+                else sio0_ack_countdown_ -= cycles;
+            }
         }
         // Soul Reaver trace: PC + key state every ~2M cycles during stall
         {
