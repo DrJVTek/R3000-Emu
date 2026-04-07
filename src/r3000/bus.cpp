@@ -3211,18 +3211,14 @@ void Bus::set_external_vblank(bool enabled)
         // Start IRQ threads: real-time hardware timing
         if (cdrom_) cdrom_->start_sector_thread();
         start_gpu_thread(true); // PAL default — TODO: detect from disc region
-        start_timer_threads();
-        // SIO0 stays on CPU thread: it's clocked by the CPU crystal (synchronous).
-        // Unlike VBlank/CDROM which are truly async hardware, SIO0 BAUD derives
-        // from sysclk — the transfer takes exactly BAUD*8 CPU cycles.
-        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM + Timers)");
+        // Timer/SIO0/DMA: synchronous to CPU clock — stay on CPU thread.
+        // Only truly async hardware (GPU crystal, CD drive motor) gets threads.
+        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM)");
     }
     else
     {
         if (cdrom_) cdrom_->stop_sector_thread();
         stop_gpu_thread();
-        stop_timer_threads();
-        stop_sio0_thread();
     }
 }
 
