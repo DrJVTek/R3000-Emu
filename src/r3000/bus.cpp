@@ -3241,14 +3241,16 @@ void Bus::set_external_vblank(bool enabled)
     if (enabled)
     {
         // Start IRQ threads: real-time hardware timing
-        if (cdrom_) cdrom_->start_sector_thread();
+        // CDROM sector delivery: cycle-based (controller is sync to sysclk).
+        // The drive motor is async but the CDROM controller state machine
+        // (pending IRQ, seek delay, read_pending_irq1_) is clocked by sysclk.
+        // A sector thread conflicts with this state machine.
         start_gpu_thread(true); // PAL default — TODO: detect from disc region
         start_timer_threads();
-        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM + Timers)");
+        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + Timers)");
     }
     else
     {
-        if (cdrom_) cdrom_->stop_sector_thread();
         stop_gpu_thread();
         stop_timer_threads();
     }

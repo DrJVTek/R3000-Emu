@@ -1450,7 +1450,10 @@ void Cdrom::start_sector_thread()
 
             // Signal CPU thread: a sector timer has fired.
             // Don't signal if previous signal wasn't consumed yet.
-            if (reading_active_ && sector_thread_signal_.load(std::memory_order_acquire) == 0)
+            // Don't signal during seek — the first INT1 needs the seek delay
+            // handled by read_pending_irq1_ in the IRQ ack path.
+            if (reading_active_ && !read_pending_irq1_ &&
+                sector_thread_signal_.load(std::memory_order_acquire) == 0)
             {
                 sector_thread_signal_.store(1, std::memory_order_release);
                 sector_thread_fire_count_.fetch_add(1, std::memory_order_relaxed);
@@ -3448,9 +3451,7 @@ void Cdrom::tick(uint32_t cycles)
         consume_sector_signal();
         sector_signal_consumed_count_.fetch_add(1, std::memory_order_relaxed);
         // Sector thread says: a sector interval has passed in real time.
-        // Set pending INT1 for immediate delivery. Override any existing
-        // pending that has a future due (e.g., from read_pending_irq1_
-        // or seek delay) — the real-time thread is the authority on timing.
+        // Override everything — the thread is the timing authority.
         if (reading_active_)
         {
             pending_irq_type_ = 0x01;
