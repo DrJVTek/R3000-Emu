@@ -491,6 +491,12 @@ uint32_t Gpu::total_scanlines() const
 
 void Gpu::tick_vblank_swap_only()
 {
+    // Full VBlank processing — called from GPU thread or fire_vblank_external.
+    // Does everything tick_vblank() does at the VBlank boundary.
+
+    // Save prev frame stats before reset
+    prev_frame_stats_ = frame_stats_;
+
     // Toggle field (games poll GPUSTAT bit 31 to detect VSync)
     even_odd_field_ = !even_odd_field_;
     if (display_.interlace)
@@ -504,7 +510,10 @@ void Gpu::tick_vblank_swap_only()
         draw_lists_[draw_active_].display = display_;
         draw_active_ = 1 - draw_active_;
         draw_lists_[draw_active_].clear();
+        if (gte_corr_) gte_corr_->swap_frame();
+        vram_frame_++;
     }
+
     ++frame_count_;
     frame_stats_ = FrameStats{};
 }
