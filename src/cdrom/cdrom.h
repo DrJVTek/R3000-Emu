@@ -1,8 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <thread>
 
 #include "../log/filelog.h"
 #include "../log/logger.h"
@@ -131,6 +133,14 @@ class Cdrom
     // Returns true if the data FIFO is empty (DMA3 DREQ not yet asserted).
     // Used by Bus to defer DMA3 until the sector is ready.
     bool is_fifo_empty() const { return sb_[sb_r_].pos >= sb_[sb_r_].sz; }
+
+    // Sector delivery thread: fires at real-time intervals matching disc speed.
+    // The thread only signals "sector ready" via atomic flag. The CPU thread
+    // (in tick()) does the actual sector processing (read disc, fill FIFO, IRQ).
+    void start_sector_thread();
+    void stop_sector_thread();
+    bool has_pending_sector_signal() const { return sector_thread_signal_.load(std::memory_order_acquire) != 0; }
+    void consume_sector_signal() { sector_thread_signal_.store(0, std::memory_order_release); }
     uint32_t read_lba_debug() const { return read_lba_; }
     uint8_t irq_flags_debug() const { return irq_flags_; }
     uint32_t resp_count_debug() const { return (resp_w_ >= resp_r_) ? (resp_w_ - resp_r_) : (32 - resp_r_ + resp_w_); }
@@ -252,6 +262,11 @@ class Cdrom
     // IRQ callback for push-model notification
     IrqCallback irq_callback_{nullptr};
     void* irq_callback_user_{nullptr};
+
+    // Sector delivery thread
+    std::thread sector_thread_;
+    std::atomic<bool> sector_thread_running_{false};
+    std::atomic<uint8_t> sector_thread_signal_{0}; // 1 = sector timer fired, CPU should deliver
 
     // XA-ADPCM decoder + SPU output
     audio::Spu* spu_{nullptr};

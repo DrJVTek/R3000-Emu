@@ -631,6 +631,7 @@ Cdrom::Cdrom(rlog::Logger* logger) : logger_(logger)
 
 Cdrom::~Cdrom()
 {
+    stop_sector_thread();
     eject_disc();
 }
 
@@ -1418,6 +1419,54 @@ uint32_t Cdrom::read_sector_ticks() const
 {
     return (mode_ & 0x80u) ? (kPsxMasterClock / kDoubleSpeedSectorsPerSecond)
                            : (kPsxMasterClock / kSingleSpeedSectorsPerSecond);
+}
+
+// ================== SECTOR DELIVERY THREAD ==================
+
+void Cdrom::start_sector_thread()
+{
+    stop_sector_thread();
+    sector_thread_running_.store(true, std::memory_order_release);
+    sector_thread_ = std::thread([this]() {
+        emu::logf(emu::LogLevel::warn, "CD_THREAD", "Sector thread started");
+
+        while (sector_thread_running_.load(std::memory_order_acquire))
+        {
+            if (!reading_active_)
+            {
+                // Not reading — sleep short and check again
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
+            // Compute sleep duration from current mode (1x or 2x)
+            const bool double_speed = (mode_ & 0x80u) != 0;
+            const auto interval = double_speed
+                ? std::chrono::microseconds(6667)   // 150 sectors/s
+                : std::chrono::microseconds(13333); // 75 sectors/s
+
+            std::this_thread::sleep_for(interval);
+
+            // Signal CPU thread: a sector timer has fired.
+            // Don't signal if previous signal wasn't consumed yet.
+            if (reading_active_ && sector_thread_signal_.load(std::memory_order_acquire) == 0)
+            {
+                sector_thread_signal_.store(1, std::memory_order_release);
+            }
+        }
+
+        emu::logf(emu::LogLevel::warn, "CD_THREAD", "Sector thread stopped");
+    });
+}
+
+void Cdrom::stop_sector_thread()
+{
+    if (sector_thread_running_.load(std::memory_order_acquire))
+    {
+        sector_thread_running_.store(false, std::memory_order_release);
+        if (sector_thread_.joinable())
+            sector_thread_.join();
+    }
 }
 
 bool Cdrom::read_user_data_2048(uint32_t lba, uint8_t out[2048])
