@@ -685,13 +685,12 @@ void Bus::sio0_begin_transfer()
 
     if (sio0_thread_running_.load(std::memory_order_relaxed))
     {
-        // Signal SIO0 thread: sleep for transfer duration then signal back
         sio0_transfer_delay_ns_.store((uint32_t)(xfer_ticks * kSysclkPeriodNs), std::memory_order_release);
-        sio0_transfer_signal_.store(0, std::memory_order_release); // clear previous
+        sio0_transfer_signal_.store(0, std::memory_order_release);
+        sio0_wake_thread(1); // wake thread: transfer requested
     }
     else
     {
-        // Legacy: cycle-based countdown
         sio0_transfer_countdown_ = xfer_ticks;
     }
 }
@@ -832,7 +831,10 @@ void Bus::sio0_do_transfer()
         // Schedule ACK delay: 450 ticks for controllers (DuckStation)
         sio0_state_ = Sio0State::WaitingForACK;
         if (sio0_thread_running_.load(std::memory_order_relaxed))
+        {
             sio0_ack_delay_ns_.store((uint32_t)(450.0 * kSysclkPeriodNs), std::memory_order_release);
+            sio0_wake_thread(2); // wake thread: ACK requested
+        }
         else
             sio0_ack_countdown_ = 450;
     }
@@ -3210,8 +3212,9 @@ void Bus::set_external_vblank(bool enabled)
         if (cdrom_) cdrom_->start_sector_thread();
         start_gpu_thread(true); // PAL default — TODO: detect from disc region
         start_timer_threads();
-        // SIO0 thread disabled: needs sub-µs signaling, 50µs poll too slow
-        // start_sio0_thread();
+        // SIO0 stays on CPU thread: it's clocked by the CPU crystal (synchronous).
+        // Unlike VBlank/CDROM which are truly async hardware, SIO0 BAUD derives
+        // from sysclk — the transfer takes exactly BAUD*8 CPU cycles.
         emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM + Timers)");
     }
     else
@@ -3340,6 +3343,12 @@ void Bus::stop_gpu_thread()
 
 // ================== SIO0 THREAD ==================
 
+void Bus::sio0_wake_thread(uint8_t reason)
+{
+    sio0_wake_flag_.store(reason, std::memory_order_release);
+    sio0_wake_cv_.notify_one();
+}
+
 void Bus::start_sio0_thread()
 {
     stop_sio0_thread();
@@ -3348,34 +3357,32 @@ void Bus::start_sio0_thread()
         emu::logf(emu::LogLevel::warn, "SIO0_THREAD", "Started");
         while (sio0_thread_running_.load(std::memory_order_acquire))
         {
-            if (sio0_state_ != Sio0State::Transmitting && sio0_state_ != Sio0State::WaitingForACK)
+            // Wait for wake signal (zero-latency via condition_variable)
             {
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
-                continue;
+                std::unique_lock<std::mutex> lk(sio0_wake_mutex_);
+                sio0_wake_cv_.wait(lk, [this]() {
+                    return sio0_wake_flag_.load(std::memory_order_acquire) != 0 ||
+                           !sio0_thread_running_.load(std::memory_order_acquire);
+                });
             }
+            if (!sio0_thread_running_.load(std::memory_order_acquire)) break;
 
-            if (sio0_state_ == Sio0State::Transmitting)
+            const uint8_t reason = sio0_wake_flag_.exchange(0, std::memory_order_acquire);
+            if (reason == 1)
             {
-                // Sleep for transfer duration
+                // Transfer requested: sleep for transfer duration
                 const uint32_t ns = sio0_transfer_delay_ns_.load(std::memory_order_acquire);
                 if (ns > 0)
                     std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
-                sio0_transfer_signal_.store(1, std::memory_order_release); // transfer done
-                // Wait for CPU to consume
-                while (sio0_transfer_signal_.load(std::memory_order_acquire) != 0 &&
-                       sio0_thread_running_.load(std::memory_order_acquire))
-                    std::this_thread::sleep_for(std::chrono::microseconds(5));
+                sio0_transfer_signal_.store(1, std::memory_order_release);
             }
-            else if (sio0_state_ == Sio0State::WaitingForACK)
+            else if (reason == 2)
             {
-                // ACK delay: 450 ticks ≈ 13.3µs
+                // ACK requested: sleep for ACK delay
                 const uint32_t ns = sio0_ack_delay_ns_.load(std::memory_order_acquire);
                 if (ns > 0)
                     std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
-                sio0_transfer_signal_.store(2, std::memory_order_release); // ACK done
-                while (sio0_transfer_signal_.load(std::memory_order_acquire) != 0 &&
-                       sio0_thread_running_.load(std::memory_order_acquire))
-                    std::this_thread::sleep_for(std::chrono::microseconds(5));
+                sio0_transfer_signal_.store(2, std::memory_order_release);
             }
         }
         emu::logf(emu::LogLevel::warn, "SIO0_THREAD", "Stopped");
@@ -3387,6 +3394,7 @@ void Bus::stop_sio0_thread()
     if (sio0_thread_running_.load(std::memory_order_acquire))
     {
         sio0_thread_running_.store(false, std::memory_order_release);
+        sio0_wake_cv_.notify_one(); // wake thread so it exits
         if (sio0_thread_.joinable())
             sio0_thread_.join();
     }

@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -360,14 +362,18 @@ class Bus
     uint32_t sio0_transfer_countdown_{0}; // ticks until transfer completes
     uint32_t sio0_ack_countdown_{0};      // ticks until ACK pulse ends
 
-    // SIO0 transfer thread
+    // SIO0 transfer thread — woken by condition_variable (zero-latency)
     std::thread sio0_thread_;
     std::atomic<bool> sio0_thread_running_{false};
     std::atomic<uint8_t> sio0_transfer_signal_{0}; // 1=transfer done, 2=ACK done
-    std::atomic<uint32_t> sio0_transfer_delay_ns_{0}; // sleep duration for transfer
-    std::atomic<uint32_t> sio0_ack_delay_ns_{0};       // sleep duration for ACK
+    std::atomic<uint32_t> sio0_transfer_delay_ns_{0};
+    std::atomic<uint32_t> sio0_ack_delay_ns_{0};
+    std::mutex sio0_wake_mutex_;
+    std::condition_variable sio0_wake_cv_;
+    std::atomic<uint8_t> sio0_wake_flag_{0}; // 1=transfer requested, 2=ack requested
     void start_sio0_thread();
     void stop_sio0_thread();
+    void sio0_wake_thread(uint8_t reason);
     uint8_t  sio0_ack_input_flag_{0};    // ACKINPUT latched flag (set by do_ack, cleared on STAT read)
 
     // pad_buttons_ member REMOVED — now uses global g_pad_buttons in bus.cpp
