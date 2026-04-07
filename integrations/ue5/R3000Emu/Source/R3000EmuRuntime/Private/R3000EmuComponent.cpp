@@ -46,10 +46,9 @@ static constexpr double kPS1CpuClock = 33868800.0;
 
 static uint32 EffectiveBusTickBatch(bool bThreadedMode, int32 RequestedBusTickBatch)
 {
-    // With external VBlank (50Hz timer), threaded mode no longer needs
-    // batch=1. Use 64 as default for good perf with acceptable precision.
-    if (bThreadedMode && RequestedBusTickBatch <= 1)
-        return 64u;
+    // With IRQ threads, bus_tick_batch must be 1 for cycle-accurate
+    // peripheral ticking (SIO0, CDROM command processing, DMA).
+    // Batching caused timing divergence vs CLI (Soul Reaver stall).
     return static_cast<uint32>(FMath::Clamp(RequestedBusTickBatch, 1, 128));
 }
 

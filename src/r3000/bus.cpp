@@ -3603,6 +3603,25 @@ void Bus::tick(uint32_t cycles)
             cdrom_->tick(cycles);
             check_cdrom_irq_edge();
         }
+        // Soul Reaver game state dump (periodic)
+        if (vblank_total_count_ > 800 && (vblank_total_count_ % 100) == 0)
+        {
+            static uint32_t sr_state_last_vbl = 0;
+            if (vblank_total_count_ != sr_state_last_vbl)
+            {
+                sr_state_last_vbl = vblank_total_count_;
+                const uint32_t state = *(uint32_t*)(ram_ + (0x800d19acu & (ram_size_ - 1)));
+                const uint32_t vidx = *(uint32_t*)(ram_ + (0x800d19b4u & (ram_size_ - 1)));
+                const uint32_t dd9c0 = *(uint32_t*)(ram_ + (0x800dd9c0u & (ram_size_ - 1)));
+                const uint32_t cb6e4 = *(uint32_t*)(ram_ + (0x800cb6e4u & (ram_size_ - 1)));
+                const uint32_t dd9ac = *(uint32_t*)(ram_ + (0x800dd9acu & (ram_size_ - 1)));
+                const uint32_t dma1_chcr = dma_[1].chcr;
+                emu::logf(emu::LogLevel::warn, "CORE",
+                    "SR_STATE vbl=%u st=%u vi=%u d9c0=%u d9ac=%u cb6e4=0x%08X dma1=0x%08X pc=0x%08X",
+                    vblank_total_count_, state, vidx, dd9c0, dd9ac, cb6e4, dma1_chcr, cpu_pc_);
+            }
+        }
+
         // Tick hardware timers — skip when timer threads handle IRQs
         // (count is computed on-read via timer_compute_count)
         if (!timer_threads_running_.load(std::memory_order_relaxed))
