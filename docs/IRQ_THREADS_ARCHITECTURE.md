@@ -174,8 +174,13 @@ Le déterminisme n'est pas un problème pour nous : le vrai PS1 n'est pas déter
 - ✅ Phase 2 : CDROM sector delivery thread
 - ✅ Infrastructure : `irq_ext_pending_` atomic register, `fire_irq_external(bit)`
 
+### Résolu : pas de threads pour le hardware CPU-synchrone
+Timer 0/1/2 sysclk, SIO0, DMA, SPU sont cadencés par le même crystal que le CPU (33.87MHz). Leur timing est déterministe en cycles CPU, pas en temps réel. Un thread real-time ne correspond pas si le CPU tourne plus vite ou plus lent que real-time.
+
+Seul le hardware piloté par un oscillateur/moteur **physiquement indépendant** du CPU a un thread :
+- GPU crystal → VBlank (50/60Hz) + HBlank (~15.7kHz)
+- Drive CD → secteurs (75/150 par seconde)
+
 ### À faire
-- 🔲 Phase 3 : Timer 0/1/2 threads reprogrammables (sleep + recalcul sur write mode/target)
-- 🔲 Phase 4 : SIO0 transfer thread
-- 🔲 Phase 5 : DMA threads (mémoire d'abord, puis GPU/SPU avec ring buffers)
-- 🔲 Phase 6 : Supprimer tick()/tick_peripherals() — le CPU loop ne fait plus que execute + check I_STAT
+- 🔲 Phase 5 : DMA threads pour les canaux mémoire (si nécessaire pour UE5)
+- 🔲 Phase 6 : Nettoyer tick()/tick_peripherals() — retirer le code legacy
