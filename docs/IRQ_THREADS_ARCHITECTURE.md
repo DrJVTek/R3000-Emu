@@ -6,70 +6,80 @@ L'émulateur actuel tick tous les périphériques séquentiellement dans `Bus::t
 
 Sur vrai hardware PS1, chaque périphérique a son propre oscillateur/horloge et fire des IRQs de manière **asynchrone** au CPU. Le CPU se fait interrompre quand ça arrive.
 
-## Architecture proposée
+## Architecture
 
 ### Principe
-- **Thread principal (CPU)** : exécute les instructions MIPS, le seul à accéder la RAM
-- **Threads IRQ** (un par source hardware) : timing réel → set un bit dans `I_STAT` (atomique)
-- Le CPU vérifie `I_STAT` après chaque instruction → si pending, sauve PC dans EPC, jump 0x80000080
+- **Thread principal (CPU)** : exécute les instructions MIPS, le seul à exécuter du code game
+- **Threads hardware** : chaque composant hardware tourne sur son propre thread avec son propre timing
+- `I_STAT` (atomic) est le point de rendez-vous : chaque thread set son bit via `fetch_or`
+- Le CPU vérifie `I_STAT` après chaque instruction → exception si pending
 
-### Threads IRQ
+### Threads hardware
 
-| Thread | Source | Timing | I_STAT bit |
-|--------|--------|--------|------------|
-| VBlank | GPU scanline counter | ~16.67ms (PAL: ~20ms) | bit 0 |
-| CDROM | Drive sector delivery | ~6.67ms (2x speed) | bit 2 |
-| DMA | Transfer complete | Variable | bit 3 |
-| Timer 0 | Dotclock / sysclk | Target/overflow | bit 4 |
-| Timer 1 | HBlank / sysclk | Target/overflow | bit 5 |
-| Timer 2 | Sysclk/8 / sysclk | Target/overflow | bit 6 |
-| SIO0 | Transfer complete | BAUD * 8 ticks | bit 7 |
+| Thread | Source | Timing | I_STAT bit | Status |
+|--------|--------|--------|------------|--------|
+| GPU scanline | Cristal GPU | ~63.5µs/scanline | bit 0 (VBlank), HBlank signal | ✅ Implémenté |
+| CDROM sector | Moteur drive | ~6.67ms (2x) / ~13.3ms (1x) | bit 2 | ✅ Implémenté |
+| Timer 0 | Reprogrammable (sysclk ou dotclock) | Dépend de la config game | bit 4 | 🔲 À faire |
+| Timer 1 | Reprogrammable (sysclk ou HBlank) | Dépend de la config game | bit 5 | ✅ HBlank dans GPU thread |
+| Timer 2 | Reprogrammable (sysclk ou sysclk/8) | Dépend de la config game | bit 6 | 🔲 À faire |
+| SIO0 | Transfer complete | BAUD * 8 ticks | bit 7 | 🔲 À faire |
+| DMA mémoire | Bus transfer | Variable | bit 3 | 🔲 À faire |
 
-### Synchronisation
+### Timers user (Timer 0/1/2) — reprogrammables
 
-- `I_STAT` = `std::atomic<uint32_t>` — chaque thread set son propre bit via `fetch_or`
-- Pas de locks nécessaires — chaque thread écrit un bit unique
-- Le CPU thread est le SEUL à :
-  - Exécuter des instructions
-  - Lire/écrire la RAM
-  - Lire les registres MMIO
-  - Clear les bits I_STAT (via write AND)
+Les timers PS1 sont des compteurs hardware **indépendants** du CPU. Le game peut configurer à tout moment :
+- Source clock (sysclk, dotclock, sysclk/8, HBlank)
+- Target value (0-0xFFFF)
+- Reset on target, IRQ on target, IRQ on overflow
+- Mode pulse/toggle, one-shot/repeat
+- Sync enable + sync mode (gate)
 
-### Timers : calcul à la lecture
+**Important** : le BIOS PS1 a un scheduler multi-thread (TCB — Thread Control Block). Un thread game peut modifier la config d'un timer pendant qu'un autre thread tourne. Les timers doivent donc être **thread-safe** (tous les champs atomiques).
 
-Les timers n'ont pas besoin de threads. Au lieu de compter cycle par cycle, on **calcule la valeur au moment de la lecture** :
+Chaque timer a son propre thread :
+1. Quand le game écrit Timer mode/target → le thread recalcule son prochain fire time
+2. Le thread dort jusqu'au prochain event (target hit ou overflow)
+3. Au réveil → `fire_irq_external(4+ch)`
+4. Le thread recalcule le prochain fire time et se rendort
+
+Pour la lecture du count (MMIO read) : **calcul à la lecture** basé sur le temps écoulé depuis le dernier reset, pas de tick per-cycle.
 
 ```cpp
 uint16_t timer_read_count(int ch) {
-    uint64_t elapsed = now_cycles - timer_start_cycles[ch];
-    if (use_external_clock) elapsed /= prescaler;
-    return (uint16_t)(elapsed % (target + 1));
+    auto elapsed = steady_clock::now() - timer_start_time[ch];
+    uint64_t ticks = elapsed / tick_period[ch]; // period dépend de la clock source
+    return (uint16_t)(ticks % (target + 1));
 }
 ```
 
-L'IRQ timer fire quand le compteur atteint target ou overflow. On pré-calcule le cycle exact où ça arrivera et on programme un timer OS (ou un check dans le CPU loop) :
+### DMA — les canaux indépendants
 
-```cpp
-uint64_t next_irq_cycle = timer_start + target * prescaler;
-// Thread timer: sleep until next_irq_cycle, then set I_STAT bit
-```
+Sur vrai PS1, le DMA controller a 7 canaux qui opèrent sur le bus **indépendamment** du CPU. Le CPU programme un canal (MADR, BCR, CHCR) et le DMA fait le transfert tout seul. Le CPU est même stallé pendant les transfers DMA (bus steal).
 
-### CDROM : thread sector delivery
+#### DMA mémoire (threads OK)
+- **DMA6 OTC** : ordering table clear (RAM→RAM) → thread simple
+- **DMA3 CDROM→RAM** : lit le FIFO CDROM, écrit en RAM → thread (FIFO atomic)
+- **DMA0 MDEC IN** : RAM→MDEC decoder → thread possible
 
-Le thread CDROM :
-1. Attend le délai secteur (basé sur la vitesse 1x/2x)
-2. Lit le secteur depuis l'image disque
-3. Place les données dans le sector buffer (le CPU les lira via DMA3)
-4. Set `I_STAT bit 2` (atomique)
+#### DMA avec état partagé UE5 (attention)
+- **DMA2 GPU** : linked-list GPU commands → le GPU state est lu par UE5 render thread. **Ring buffer** entre le DMA thread et le render thread UE5.
+- **DMA4 SPU** : RAM→SPU RAM → le SPU state est lu par le audio thread. Même approche ring buffer.
+- **DMA1 MDEC OUT** : MDEC→RAM (decoded video) → écrit en RAM, lu par le VRAM display. Thread OK si le write est atomique.
 
-Le CPU thread gère le DMA3 quand le game le programme (write CHCR).
+#### Principe de sécurité
+- Un DMA thread ne touche QUE la RAM (reads/writes atomiques sur des blocs)
+- Pour les DMA vers GPU/SPU : le thread DMA écrit dans un **ring buffer intermédiaire**, le consumer UE5 (render/audio thread) lit quand il est prêt
+- Pas de lock : producteur-consommateur lock-free
 
-### VBlank : thread GPU
+### SIO0 — transfer timing
 
-Le thread VBlank :
-1. Timer basé sur le refresh rate (50Hz PAL / 60Hz NTSC)
-2. Set `I_STAT bit 0` (atomique)
-3. Signal le swap de draw list (pour UE5 rendering)
+Quand le game écrit JOY_DATA, le SIO0 controller commence un transfer qui prend `BAUD * 8` cycles CPU. Sur vrai hardware c'est le controller SIO qui fait le timing, pas le CPU.
+
+Thread SIO0 :
+1. Game écrit JOY_DATA → signal au thread SIO0
+2. Thread dort pour la durée du transfer (BAUD * 8 / 33.87MHz)
+3. Au réveil → met la réponse dans RX buffer, `fire_irq_external(7)`
 
 ### CPU loop simplifié
 
@@ -77,9 +87,12 @@ Le thread VBlank :
 for (;;) {
     execute_instruction();
     
-    // Check IRQ (atomique, pas de lock)
-    uint32_t pending = i_stat.load(relaxed) & i_mask;
-    if (pending && interrupts_enabled()) {
+    // Consume external IRQ bits (atomic, zero-lock)
+    uint32_t ext = irq_ext_pending.exchange(0, acquire);
+    if (ext) i_stat |= (ext & ~i_stat); // edge-trigger
+    
+    // Check IRQ
+    if ((i_stat & i_mask) && interrupts_enabled()) {
         cop0[EPC] = pc;
         push_status();
         pc = 0x80000080;
@@ -114,20 +127,18 @@ Exactement le même principe :
 
 **Pas de lock, pas de mutex, pas de condition variable.** Juste des atomic `fetch_or` sur I_STAT. C'est exactement comme le hardware : des fils qui passent HIGH indépendamment.
 
-## Avantages
+## Thread safety des registres périphériques
 
-1. **Fidélité** : les IRQs arrivent au bon moment réel, indépendamment du CPU
-2. **Pas de divergence CLI/UE5** : même code, mêmes threads, même timing
-3. **Simplicité** : plus de tick batching, plus de fast path vs full path
-4. **Performance** : le CPU loop est minimal, les périphériques tournent en parallèle
-5. **Extensibilité** : ajouter un nouveau périphérique = ajouter un thread
+Les jeux PS1 peuvent reconfigurer les périphériques à tout moment via MMIO writes. Le BIOS a un scheduler multi-thread (TCB) — plusieurs threads game peuvent tourner en parallèle.
 
-## Risques / Points d'attention
+### Règle : tous les registres partagés entre threads sont atomiques
 
-1. **MMIO reads** : quand le CPU lit un registre timer/CDROM/GPU, il faut retourner la valeur correcte au moment exact. Pour les timers c'est un calcul. Pour CDROM status c'est un atomic read.
-2. **DMA** : les transferts DMA accèdent à la RAM. Si le CDROM thread prépare les données et le CPU thread fait le DMA, il faut que les données soient prêtes (memory barrier).
-3. **Granularité OS** : les timers OS (sleep, waitable timer) ont une granularité de ~1ms. Pour des events à <1ms (SIO0 transfer = ~30µs), il faut du busy-wait ou un high-resolution timer.
-4. **Ordre des IRQs** : si deux IRQs fire "en même temps", l'ordre peut varier. Le BIOS exception handler gère ça (boucle sur tous les bits I_STAT).
+- **Timer mode/target/count** : `std::atomic` — le CPU thread écrit (MMIO), les threads timer/GPU lisent
+- **CDROM status/flags** : `std::atomic` — le CDROM thread écrit, le CPU thread lit (MMIO read)
+- **DMA channel config** : `std::atomic` — le CPU thread écrit (CHCR), le DMA thread lit
+- **I_STAT / I_MASK** : `std::atomic<uint32_t>` — écrit par tous les threads IRQ, lu par CPU
+
+Pas de mutex, pas de lock. Les atomics suffisent car chaque thread a un rôle unique (producteur ou consommateur pour chaque registre). C'est le modèle hardware : des registres câblés, pas des structures de données logicielles.
 
 ## Comparaison avec les autres émulateurs
 
@@ -158,8 +169,13 @@ Le déterminisme n'est pas un problème pour nous : le vrai PS1 n'est pas déter
 
 ## Migration
 
-Phase 1 : VBlank thread (déjà partiellement fait via `fire_vblank_external`)
-Phase 2 : CDROM sector delivery thread
-Phase 3 : Timer IRQ (calcul à la lecture + programmation IRQ)
-Phase 4 : SIO0 thread
-Phase 5 : Supprimer tick()/tick_peripherals()
+### Fait
+- ✅ Phase 1 : GPU scanline thread (VBlank + HBlank + Timer 1 ext clock)
+- ✅ Phase 2 : CDROM sector delivery thread
+- ✅ Infrastructure : `irq_ext_pending_` atomic register, `fire_irq_external(bit)`
+
+### À faire
+- 🔲 Phase 3 : Timer 0/1/2 threads reprogrammables (sleep + recalcul sur write mode/target)
+- 🔲 Phase 4 : SIO0 transfer thread
+- 🔲 Phase 5 : DMA threads (mémoire d'abord, puis GPU/SPU avec ring buffers)
+- 🔲 Phase 6 : Supprimer tick()/tick_peripherals() — le CPU loop ne fait plus que execute + check I_STAT

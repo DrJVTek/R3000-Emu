@@ -282,13 +282,16 @@ class Bus
 
     struct Timer
     {
-        uint32_t count{0};       // 32-bit to detect overflow easily
-        uint16_t mode{0};
-        uint16_t target{0};
-        bool irq_done{false};        // one-shot: IRQ already fired (bit 6=0)
-        bool counting_enabled{true}; // gate/sync can pause counting
-        bool use_external_clock{false}; // dotclock/hblank/sysclk8
-        bool gate{false};            // current gate state (HBlank/VBlank)
+        // All fields atomic: CPU thread writes (timer_write_mode),
+        // GPU thread reads (fire_hblank_external for Timer 1).
+        // No locks — atomics only, like real hardware signals.
+        std::atomic<uint32_t> count{0};
+        std::atomic<uint16_t> mode{0};
+        std::atomic<uint16_t> target{0};
+        std::atomic<bool> irq_done{false};
+        std::atomic<bool> counting_enabled{true};
+        std::atomic<bool> use_external_clock{false};
+        std::atomic<bool> gate{false};
     };
 
     void timer_check_irq(int ch, uint32_t old_count);
