@@ -4,8 +4,10 @@
 #define R3000_NO_DIAG
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -273,6 +275,8 @@ Bus::Bus(
 
 Bus::~Bus()
 {
+    stop_vblank_thread();
+
     if (wav_writer_)
     {
         delete wav_writer_;
@@ -3177,14 +3181,52 @@ void Bus::check_cdrom_irq_edge()
 void Bus::fire_vblank_external()
 {
     // IRQ thread model: set VBlank bit via atomic pending register.
-    // The CPU thread will consume this and latch into i_stat_ at
-    // the start of each tick(). No race — the CPU thread is the only
-    // writer to i_stat_, and it ORs pending bits edge-triggered.
     fire_irq_external(0); // I_STAT bit 0 = VBlank
 
     // GPU draw list swap (needed for UE5 rendering bridge — safe from any thread)
     if (gpu_)
         gpu_->tick_vblank_swap_only();
+}
+
+void Bus::start_vblank_thread(bool pal)
+{
+    stop_vblank_thread();
+    vblank_thread_pal_ = pal;
+    vblank_thread_running_.store(true, std::memory_order_release);
+    vblank_thread_ = std::thread([this]() {
+        // PAL = 50Hz (20ms), NTSC = 60Hz (16.67ms)
+        const auto interval = vblank_thread_pal_
+            ? std::chrono::microseconds(20000)
+            : std::chrono::microseconds(16667);
+
+        emu::logf(emu::LogLevel::warn, "VBLANK_THREAD",
+            "Started (%s, %lld us)",
+            vblank_thread_pal_ ? "PAL" : "NTSC",
+            (long long)std::chrono::duration_cast<std::chrono::microseconds>(interval).count());
+
+        auto next = std::chrono::steady_clock::now() + interval;
+        while (vblank_thread_running_.load(std::memory_order_acquire))
+        {
+            std::this_thread::sleep_until(next);
+            next += interval;
+
+            // Fire VBlank IRQ — exactly like real hardware:
+            // the GPU's VBlank signal goes high, latching I_STAT bit 0
+            fire_vblank_external();
+        }
+
+        emu::logf(emu::LogLevel::warn, "VBLANK_THREAD", "Stopped");
+    });
+}
+
+void Bus::stop_vblank_thread()
+{
+    if (vblank_thread_running_.load(std::memory_order_acquire))
+    {
+        vblank_thread_running_.store(false, std::memory_order_release);
+        if (vblank_thread_.joinable())
+            vblank_thread_.join();
+    }
 }
 
 // ================== TICK ==================

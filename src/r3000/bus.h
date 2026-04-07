@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -153,6 +154,11 @@ class Bus
     // When enabled, gpu_->tick_vblank() in Bus::tick() is skipped.
     void fire_vblank_external();
     void set_external_vblank(bool enabled) { external_vblank_ = enabled; }
+
+    // VBlank IRQ thread: fires I_STAT bit 0 at real-time intervals.
+    // PAL = 50Hz (~20ms), NTSC = 60Hz (~16.67ms).
+    void start_vblank_thread(bool pal = true);
+    void stop_vblank_thread();
 
     // Tick peripherals (timers, SIO0, SPU, CDROM) separately from the CPU.
     // Called from worker thread at regular intervals instead of per-instruction.
@@ -359,6 +365,11 @@ class Bus
     uint8_t cdrom_irq_prev_{0};
     bool external_vblank_{false}; // When true, VBlank is fired externally, not from tick()
     std::atomic<uint8_t> vblank_ext_pending_{0}; // Legacy (kept for compat, unused in IRQ thread model)
+
+    // VBlank IRQ thread
+    std::thread vblank_thread_;
+    std::atomic<bool> vblank_thread_running_{false};
+    bool vblank_thread_pal_{true};
 
     // IRQ thread model: external threads set bits here via fetch_or.
     // CPU thread consumes with exchange(0) and ORs into i_stat_.
