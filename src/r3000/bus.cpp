@@ -223,7 +223,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v51 (cmd_exec_over_pending)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v53 (revert_gpu_fast_path)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -3200,10 +3200,9 @@ void Bus::fire_vblank_external()
 
 void Bus::tick_peripherals(uint32_t cycles)
 {
-    // When external_vblank_ is active, the fast path in tick() already handles
-    // SIO0, CDROM, DMA3 deferred, and all timers (internal clock + Timer 2
-    // external clock) per-instruction. We only tick what the fast path doesn't:
-    // GPU, SPU, Timer 0/1 external clock, VBlank handling.
+    // When external_vblank_ is active, the fast path in tick() handles
+    // SIO0, CDROM, DMA3, all timers per-instruction. tick_peripherals
+    // handles GPU, SPU, Timer 0/1 external clock, VBlank.
 
     if (!external_vblank_)
     {
@@ -3214,38 +3213,25 @@ void Bus::tick_peripherals(uint32_t cycles)
     // ---- GPU tick ----
     uint32_t gpu_scanline_delta = 0;
     bool gpu_vblank_fired = false;
-
     if (gpu_)
     {
-        const uint32_t old_scanline = gpu_->current_scanline();
-        const uint32_t total_scanlines = gpu_->total_scanlines();
+        const uint32_t old_sl = gpu_->current_scanline();
+        const uint32_t tot_sl = gpu_->total_scanlines();
         gpu_vblank_fired = gpu_->tick_vblank(cycles) != 0;
-        const uint32_t new_scanline = gpu_->current_scanline();
-        if (total_scanlines != 0u)
-            gpu_scanline_delta = (new_scanline + total_scanlines - old_scanline) % total_scanlines;
+        const uint32_t new_sl = gpu_->current_scanline();
+        if (tot_sl != 0u) gpu_scanline_delta = (new_sl + tot_sl - old_sl) % tot_sl;
     }
 
-    // ---- Timer 0/1 external clock only (fast path skips these) ----
+    // ---- Timer 0/1 external clock (fast path skips these) ----
     for (int ch = 0; ch < 2; ++ch)
     {
         Timer& t = timers_[ch];
         if (!t.counting_enabled || !t.use_external_clock) continue;
         uint32_t inc = 0;
-        if (ch == 0)
-        {
-            timer_prescale_accum_[0] += cycles;
-            inc = timer_prescale_accum_[0] / 8;
-            timer_prescale_accum_[0] %= 8;
-        }
-        else
-        {
-            if (gpu_) inc = gpu_scanline_delta;
-            else { timer_prescale_accum_[1] += cycles * 263u; inc = timer_prescale_accum_[1] / 571088u; timer_prescale_accum_[1] %= 571088u; }
-        }
+        if (ch == 0) { timer_prescale_accum_[0] += cycles; inc = timer_prescale_accum_[0] / 8; timer_prescale_accum_[0] %= 8; }
+        else { if (gpu_) inc = gpu_scanline_delta; else { timer_prescale_accum_[1] += cycles * 263u; inc = timer_prescale_accum_[1] / 571088u; timer_prescale_accum_[1] %= 571088u; } }
         if (inc == 0) continue;
-        const uint32_t old_count = t.count;
-        t.count += inc;
-        timer_check_irq(ch, old_count);
+        const uint32_t old_count = t.count; t.count += inc; timer_check_irq(ch, old_count);
     }
 
     // ---- SPU ----
@@ -3256,7 +3242,7 @@ void Bus::tick_peripherals(uint32_t cycles)
     }
     if (spu_) spu_->tick_cycles(cycles);
 
-    // ---- VBlank handling ----
+    // ---- VBlank ----
     if (gpu_vblank_fired)
     {
         if (!(i_stat_ & (1u << 0))) i_stat_ |= (1u << 0);
@@ -3264,12 +3250,11 @@ void Bus::tick_peripherals(uint32_t cycles)
         if (gte_3d_) gte_3d_->swap_frame();
         if (gpu_3d_) gpu_3d_->on_vblank();
         if (hooks_ && hooks_->has_vblank()) hooks_->fire_vblank(vblank_total_count_);
-
         if (gpu_)
         {
             const auto& stats = gpu_->prev_frame_stats();
-            const uint32_t real_prims = stats.triangles + stats.quads + stats.rects + stats.lines + stats.fills;
-            if (real_prims > 0) { vblank_last_frame_ = vblank_total_count_; vblank_stuck_count_ = 0; vblank_stuck_logged_ = 0; }
+            const uint32_t rp = stats.triangles + stats.quads + stats.rects + stats.lines + stats.fills;
+            if (rp > 0) { vblank_last_frame_ = vblank_total_count_; vblank_stuck_count_ = 0; vblank_stuck_logged_ = 0; }
             else { vblank_stuck_count_++; if (vblank_stuck_logged_ && (vblank_stuck_count_ % 200) == 0) vblank_stuck_logged_ = 0; }
         }
     }
