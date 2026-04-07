@@ -501,6 +501,38 @@ void Bus::timer_update_counting(int ch)
     }
 }
 
+uint16_t Bus::timer_compute_count(int ch) const
+{
+    const Timer& t = timers_[ch];
+    if (!t.counting_enabled)
+        return (uint16_t)(t.count & 0xFFFFu);
+
+    // When timer threads are active, compute count from elapsed real time
+    if (timer_threads_running_.load(std::memory_order_relaxed))
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(now - t.start_time).count();
+        if (elapsed <= 0) return (uint16_t)(t.count & 0xFFFFu);
+
+        // Determine tick period based on clock source
+        double ns_per_tick = kSysclkPeriodNs;
+        if (t.use_external_clock)
+        {
+            if (ch == 0) ns_per_tick = kDotclkPeriodNs;
+            else if (ch == 1) return (uint16_t)(t.count & 0xFFFFu); // HBlank: GPU thread handles count
+            else if (ch == 2) ns_per_tick = kSysclk8PeriodNs;
+        }
+
+        const uint64_t ticks = (uint64_t)(elapsed / ns_per_tick);
+        const bool reset_at_target = (t.mode & 0x0008u) != 0;
+        const uint32_t period = reset_at_target ? ((uint32_t)t.target + 1u) : 0x10000u;
+        return (uint16_t)((t.count + ticks) % period);
+    }
+
+    // Legacy: return stored count (updated by fast path tick)
+    return (uint16_t)(t.count & 0xFFFFu);
+}
+
 void Bus::timer_check_irq(int ch, uint32_t old_count)
 {
     Timer& t = timers_[ch];
@@ -1048,7 +1080,7 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
             uint32_t val32 = 0;
             switch (reg)
             {
-            case 0: val32 = timers_[ch].count & 0xFFFFu; break;
+            case 0: val32 = timer_compute_count(ch); break;
             case 1: val32 = timers_[ch].mode; timers_[ch].mode &= ~0x1800u; break;
             case 2: val32 = timers_[ch].target; break;
             }
@@ -1230,7 +1262,7 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
         {
             switch (reg)
             {
-            case 0: out = (uint16_t)(timers_[ch].count & 0xFFFFu); break;
+            case 0: out = (uint16_t)(timer_compute_count(ch)); break;
             case 1:
                 out = (uint16_t)timers_[ch].mode;
                 timers_[ch].mode &= ~0x1800u;
@@ -1427,7 +1459,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
         {
             switch (reg)
             {
-            case 0: out = (uint16_t)(timers_[ch].count & 0xFFFFu); break;
+            case 0: out = (uint16_t)(timer_compute_count(ch)); break;
             case 1:
                 // Reading mode register returns current value then clears bits 11-12
                 // (target reached and overflow flags). This is PS1 hardware behavior.
@@ -3211,14 +3243,14 @@ void Bus::set_external_vblank(bool enabled)
         // Start IRQ threads: real-time hardware timing
         if (cdrom_) cdrom_->start_sector_thread();
         start_gpu_thread(true); // PAL default — TODO: detect from disc region
-        // Timer/SIO0/DMA: synchronous to CPU clock — stay on CPU thread.
-        // Only truly async hardware (GPU crystal, CD drive motor) gets threads.
-        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM)");
+        start_timer_threads();
+        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM + Timers)");
     }
     else
     {
         if (cdrom_) cdrom_->stop_sector_thread();
         stop_gpu_thread();
+        stop_timer_threads();
     }
 }
 
@@ -3571,7 +3603,9 @@ void Bus::tick(uint32_t cycles)
             cdrom_->tick(cycles);
             check_cdrom_irq_edge();
         }
-        // Tick hardware timers (needed for SIO0 timeout via Timer 2)
+        // Tick hardware timers — skip when timer threads handle IRQs
+        // (count is computed on-read via timer_compute_count)
+        if (!timer_threads_running_.load(std::memory_order_relaxed))
         for (int ch = 0; ch < 3; ++ch)
         {
             Timer& t = timers_[ch];

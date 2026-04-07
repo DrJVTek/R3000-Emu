@@ -305,6 +305,7 @@ class Bus
     void timer_check_irq(int ch, uint32_t old_count);
     void timer_write_mode(int ch, uint16_t v);
     void timer_update_counting(int ch);
+    uint16_t timer_compute_count(int ch) const; // on-read: compute from elapsed time
     void log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size);
 
     uint8_t scratch_[kScratchSize]{};
