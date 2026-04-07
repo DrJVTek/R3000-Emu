@@ -225,11 +225,11 @@ void Gpu::push_triangle(
 
         // Diagnostic: log first lookups with table state to debug empty-table issue
         static int lookup_diag = 0;
-        if (lookup_diag < 20 && frame_count_ > 30)
+        if (lookup_diag < 20 && frame_count_.load(std::memory_order_relaxed) > 30)
         {
             emu::logf(emu::LogLevel::warn, "GPU",
                 "CORR_LOOKUP #%d f=%u tbl_size=%u rec=%u key=(%d,%d)(%d,%d)(%d,%d) ofs=(%d,%d)",
-                lookup_diag, frame_count_,
+                lookup_diag, frame_count_.load(std::memory_order_relaxed),
                 (unsigned)gte_corr_->size(), gte_corr_->frame_records(),
                 key.sx[0], key.sy[0], key.sx[1], key.sy[1], key.sx[2], key.sy[2],
                 (int)draw_env_.offset_x, (int)draw_env_.offset_y);
@@ -285,7 +285,7 @@ void Gpu::push_triangle(
 
             // Diagnostic: log first N hits with full 3D data
             static int hit_log = 0;
-            if (hit_log < 10 && frame_count_ > 200)
+            if (hit_log < 10 && frame_count_.load(std::memory_order_relaxed) > 200)
             {
                 const auto& v0 = cmd3d.verts_3d[0];
                 const auto& v1 = cmd3d.verts_3d[1];
@@ -298,7 +298,7 @@ void Gpu::push_triangle(
                     "CORR HIT #%d f=%u tex=%d swap=%d sxy=(%d,%d)(%d,%d)(%d,%d) "
                     "model=(%d,%d,%d)(%d,%d,%d)(%d,%d,%d) "
                     "TR=(%d,%d,%d) camZ=(%d,%d,%d)",
-                    hit_log, frame_count_, (flags & 1) ? 1 : 0, swapped ? 1 : 0,
+                    hit_log, frame_count_.load(std::memory_order_relaxed), (flags & 1) ? 1 : 0, swapped ? 1 : 0,
                     key.sx[0], key.sy[0], key.sx[1], key.sy[1], key.sx[2], key.sy[2],
                     v0.vx, v0.vy, v0.vz, v1.vx, v1.vy, v1.vz, v2.vx, v2.vy, v2.vz,
                     t.tr[0], t.tr[1], t.tr[2], cz0, cz1, cz2);
@@ -312,13 +312,13 @@ void Gpu::push_triangle(
             static int miss_log = 0;
             static int miss_log_late = 0;
             const bool early = (miss_log < 10 && gte_corr_->size() > 10);
-            const bool late  = (miss_log_late < 20 && frame_count_ > 500
+            const bool late  = (miss_log_late < 20 && frame_count_.load(std::memory_order_relaxed) > 500
                                 && gte_corr_->size() > 100 && frame_stats_.corr_miss <= 3);
             if (early || late)
             {
                 emu::logf(emu::LogLevel::warn, "GPU",
                     "CORR MISS #%d/%d f=%u tex=%d key=(%d,%d)(%d,%d)(%d,%d) tbl=%u rec=%u hit=%u ofs=(%d,%d)",
-                    miss_log, miss_log_late, frame_count_, (flags & 1) ? 1 : 0,
+                    miss_log, miss_log_late, frame_count_.load(std::memory_order_relaxed), (flags & 1) ? 1 : 0,
                     key.sx[0], key.sy[0], key.sx[1], key.sy[1], key.sx[2], key.sy[2],
                     (unsigned)gte_corr_->size(), gte_corr_->frame_records(), gte_corr_->frame_hits(),
                     (int)draw_env_.offset_x, (int)draw_env_.offset_y);
@@ -373,7 +373,7 @@ int Gpu::tick_vblank(uint32_t cycles)
         // so both double-buffer halves overlap at the same coords.
         {
             std::lock_guard<std::mutex> lock(draw_list_mutex_);
-            draw_lists_[draw_active_].frame_id = frame_count_;
+            draw_lists_[draw_active_].frame_id = frame_count_.load(std::memory_order_relaxed);
             draw_lists_[draw_active_].draw_env = draw_env_;
             draw_lists_[draw_active_].display = display_;
             draw_active_ = 1 - draw_active_;
@@ -402,14 +402,14 @@ int Gpu::tick_vblank(uint32_t cycles)
                 // Log ONGOING: every frame for first 30, then every 100 frames
                 static int corr_log = 0;
                 const bool do_log = (corr_log < 30 && (ncmds > 0 || rec > 0))
-                    || (frame_count_ % 100 == 0 && ncmds > 0);
+                    || (frame_count_.load(std::memory_order_relaxed) % 100 == 0 && ncmds > 0);
                 if (do_log)
                 {
                     const int pct = (ncmds > 0) ? (int)(cnt_3d * 100 / ncmds) : 0;
                     emu::logf(emu::LogLevel::warn, "GPU",
                         "CORR f=%u: %u cmds (3D:%u=%d%% hud:%u rect:%u line:%u) "
                         "GTE_rec=%u GTE_hit=%u tbl=%u",
-                        frame_count_, (unsigned)ncmds, cnt_3d, pct, cnt_2d_hud,
+                        frame_count_.load(std::memory_order_relaxed), (unsigned)ncmds, cnt_3d, pct, cnt_2d_hud,
                         cnt_2d_rect, cnt_2d_line, rec, hit, (unsigned)sz);
                     ++corr_log;
                 }
@@ -422,25 +422,25 @@ int Gpu::tick_vblank(uint32_t cycles)
         }
 
         // Log frame stats
-        frame_count_++;
+        frame_count_.fetch_add(1, std::memory_order_release);
 
         // Log every 50 VBlanks (~1 second) to confirm timing
-        if ((frame_count_ % 50) == 1)
+        if ((frame_count_.load(std::memory_order_relaxed) % 50) == 1)
         {
             emu::logf(emu::LogLevel::info, "GPU", "VBlank #%u (%s, period=%u, field=%s)",
-                frame_count_, display_.is_pal ? "PAL" : "NTSC", period,
+                frame_count_.load(std::memory_order_relaxed), display_.is_pal ? "PAL" : "NTSC", period,
                 even_odd_field_ ? "odd" : "even");
         }
 
         const auto& s = frame_stats_;
         // Log at INFO level for frames 280-295 to debug the transition
-        const auto log_level = (frame_count_ >= 280 && frame_count_ <= 295)
+        const auto log_level = (frame_count_.load(std::memory_order_relaxed) >= 280 && frame_count_.load(std::memory_order_relaxed) <= 295)
             ? emu::LogLevel::info : emu::LogLevel::debug;
-        if (s.total_words > 0 || (frame_count_ >= 280 && frame_count_ <= 295))
+        if (s.total_words > 0 || (frame_count_.load(std::memory_order_relaxed) >= 280 && frame_count_.load(std::memory_order_relaxed) <= 295))
         {
             emu::logf(log_level, "GPU", "FRAME #%u: %u tri, %u quad, %u rect, %u line, %u fill, "
                 "%u v2v, %u c2v, %u v2c, %u env | %u words",
-                frame_count_, s.triangles, s.quads, s.rects, s.lines, s.fills,
+                frame_count_.load(std::memory_order_relaxed), s.triangles, s.quads, s.rects, s.lines, s.fills,
                 s.vram_to_vram, s.cpu_to_vram, s.vram_to_cpu, s.env_cmds, s.total_words);
             emu::logf(log_level, "GPU", "  DRAWENV clip=(%u,%u)-(%u,%u) ofs=(%d,%d) | "
                 "DISP start=(%u,%u) wh=(%u,%u) | draw_list=%zu tris",
@@ -494,18 +494,17 @@ void Gpu::tick_vblank_swap_only()
     // Full VBlank processing — called from GPU thread or fire_vblank_external.
     // Does everything tick_vblank() does at the VBlank boundary.
 
-    // Save prev frame stats before reset
-    prev_frame_stats_ = frame_stats_;
-
     // Toggle field (games poll GPUSTAT bit 31 to detect VSync)
-    even_odd_field_ = !even_odd_field_;
+    even_odd_field_.store(!even_odd_field_.load(std::memory_order_relaxed), std::memory_order_release);
     if (display_.interlace)
-        status_ ^= (1u << 13);
+        status_ ^= (1u << 13); // TODO: make status_ atomic if needed
 
-    // Swap draw lists
+    // Swap draw lists + frame stats (under lock — CPU thread also accesses frame_stats_)
     {
         std::lock_guard<std::mutex> lock(draw_list_mutex_);
-        draw_lists_[draw_active_].frame_id = frame_count_;
+        prev_frame_stats_ = frame_stats_;
+        frame_stats_ = FrameStats{};
+        draw_lists_[draw_active_].frame_id = frame_count_.load(std::memory_order_relaxed);
         draw_lists_[draw_active_].draw_env = draw_env_;
         draw_lists_[draw_active_].display = display_;
         draw_active_ = 1 - draw_active_;
@@ -514,8 +513,7 @@ void Gpu::tick_vblank_swap_only()
         vram_frame_++;
     }
 
-    ++frame_count_;
-    frame_stats_ = FrameStats{};
+    frame_count_.fetch_add(1, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -681,7 +679,7 @@ Stage67GpuDebug Gpu::stage67_debug() const
     d.interlace = display_.interlace ? 1u : 0u;
     d.in_vblank = in_vblank_ ? 1u : 0u;
     d.even_odd_field = even_odd_field_ ? 1u : 0u;
-    d.frame_count = frame_count_;
+    d.frame_count = frame_count_.load(std::memory_order_relaxed);
     return d;
 }
 
@@ -1357,7 +1355,7 @@ void Gpu::gp0_vram_to_vram()
         {
             ++v2v_log;
             emu::logf(emu::LogLevel::warn, "CORE", "VRAM->VRAM #%u (%u,%u)->(%u,%u) %ux%u frame=%u",
-                v2v_log, sx, sy, dx, dy, w, h, frame_count_);
+                v2v_log, sx, sy, dx, dy, w, h, frame_count_.load(std::memory_order_relaxed));
         }
     }
     emu::logf(emu::LogLevel::debug, "GPU", "GP0 VRAM->VRAM (%u,%u)->(%u,%u) %ux%u",
@@ -1395,7 +1393,7 @@ void Gpu::gp0_cpu_to_vram_start()
         {
             ++li_count;
             emu::logf(emu::LogLevel::warn, "CORE", "LoadImage #%u (%u,%u) %ux%u frame=%u",
-                li_count, cpu_vram_x_, cpu_vram_y_, cpu_vram_w_, cpu_vram_h_, frame_count_);
+                li_count, cpu_vram_x_, cpu_vram_y_, cpu_vram_w_, cpu_vram_h_, frame_count_.load(std::memory_order_relaxed));
         }
     }
 

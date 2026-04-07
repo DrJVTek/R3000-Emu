@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -404,11 +405,11 @@ class Gpu
     // Draw environment
     DrawEnv draw_env_{};
 
-    // Frame statistics
+    // Frame statistics (frame_stats_ written by CPU, read/reset by GPU thread)
     FrameStats frame_stats_{};
-    FrameStats prev_frame_stats_{};  // Saved before reset for stuck detection
-    uint32_t frame_count_{0};
-    uint32_t vram_frame_{0};
+    FrameStats prev_frame_stats_{};
+    std::atomic<uint32_t> frame_count_{0};  // GPU thread writes, UE5 render reads
+    std::atomic<uint32_t> vram_frame_{0};   // GPU thread writes, UE5 render reads
 
     // Display configuration (GP1)
     DisplayConfig display_{};
@@ -434,7 +435,7 @@ class Gpu
 
     uint32_t vblank_div_{0};
     bool in_vblank_{false};
-    bool even_odd_field_{false}; // Toggles each VBlank for GPUSTAT bit 31
+    std::atomic<bool> even_odd_field_{false}; // GPU thread toggles, CPU reads via GPUSTAT
 
     // PAL: 33868800 Hz / 49.76 Hz ≈ 680688 CPU cycles per frame
     // NTSC: 33868800 Hz / 59.29 Hz ≈ 571088 CPU cycles per frame
