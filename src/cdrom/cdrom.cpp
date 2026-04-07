@@ -3265,7 +3265,11 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // from ACK — let the timer handle it. This gives the game time
                 // to send Pause/SetLoc before the next sector arrives.
                 // ACK-driven: schedule next sector after ACK.
-                else if (reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
+                // Skip when sector thread is active — the thread handles timing.
+                // The ACK-driven code re-arms pending_irq with a future due that
+                // prevents the sector thread signal from being delivered.
+                else if (!sector_thread_running_.load(std::memory_order_relaxed) &&
+                         reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     pending_irq_type_ = 0x01;
                     pending_irq_resp_ = status_;

@@ -321,16 +321,20 @@ std::string DebugServer::cmd_read_game_state()
 
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-        "{\"state_machine\":%u,\"video_index\":%u,"
+        "{\"state\":%u,\"vidx\":%u,"
         "\"dd9c0\":%u,\"dd9ac\":%u,"
         "\"cb6e4\":\"0x%08X\","
         "\"cd2e0\":\"0x%08X\",\"cd2e4\":\"0x%08X\","
-        "\"sw_mask\":\"0x%04X\",\"cd_handler\":\"0x%08X\"}",
+        "\"sw_mask\":\"0x%04X\",\"cd_handler\":\"0x%08X\","
+        "\"sync_flag\":%u,\"ready_flag\":%u,"
+        "\"d1540\":%u,\"d1528\":%u}",
         rd32(0x800d19ac), rd32(0x800d19b4),
         rd32(0x800dd9c0), rd32(0x800dd9ac),
         rd32(0x800cb6e4),
         rd32(0x800cd2e0), rd32(0x800cd2e4),
-        rd32(0x800cb7b0), rd32(0x800cb78c));
+        rd32(0x800cb7b0), rd32(0x800cb78c),
+        rd32(0x800cd5bc) & 0xFF, rd32(0x800cd5bd) & 0xFF,
+        rd32(0x800d1540), rd32(0x800d1528));
     return buf;
 }
 
