@@ -223,7 +223,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v53 (revert_gpu_fast_path)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v54 (fix_cop0_reg9_not_count)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));

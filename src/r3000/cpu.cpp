@@ -3242,8 +3242,12 @@ Cpu::StepResult Cpu::step()
     last_instr_cycles_ = 1; // reset for next instruction
     last_multiplied_cycles_ = instr_cycles; // store for last_cycles() getter
 
-    // COP0 Count: used by BIOS for delays (busy-wait / timeouts).
-    cop0_[COP0_COUNT] += instr_cycles;
+    // R3000A COP0 reg 9 = BDAM (Data Access Breakpoint Mask), NOT Count.
+    // The R4000 has Count at reg 9 but the PS1 R3000A does not.
+    // Games (Soul Reaver) read reg 9 via mfc0 expecting 0 (unused BDAM).
+    // Incrementing it as a cycle counter caused a garbage pointer to be
+    // used as CdlLOC for ReadS → SetLoc 00:00:00 → game stall.
+    // cop0_[COP0_COUNT] += instr_cycles;  // REMOVED — not a real R3000A register
     // Bus tick: advance hardware (timers, VBlank, SPU, SIO).
     bus_tick_accum_ += instr_cycles;
     if (bus_tick_accum_ >= bus_tick_batch_)
