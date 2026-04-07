@@ -155,6 +155,8 @@ class Cdrom
     uint8_t want_data_debug() const { return want_data_; }
     uint8_t data_ready_pending_debug() const { return data_ready_pending_; }
     uint32_t int1_deliver_count_debug() const { return int1_deliver_count_; }
+    uint32_t sector_fire_count_debug() const { return sector_thread_fire_count_.load(std::memory_order_relaxed); }
+    uint32_t sector_consumed_count_debug() const { return sector_signal_consumed_count_.load(std::memory_order_relaxed); }
     uint32_t resp_count_debug() const { return (resp_w_ >= resp_r_) ? (resp_w_ - resp_r_) : (32 - resp_r_ + resp_w_); }
     void log_external(const char* fmt, ...);  // Log via cdrom file logger (for UE5)
     uint64_t now_cycles_debug() const { return now_cycles_; }
@@ -279,6 +281,8 @@ class Cdrom
     std::thread sector_thread_;
     std::atomic<bool> sector_thread_running_{false};
     std::atomic<uint8_t> sector_thread_signal_{0}; // 1 = sector timer fired, CPU should deliver
+    std::atomic<uint32_t> sector_thread_fire_count_{0}; // debug: signals sent by thread
+    std::atomic<uint32_t> sector_signal_consumed_count_{0}; // debug: signals consumed by tick
 
     // XA-ADPCM decoder + SPU output
     audio::Spu* spu_{nullptr};

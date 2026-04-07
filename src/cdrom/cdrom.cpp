@@ -1453,6 +1453,7 @@ void Cdrom::start_sector_thread()
             if (reading_active_ && sector_thread_signal_.load(std::memory_order_acquire) == 0)
             {
                 sector_thread_signal_.store(1, std::memory_order_release);
+                sector_thread_fire_count_.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
@@ -3445,6 +3446,7 @@ void Cdrom::tick(uint32_t cycles)
         sector_thread_signal_.load(std::memory_order_acquire) != 0)
     {
         consume_sector_signal();
+        sector_signal_consumed_count_.fetch_add(1, std::memory_order_relaxed);
         // Sector thread says: a sector interval has passed in real time.
         // Set pending INT1 for immediate delivery. Override any existing
         // pending that has a future due (e.g., from read_pending_irq1_
@@ -3499,10 +3501,27 @@ void Cdrom::tick(uint32_t cycles)
     // Deliver pending async IRQs after delay expires.
     if (pending_irq_type_ != 0)
     {
-        // Deliver once the absolute due cycle is reached and the minimum
-        // post-ACK quiet time has elapsed.
-        if (now_cycles_ >= pending_irq_due_cycle_ && (irq_flags_ & 0x1Fu) == 0u &&
-            now_cycles_ >= next_irq_ready_cycle_)
+        const bool cond_due = (now_cycles_ >= pending_irq_due_cycle_);
+        const bool cond_flags = ((irq_flags_ & 0x1Fu) == 0u);
+        const bool cond_ready = (now_cycles_ >= next_irq_ready_cycle_);
+        // Debug: trace delivery failures (once per 1M cycles)
+        if (!cond_due || !cond_flags || !cond_ready)
+        {
+            static uint64_t last_fail_trace = 0;
+            if (now_cycles_ > last_fail_trace + 1000000)
+            {
+                last_fail_trace = now_cycles_;
+                emu::logf(emu::LogLevel::warn, "CD_DLVR",
+                    "FAIL: due=%d flags=%d ready=%d pend=%u now=%llu due=%llu ready=%llu irqf=0x%02X",
+                    (int)cond_due, (int)cond_flags, (int)cond_ready,
+                    (unsigned)pending_irq_type_,
+                    (unsigned long long)now_cycles_,
+                    (unsigned long long)pending_irq_due_cycle_,
+                    (unsigned long long)next_irq_ready_cycle_,
+                    irq_flags_);
+            }
+        }
+        if (cond_due && cond_flags && cond_ready)
         {
             const uint32_t deliver_read_lba = read_lba_;
             const uint32_t deliver_data_lba = data_lba_;

@@ -256,7 +256,7 @@ std::string DebugServer::cmd_read_cdrom()
         "\"now_cycles\":%llu,"
         "\"pend_type\":%u,\"pend_due\":%llu,\"irq_ready\":%llu,"
         "\"read_due\":%llu,\"want_data\":%d,\"data_ready\":%d,"
-        "\"int1_count\":%u}",
+        "\"int1_count\":%u,\"sig_fire\":%u,\"sig_consumed\":%u}",
         cd->read_lba_debug(), cd->irq_flags_debug(),
         cd->is_reading_active() ? 1 : 0,
         (unsigned long long)cd->now_cycles_debug(),
@@ -266,7 +266,9 @@ std::string DebugServer::cmd_read_cdrom()
         (unsigned long long)cd->next_read_due_debug(),
         (int)cd->want_data_debug(),
         (int)cd->data_ready_pending_debug(),
-        cd->int1_deliver_count_debug());
+        cd->int1_deliver_count_debug(),
+        cd->sector_fire_count_debug(),
+        cd->sector_consumed_count_debug());
     return buf;
 }
 
