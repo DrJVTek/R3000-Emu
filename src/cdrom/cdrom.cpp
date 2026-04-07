@@ -3450,7 +3450,7 @@ void Cdrom::tick(uint32_t cycles)
         // If pending INT3 (info cmd), don't block — thread will re-signal
     }
 
-    // Cycle-based timer-driven read (fallback when sector thread is not active).
+    // Cycle-based timer-driven read (legacy — will be removed when sector thread is active).
     if (!sector_thread_running_.load(std::memory_order_relaxed) &&
         next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
         {
