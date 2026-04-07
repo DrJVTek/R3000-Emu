@@ -275,7 +275,7 @@ Bus::Bus(
 
 Bus::~Bus()
 {
-    stop_vblank_thread();
+    stop_gpu_thread();
 
     if (wav_writer_)
     {
@@ -3185,13 +3185,13 @@ void Bus::set_external_vblank(bool enabled)
     {
         // Start IRQ threads: real-time hardware timing
         if (cdrom_) cdrom_->start_sector_thread();
-        start_vblank_thread(true); // PAL default — TODO: detect from disc region
-        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (VBlank + CDROM sector)");
+        start_gpu_thread(true); // PAL default — TODO: detect from disc region
+        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU scanline + CDROM sector)");
     }
     else
     {
         if (cdrom_) cdrom_->stop_sector_thread();
-        stop_vblank_thread();
+        stop_gpu_thread();
     }
 }
 
@@ -3205,44 +3205,108 @@ void Bus::fire_vblank_external()
         gpu_->tick_vblank_swap_only();
 }
 
-void Bus::start_vblank_thread(bool pal)
+void Bus::fire_hblank_external()
 {
-    stop_vblank_thread();
-    vblank_thread_pal_ = pal;
-    vblank_thread_running_.store(true, std::memory_order_release);
-    vblank_thread_ = std::thread([this]() {
-        // PAL = 50Hz (20ms), NTSC = 60Hz (16.67ms)
-        const auto interval = vblank_thread_pal_
-            ? std::chrono::microseconds(20000)
-            : std::chrono::microseconds(16667);
+    // Timer 1 external clock: increment count on each HBlank
+    Timer& t1 = timers_[1];
+    if (t1.counting_enabled && t1.use_external_clock)
+    {
+        const uint32_t old_count = t1.count;
+        t1.count += 1;
 
-        emu::logf(emu::LogLevel::warn, "VBLANK_THREAD",
-            "Started (%s, %lld us)",
-            vblank_thread_pal_ ? "PAL" : "NTSC",
-            (long long)std::chrono::duration_cast<std::chrono::microseconds>(interval).count());
+        // Check target/overflow — fire IRQ via atomic if needed
+        bool irq = false;
+        if (t1.count >= t1.target && (old_count < t1.target || t1.target == 0))
+        {
+            if (t1.mode & 0x0010u) irq = true;
+            t1.mode |= 0x0800u;
+            if (t1.mode & 0x0008u)
+                t1.count %= ((uint32_t)t1.target + 1u);
+        }
+        if (t1.count > 0xFFFFu)
+        {
+            if (t1.mode & 0x0020u) irq = true;
+            t1.mode |= 0x1000u;
+            t1.count &= 0xFFFFu;
+        }
+        if (irq)
+        {
+            const bool pulse_n = (t1.mode & 0x0080u) != 0;
+            const bool repeat  = (t1.mode & 0x0040u) != 0;
+            if (!pulse_n)
+            {
+                if (!t1.irq_done || repeat)
+                    fire_irq_external(5); // I_STAT bit 5 = Timer 1
+                t1.irq_done = true;
+                t1.mode |= 0x0400u;
+            }
+            else
+            {
+                t1.mode ^= 0x0400u;
+                if (!(t1.mode & 0x0400u))
+                    fire_irq_external(5);
+            }
+        }
+    }
 
-        auto next = std::chrono::steady_clock::now() + interval;
-        while (vblank_thread_running_.load(std::memory_order_acquire))
+    // TODO: Timer 0/1 gate signals (HBlank gate for Timer 0, VBlank gate for Timer 1)
+}
+
+void Bus::start_gpu_thread(bool pal)
+{
+    stop_gpu_thread();
+    gpu_thread_pal_ = pal;
+    gpu_thread_running_.store(true, std::memory_order_release);
+    gpu_thread_ = std::thread([this]() {
+        // Scanline timing:
+        // PAL:  314 scanlines/frame, 50 frames/s → ~63.7µs per scanline
+        // NTSC: 263 scanlines/frame, 60 frames/s → ~63.5µs per scanline
+        const uint32_t scanlines_per_frame = gpu_thread_pal_ ? 314u : 263u;
+        const uint32_t vblank_start = gpu_thread_pal_ ? 288u : 240u;
+        const auto scanline_interval = gpu_thread_pal_
+            ? std::chrono::nanoseconds(63694)  // 20ms / 314
+            : std::chrono::nanoseconds(63492); // 16.67ms / 263
+
+        emu::logf(emu::LogLevel::warn, "GPU_THREAD",
+            "Started (%s, %u scanlines, VBlank@%u, %lld ns/line)",
+            gpu_thread_pal_ ? "PAL" : "NTSC",
+            scanlines_per_frame, vblank_start,
+            (long long)scanline_interval.count());
+
+        uint32_t scanline = 0;
+        auto next = std::chrono::steady_clock::now() + scanline_interval;
+
+        while (gpu_thread_running_.load(std::memory_order_acquire))
         {
             std::this_thread::sleep_until(next);
-            next += interval;
+            next += scanline_interval;
 
-            // Fire VBlank IRQ — exactly like real hardware:
-            // the GPU's VBlank signal goes high, latching I_STAT bit 0
-            fire_vblank_external();
+            // HBlank fires at end of each scanline
+            fire_hblank_external();
+
+            scanline++;
+            if (scanline == vblank_start)
+            {
+                // VBlank start
+                fire_vblank_external();
+            }
+            if (scanline >= scanlines_per_frame)
+            {
+                scanline = 0;
+            }
         }
 
-        emu::logf(emu::LogLevel::warn, "VBLANK_THREAD", "Stopped");
+        emu::logf(emu::LogLevel::warn, "GPU_THREAD", "Stopped");
     });
 }
 
-void Bus::stop_vblank_thread()
+void Bus::stop_gpu_thread()
 {
-    if (vblank_thread_running_.load(std::memory_order_acquire))
+    if (gpu_thread_running_.load(std::memory_order_acquire))
     {
-        vblank_thread_running_.store(false, std::memory_order_release);
-        if (vblank_thread_.joinable())
-            vblank_thread_.join();
+        gpu_thread_running_.store(false, std::memory_order_release);
+        if (gpu_thread_.joinable())
+            gpu_thread_.join();
     }
 }
 
@@ -3260,30 +3324,8 @@ void Bus::tick_peripherals(uint32_t cycles)
         return;
     }
 
-    // ---- GPU scanline (for Timer 1 HBlank clock) ----
-    // VBlank IRQ is handled by the VBlank thread via fire_irq_external(0).
-    // We still tick the GPU scanline counter for Timer 1 external clock.
-    uint32_t gpu_scanline_delta = 0;
-    if (gpu_)
-    {
-        const uint32_t old_sl = gpu_->current_scanline();
-        const uint32_t tot_sl = gpu_->total_scanlines();
-        gpu_->tick_vblank(cycles); // scanline counter only — VBlank IRQ from thread
-        const uint32_t new_sl = gpu_->current_scanline();
-        if (tot_sl != 0u) gpu_scanline_delta = (new_sl + tot_sl - old_sl) % tot_sl;
-    }
-
-    // ---- Timer 0/1 external clock (fast path skips these) ----
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        Timer& t = timers_[ch];
-        if (!t.counting_enabled || !t.use_external_clock) continue;
-        uint32_t inc = 0;
-        if (ch == 0) { timer_prescale_accum_[0] += cycles; inc = timer_prescale_accum_[0] / 8; timer_prescale_accum_[0] %= 8; }
-        else { if (gpu_) inc = gpu_scanline_delta; else { timer_prescale_accum_[1] += cycles * 263u; inc = timer_prescale_accum_[1] / 571088u; timer_prescale_accum_[1] %= 571088u; } }
-        if (inc == 0) continue;
-        const uint32_t old_count = t.count; t.count += inc; timer_check_irq(ch, old_count);
-    }
+    // GPU scanline + Timer 1 HBlank: handled by GPU thread (fire_hblank_external).
+    // Timer 0 dotclock: still ticked in fast path (per instruction).
 
     // ---- SPU ----
     if (cycles != 0)

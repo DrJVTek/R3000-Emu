@@ -144,6 +144,11 @@ class Bus
     // bits at the start of each tick() via consume_ext_irq().
     void fire_irq_external(uint32_t bit) { irq_ext_pending_.fetch_or(1u << bit, std::memory_order_release); }
 
+    // HBlank signal from GPU thread: increments Timer 1 (external clock)
+    // and fires Timer 1 IRQ if target/overflow reached.
+    // Thread-safe: Timer 1 IRQ goes through irq_ext_pending_.
+    void fire_hblank_external();
+
     // Accès device (pour HLE BIOS côté CPU).
     cdrom::Cdrom* cdrom() const { return cdrom_; }
 
@@ -155,10 +160,11 @@ class Bus
     void fire_vblank_external();
     void set_external_vblank(bool enabled);
 
-    // VBlank IRQ thread: fires I_STAT bit 0 at real-time intervals.
-    // PAL = 50Hz (~20ms), NTSC = 60Hz (~16.67ms).
-    void start_vblank_thread(bool pal = true);
-    void stop_vblank_thread();
+    // GPU scanline thread: fires HBlank (~15.7kHz) and VBlank (50/60Hz).
+    // HBlank increments Timer 1 (external clock) and gates Timer 0/1.
+    // VBlank fires I_STAT bit 0.
+    void start_gpu_thread(bool pal = true);
+    void stop_gpu_thread();
 
     // Tick peripherals (timers, SIO0, SPU, CDROM) separately from the CPU.
     // Called from worker thread at regular intervals instead of per-instruction.
@@ -366,10 +372,10 @@ class Bus
     bool external_vblank_{false}; // When true, VBlank is fired externally, not from tick()
     std::atomic<uint8_t> vblank_ext_pending_{0}; // Legacy (kept for compat, unused in IRQ thread model)
 
-    // VBlank IRQ thread
-    std::thread vblank_thread_;
-    std::atomic<bool> vblank_thread_running_{false};
-    bool vblank_thread_pal_{true};
+    // GPU scanline thread (HBlank + VBlank)
+    std::thread gpu_thread_;
+    std::atomic<bool> gpu_thread_running_{false};
+    bool gpu_thread_pal_{true};
 
     // IRQ thread model: external threads set bits here via fetch_or.
     // CPU thread consumes with exchange(0) and ORs into i_stat_.
