@@ -147,9 +147,24 @@ class Bus
     void set_i_stat_bit(uint32_t bit) { i_stat_ |= (1u << bit); }
 
     // IRQ thread model: external threads call this to fire an IRQ.
-    // Thread-safe (atomic fetch_or). The CPU thread consumes pending
-    // bits at the start of each tick() via consume_ext_irq().
-    void fire_irq_external(uint32_t bit) { irq_ext_pending_.fetch_or(1u << bit, std::memory_order_release); }
+    // Thread-safe (atomic fetch_or). Also wakes the CPU from throttle
+    // sleep via condition_variable — like a real IRQ waking a halted CPU.
+    void fire_irq_external(uint32_t bit)
+    {
+        irq_ext_pending_.fetch_or(1u << bit, std::memory_order_release);
+        // Wake CPU from throttle sleep (no-op if CPU is executing)
+        irq_wake_cv_.notify_one();
+    }
+
+    // CPU throttle: sleep until cycle_debt refills OR an IRQ wakes us.
+    // Returns immediately if an IRQ is pending.
+    void wait_for_irq_or_timeout(std::chrono::microseconds timeout)
+    {
+        std::unique_lock<std::mutex> lk(irq_wake_mutex_);
+        irq_wake_cv_.wait_for(lk, timeout, [this]() {
+            return irq_ext_pending_.load(std::memory_order_relaxed) != 0;
+        });
+    }
 
     // HBlank signal from GPU thread: increments Timer 1 (external clock)
     // and fires Timer 1 IRQ if target/overflow reached.
@@ -418,6 +433,12 @@ class Bus
     // CPU thread consumes with exchange(0) and ORs into i_stat_.
     // This replaces the per-source deferred flags with a single atomic register.
     std::atomic<uint32_t> irq_ext_pending_{0};
+
+    // IRQ wake: condition_variable to wake CPU from throttle sleep.
+    // Like a real IRQ line waking a halted processor.
+    std::mutex irq_wake_mutex_;
+    std::condition_variable irq_wake_cv_;
+
     // DMA3 DREQ gating: if CDROM FIFO is empty when DMA3 starts, defer until FIFO fills.
     uint8_t dma3_pending_{0};
     mdec::Mdec* mdec_{nullptr};     // Real MDEC decoder (owned by Core)

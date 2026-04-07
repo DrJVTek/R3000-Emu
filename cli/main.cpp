@@ -1511,9 +1511,11 @@ int main(int argc, char** argv)
             periph_accum = 0;
         }
 
-        // Sleep when ahead of real time
-        if (running && cycle_debt <= 0.0)
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        // Wait for IRQ or timeout — like a real CPU in idle/halt state.
+        // An IRQ thread (VBlank, timer) can wake us immediately instead
+        // of waiting the full 100µs. Zero-latency IRQ delivery.
+        if (running && cycle_debt <= 0.0 && core.bus())
+            core.bus()->wait_for_irq_or_timeout(std::chrono::microseconds(100));
     }
 
     // --- 3D diagnostic summary ---
