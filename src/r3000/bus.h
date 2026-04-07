@@ -282,16 +282,22 @@ class Bus
 
     struct Timer
     {
-        // All fields atomic: CPU thread writes (timer_write_mode),
-        // GPU thread reads (fire_hblank_external for Timer 1).
-        // No locks — atomics only, like real hardware signals.
-        std::atomic<uint32_t> count{0};
-        std::atomic<uint16_t> mode{0};
-        std::atomic<uint16_t> target{0};
-        std::atomic<bool> irq_done{false};
-        std::atomic<bool> counting_enabled{true};
-        std::atomic<bool> use_external_clock{false};
-        std::atomic<bool> gate{false};
+        // Accessed by CPU thread primarily. GPU thread and timer threads
+        // read via volatile-like access — on x86 this is safe for
+        // naturally-aligned types. The reconfig atomic is the only
+        // true cross-thread signal.
+        uint32_t count{0};
+        uint16_t mode{0};
+        uint16_t target{0};
+        bool irq_done{false};
+        bool counting_enabled{true};
+        bool use_external_clock{false};
+        bool gate{false};
+
+        // Timer thread: reconfigure signal (game wrote mode/target)
+        std::atomic<uint8_t> reconfig{0};
+        // Timestamp when count was last reset (for on-read computation)
+        std::chrono::steady_clock::time_point start_time{};
     };
 
     void timer_check_irq(int ch, uint32_t old_count);
@@ -379,6 +385,13 @@ class Bus
     std::thread gpu_thread_;
     std::atomic<bool> gpu_thread_running_{false};
     bool gpu_thread_pal_{true};
+
+    // Timer threads (one per channel)
+    std::thread timer_threads_[3];
+    std::atomic<bool> timer_threads_running_{false};
+    void start_timer_threads();
+    void stop_timer_threads();
+    void timer_thread_func(int ch);
 
     // IRQ thread model: external threads set bits here via fetch_or.
     // CPU thread consumes with exchange(0) and ORs into i_stat_.

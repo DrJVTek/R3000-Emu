@@ -276,6 +276,7 @@ Bus::Bus(
 Bus::~Bus()
 {
     stop_gpu_thread();
+    stop_timer_threads();
 
     if (wav_writer_)
     {
@@ -441,6 +442,10 @@ void Bus::timer_write_mode(int ch, uint16_t v)
 
     timer_update_counting(ch);
     timer_check_irq(ch, t.count);
+
+    // Signal timer thread to recalculate its sleep
+    t.reconfig.store(1, std::memory_order_release);
+    t.start_time = std::chrono::steady_clock::now();
 }
 
 void Bus::timer_update_counting(int ch)
@@ -3186,12 +3191,14 @@ void Bus::set_external_vblank(bool enabled)
         // Start IRQ threads: real-time hardware timing
         if (cdrom_) cdrom_->start_sector_thread();
         start_gpu_thread(true); // PAL default — TODO: detect from disc region
-        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU scanline + CDROM sector)");
+        start_timer_threads();
+        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + CDROM + Timers)");
     }
     else
     {
         if (cdrom_) cdrom_->stop_sector_thread();
         stop_gpu_thread();
+        stop_timer_threads();
     }
 }
 
@@ -3307,6 +3314,123 @@ void Bus::stop_gpu_thread()
         gpu_thread_running_.store(false, std::memory_order_release);
         if (gpu_thread_.joinable())
             gpu_thread_.join();
+    }
+}
+
+// ================== TIMER THREADS ==================
+
+static constexpr double kSysclkPeriodNs = 1e9 / 33868800.0;  // ~29.5ns
+static constexpr double kSysclk8PeriodNs = kSysclkPeriodNs * 8.0; // ~236ns
+static constexpr double kDotclkPeriodNs = 1e9 / 5322240.0;   // ~188ns (320px)
+
+void Bus::timer_thread_func(int ch)
+{
+    emu::logf(emu::LogLevel::warn, "TMR_THREAD", "Timer %d thread started", ch);
+
+    while (timer_threads_running_.load(std::memory_order_acquire))
+    {
+        Timer& t = timers_[ch];
+
+        if (!t.counting_enabled ||
+            t.use_external_clock)
+        {
+            // Not counting or using external clock (HBlank/dotclock handled elsewhere)
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            continue;
+        }
+
+        // Compute ticks until next IRQ event
+        const uint16_t mode = t.mode;
+        const uint16_t target = t.target;
+        const uint32_t count = t.count;
+        const bool irq_at_target = (mode & 0x0010u) != 0;
+        const bool irq_on_overflow = (mode & 0x0020u) != 0;
+
+        if (!irq_at_target && !irq_on_overflow)
+        {
+            // No IRQ configured — sleep and recheck
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            continue;
+        }
+
+        // Determine clock period
+        double ns_per_tick = kSysclkPeriodNs;
+        if (ch == 2 && t.use_external_clock)
+            ns_per_tick = kSysclk8PeriodNs;
+
+        // Calculate ticks until next event
+        uint32_t ticks_to_event = 0xFFFF; // default: overflow from current count
+
+        if (irq_at_target && target > 0 && count < target)
+            ticks_to_event = target - count;
+        else if (irq_on_overflow && count <= 0xFFFF)
+            ticks_to_event = 0x10000 - count;
+
+        if (ticks_to_event == 0) ticks_to_event = 1;
+
+        // Sleep for the computed duration
+        const auto sleep_ns = std::chrono::nanoseconds((int64_t)(ticks_to_event * ns_per_tick));
+
+        // Cap sleep to 2ms max — recheck config regularly
+        const auto max_sleep = std::chrono::microseconds(2000);
+        const auto actual_sleep = (sleep_ns < max_sleep) ? sleep_ns : max_sleep;
+
+        std::this_thread::sleep_for(actual_sleep);
+
+        // Check if game reconfigured the timer while we slept
+        if (t.reconfig.exchange(0, std::memory_order_acquire))
+            continue; // recalculate
+
+        // If we slept the full duration (not capped), fire the IRQ
+        if (sleep_ns <= max_sleep)
+        {
+            // Advance count
+            t.count = (count + ticks_to_event) & 0xFFFF;
+
+            // Fire IRQ via atomic
+            const bool pulse_n = (mode & 0x0080u) != 0;
+            const bool repeat = (mode & 0x0040u) != 0;
+            if (!pulse_n)
+            {
+                if (!t.irq_done || repeat)
+                    fire_irq_external(4 + ch);
+                t.irq_done = true;
+                t.mode |= 0x0400u;
+            }
+            else
+            {
+                uint16_t old_mode = t.mode; t.mode ^= 0x0400u;
+                if (old_mode & 0x0400u) // was 1, now 0 → fire
+                    fire_irq_external(4 + ch);
+            }
+
+            // Set reached flags
+            if (irq_at_target && target > 0 && (count + ticks_to_event) >= target)
+                t.mode |= 0x0800u;
+            if ((count + ticks_to_event) > 0xFFFF)
+                t.mode |= 0x1000u;
+        }
+    }
+
+    emu::logf(emu::LogLevel::warn, "TMR_THREAD", "Timer %d thread stopped", ch);
+}
+
+void Bus::start_timer_threads()
+{
+    stop_timer_threads();
+    timer_threads_running_.store(true, std::memory_order_release);
+    for (int ch = 0; ch < 3; ++ch)
+        timer_threads_[ch] = std::thread(&Bus::timer_thread_func, this, ch);
+}
+
+void Bus::stop_timer_threads()
+{
+    if (timer_threads_running_.load(std::memory_order_acquire))
+    {
+        timer_threads_running_.store(false, std::memory_order_release);
+        for (int ch = 0; ch < 3; ++ch)
+            if (timer_threads_[ch].joinable())
+                timer_threads_[ch].join();
     }
 }
 
