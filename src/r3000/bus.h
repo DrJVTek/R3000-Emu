@@ -138,6 +138,11 @@ class Bus
     // Debug: SIO0 status for diagnostic tracing
     uint16_t sio0_stat_debug() const;
 
+    // Debug: timer accessors for debug server
+    uint16_t timer_compute_count(int ch) const;
+    uint16_t timer_mode(int ch) const { return timers_[ch].mode; }
+    uint16_t timer_target(int ch) const { return timers_[ch].target; }
+
     // Set a specific I_STAT bit (used by HLE VBlank delivery).
     void set_i_stat_bit(uint32_t bit) { i_stat_ |= (1u << bit); }
 
@@ -305,7 +310,7 @@ class Bus
     void timer_check_irq(int ch, uint32_t old_count);
     void timer_write_mode(int ch, uint16_t v);
     void timer_update_counting(int ch);
-    uint16_t timer_compute_count(int ch) const; // on-read: compute from elapsed time
+    // timer_compute_count declared above in public section
     void log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size);
 
     uint8_t scratch_[kScratchSize]{};

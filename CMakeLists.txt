@@ -25,6 +25,7 @@ set(CORE_SOURCES
   src/audio/xa_decoder.cpp
   src/audio/wav_writer.cpp
   src/cdrom/cdrom.cpp
+  src/debug/debug_server.cpp
   src/emu/core.cpp
   src/emu/mcp_server.cpp
   src/emu/provenance_hotspot_profiler.cpp
@@ -59,4 +60,15 @@ if(MSVC)
     target_compile_options(r3000_emu PRIVATE /EHs-c- /GR-)
     set_property(TARGET r3000_emu PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
+# Winsock2 for debug TCP server
+if(WIN32)
+    target_link_libraries(r3000_emu PRIVATE ws2_32)
+endif()
+
+# MCP bridge — standalone executable for Claude Code integration
+add_executable(r3000_mcp cli/r3000_mcp.cpp)
+if(WIN32)
+    target_link_libraries(r3000_mcp PRIVATE ws2_32)
 endif()

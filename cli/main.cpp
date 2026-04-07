@@ -6,7 +6,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
+
+#include "../src/debug/debug_server.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -1411,6 +1414,11 @@ int main(int argc, char** argv)
     rlog::logger_logf(
         &logger, rlog::Level::info, rlog::Category::exec, "R3000 run start (PC=0x%08X)", core.pc()
     );
+
+    // Start debug TCP server for MCP integration
+    debug::DebugServer debug_server;
+    debug_server.set_core(&core);
+    debug_server.start();
 
     uint64_t steps = 0;
     const auto run_start = std::chrono::steady_clock::now();

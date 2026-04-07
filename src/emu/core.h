@@ -108,6 +108,7 @@ class Core
 
     r3000::Bus* bus();
     r3000::Cpu* cpu();
+    gpu::Gpu* gpu() { return &gpu_; }
     gte::Gte* gte();  // nullptr before init_from_image()
     // Shadow systems for 3D reconstruction (differential tag encoding)
     gpu::Gpu3D* gpu_3d() { return &gpu_3d_; }
