@@ -3503,48 +3503,38 @@ void Cdrom::tick(uint32_t cycles)
             const uint8_t is_read_advance = (pending_irq_reason_ == 0xFFu) ? 1u : 0u;
             if (is_read_advance)
             {
-                // Check if next sector would exceed disc bounds
-                const uint32_t disc_end = disc_ ? disc_->disc_sectors : 0;
-                if (disc_end > 0 && (read_lba_ + 1) >= disc_end)
+                // Skip consecutive XA/null sectors in a tight loop.
+                // On real hardware, XA audio is routed to SPU silently and
+                // the drive continues to the next data sector without CPU involvement.
+                for (;;)
                 {
-                    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
-                        "ReadN advance STOPPED: LBA=%u+1 >= disc_end=%u", read_lba_, disc_end);
-                    stop_reading_with_error(0x80); // ERROR_REASON_NOT_READY
-                    return; // Don't deliver INT1, we sent INT5 instead
-                }
-
-                // Advance to the next sector first, then check if it's XA.
-                // On real hardware, XA audio sectors are silently routed to SPU
-                // and never generate INT1.
-                read_lba_++;
-
-                // XA sector pre-filter: peek at the next sector's header to skip
-                // XA audio and null padding sectors BEFORE clearing the FIFO.
-                // This avoids the slower try_fill→skip→reschedule path.
-                if ((mode_ & 0x40u) && disc_)
-                {
-                    uint8_t xa_raw[2352]; uint32_t xa_ss = 0;
-                    if (disc_->read_sector_raw(read_lba_, xa_raw, sizeof(xa_raw), &xa_ss) && xa_ss >= 24)
+                    const uint32_t disc_end = disc_ ? disc_->disc_sectors : 0;
+                    if (disc_end > 0 && (read_lba_ + 1) >= disc_end)
                     {
-                        const uint8_t mode_byte = xa_raw[15];
-                        const uint8_t submode = xa_raw[18];
-                        const bool is_mode2 = (mode_byte == 2);
-                        const bool is_xa_audio = is_mode2 && (submode & 0x04u) && (submode & 0x40u);
-                        const bool is_null_pad = is_mode2 && (submode == 0x00u);
-                        if (is_xa_audio || is_null_pad)
+                        cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::warn,
+                            "ReadN advance STOPPED: LBA=%u+1 >= disc_end=%u", read_lba_, disc_end);
+                        stop_reading_with_error(0x80);
+                        return;
+                    }
+
+                    read_lba_++;
+
+                    // XA pre-filter: skip audio and null sectors immediately
+                    if ((mode_ & 0x40u) && disc_)
+                    {
+                        uint8_t xa_raw[2352]; uint32_t xa_ss = 0;
+                        if (disc_->read_sector_raw(read_lba_, xa_raw, sizeof(xa_raw), &xa_ss) && xa_ss >= 24)
                         {
-                            // XA audio or null padding: skip INT1.
-                            // Don't re-arm pending — let the timer/thread
-                            // schedule the next sector naturally. Re-arming
-                            // here caused infinite loops when consecutive
-                            // sectors are all XA (Soul Reaver BIGFILE.DAT).
-                            pending_irq_type_ = 0;
-                            pending_irq_due_cycle_ = 0;
-                            // The timer-driven advance or sector thread will
-                            // fire for the next sector interval.
-                            return;
+                            const uint8_t mode_byte = xa_raw[15];
+                            const uint8_t submode = xa_raw[18];
+                            const bool is_mode2 = (mode_byte == 2);
+                            const bool is_xa_audio = is_mode2 && (submode & 0x04u) && (submode & 0x40u);
+                            const bool is_null_pad = is_mode2 && (submode == 0x00u);
+                            if (is_xa_audio || is_null_pad)
+                                continue; // skip this sector, try next immediately
                         }
                     }
+                    break; // data sector found
                 }
                 clear_data();
                 // Do NOT clear want_data_: on real hardware the Request Register
