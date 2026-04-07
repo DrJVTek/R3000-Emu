@@ -223,7 +223,7 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v54 (fix_cop0_reg9_not_count)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v55 (irq_ext_pending)");
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -3176,24 +3176,15 @@ void Bus::check_cdrom_irq_edge()
 
 void Bus::fire_vblank_external()
 {
-    // Signal VBlank from the external timer thread.
-    // We do NOT set i_stat_ here — that causes race conditions with the BIOS
-    // exception handler (handler clears I_STAT, but timer thread re-sets it
-    // before the next instruction, causing infinite IRQ loop).
-    // Instead, set a deferred flag consumed by tick_peripherals() on the CPU thread.
-    vblank_ext_pending_.store(1, std::memory_order_release);
+    // IRQ thread model: set VBlank bit via atomic pending register.
+    // The CPU thread will consume this and latch into i_stat_ at
+    // the start of each tick(). No race — the CPU thread is the only
+    // writer to i_stat_, and it ORs pending bits edge-triggered.
+    fire_irq_external(0); // I_STAT bit 0 = VBlank
 
     // GPU draw list swap (needed for UE5 rendering bridge — safe from any thread)
     if (gpu_)
         gpu_->tick_vblank_swap_only();
-
-    // Shadow 3D systems
-    if (gte_3d_) gte_3d_->swap_frame();
-    if (gpu_3d_) gpu_3d_->on_vblank();
-
-    // VBlank hooks
-    if (hooks_ && hooks_->has_vblank())
-        hooks_->fire_vblank(vblank_total_count_);
 }
 
 // ================== TICK ==================
@@ -3267,12 +3258,25 @@ void Bus::tick(uint32_t cycles)
     // tick_peripherals() called every ~256 cycles from the worker thread.
     if (external_vblank_)
     {
-        // Consume deferred VBlank from timer thread (race-free: only CPU thread writes i_stat_)
-        if (vblank_ext_pending_.exchange(0, std::memory_order_acquire))
+        // Consume IRQ bits from external threads (atomic exchange — thread-safe).
+        // Each bit set by fire_irq_external() is edge-latched into i_stat_.
         {
-            if (!(i_stat_ & (1u << 0))) // edge-triggered: don't re-set if still pending
-                i_stat_ |= (1u << 0);
-            ++vblank_total_count_;
+            const uint32_t ext = irq_ext_pending_.exchange(0, std::memory_order_acquire);
+            if (ext)
+            {
+                // Edge-trigger: only set bits that aren't already pending
+                const uint32_t new_bits = ext & ~i_stat_;
+                i_stat_ |= new_bits;
+                // VBlank bookkeeping (bit 0)
+                if (ext & (1u << 0))
+                {
+                    ++vblank_total_count_;
+                    if (gte_3d_) gte_3d_->swap_frame();
+                    if (gpu_3d_) gpu_3d_->on_vblank();
+                    if (hooks_ && hooks_->has_vblank())
+                        hooks_->fire_vblank(vblank_total_count_);
+                }
+            }
         }
 
         // Tick CDROM + hardware timers every instruction in external_vblank mode.

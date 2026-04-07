@@ -129,6 +129,33 @@ Exactement le même principe :
 3. **Granularité OS** : les timers OS (sleep, waitable timer) ont une granularité de ~1ms. Pour des events à <1ms (SIO0 transfer = ~30µs), il faut du busy-wait ou un high-resolution timer.
 4. **Ordre des IRQs** : si deux IRQs fire "en même temps", l'ordre peut varier. Le BIOS exception handler gère ça (boucle sur tous les bits I_STAT).
 
+## Comparaison avec les autres émulateurs
+
+### DuckStation (et la plupart des émulateurs PS1/N64/etc.)
+- **Event scheduler** : tous les périphériques programment des events à des cycles futurs
+- Un seul thread exécute tout séquentiellement : CPU → check events → fire callbacks
+- Avantage : simple, déterministe, pas de synchronisation
+- Inconvénient : tout est séquentiel, les events ne fire pas au "vrai" moment mais quand le scheduler les check
+
+### Notre approche : IRQ threads
+- **Chaque source IRQ tourne sur son propre thread** avec son propre timing réel
+- Le CPU thread ne fait QUE exécuter des instructions et vérifier I_STAT
+- Les IRQ arrivent de manière **réellement asynchrone** comme sur vrai hardware
+- `I_STAT` est le point de rendez-vous — atomic fetch_or, pas de locks
+
+### Pourquoi c'est mieux
+
+| Aspect | Event scheduler | IRQ threads |
+|--------|----------------|-------------|
+| Fidélité temporelle | Events fire au prochain check CPU | Events fire au bon moment réel |
+| Parallélisme | Séquentiel (1 thread) | Vrai parallélisme hardware |
+| Synchronisation | Aucune (single thread) | Atomic I_STAT (zero-lock) |
+| Complexité code | Scheduler central + priority queue | Un thread loop simple par source |
+| UE5 intégration | Besoin de tick_peripherals batching | Threads natifs, pas de batching |
+| Déterminisme | Parfait (même seed = même résultat) | Dépend du scheduling OS |
+
+Le déterminisme n'est pas un problème pour nous : le vrai PS1 n'est pas déterministe non plus (le timing exact dépend de la mécanique du drive CD, de la température du cristal, etc.). Notre modèle est plus fidèle au hardware réel que le scheduler déterministe.
+
 ## Migration
 
 Phase 1 : VBlank thread (déjà partiellement fait via `fire_vblank_external`)

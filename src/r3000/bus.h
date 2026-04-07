@@ -138,6 +138,11 @@ class Bus
     // Set a specific I_STAT bit (used by HLE VBlank delivery).
     void set_i_stat_bit(uint32_t bit) { i_stat_ |= (1u << bit); }
 
+    // IRQ thread model: external threads call this to fire an IRQ.
+    // Thread-safe (atomic fetch_or). The CPU thread consumes pending
+    // bits at the start of each tick() via consume_ext_irq().
+    void fire_irq_external(uint32_t bit) { irq_ext_pending_.fetch_or(1u << bit, std::memory_order_release); }
+
     // Accès device (pour HLE BIOS côté CPU).
     cdrom::Cdrom* cdrom() const { return cdrom_; }
 
@@ -353,7 +358,12 @@ class Bus
     uint8_t dma_irq_prev_{0};
     uint8_t cdrom_irq_prev_{0};
     bool external_vblank_{false}; // When true, VBlank is fired externally, not from tick()
-    std::atomic<uint8_t> vblank_ext_pending_{0}; // Deferred VBlank flag (set by timer thread, consumed by CPU thread)
+    std::atomic<uint8_t> vblank_ext_pending_{0}; // Legacy (kept for compat, unused in IRQ thread model)
+
+    // IRQ thread model: external threads set bits here via fetch_or.
+    // CPU thread consumes with exchange(0) and ORs into i_stat_.
+    // This replaces the per-source deferred flags with a single atomic register.
+    std::atomic<uint32_t> irq_ext_pending_{0};
     // DMA3 DREQ gating: if CDROM FIFO is empty when DMA3 starts, defer until FIFO fills.
     uint8_t dma3_pending_{0};
     mdec::Mdec* mdec_{nullptr};     // Real MDEC decoder (owned by Core)
