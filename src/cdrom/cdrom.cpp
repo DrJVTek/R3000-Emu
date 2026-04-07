@@ -3349,10 +3349,11 @@ void Cdrom::tick(uint32_t cycles)
         {
             last_trace = now_cycles_;
             emu::logf(emu::LogLevel::warn, "CD_TIMER",
-                "TICK: now=%llu due=%llu diff=%lld pend=%d flags=0x%02X reading=%d",
+                "TICK: now=%llu due=%llu diff=%lld pend=%d flags=0x%02X reading=%d irq_due=%llu irq_ready=%llu",
                 (unsigned long long)now_cycles_, (unsigned long long)next_read_due_cycle_,
                 (long long)(now_cycles_ - next_read_due_cycle_),
-                (int)pending_irq_type_, irq_flags_, (int)reading_active_);
+                (int)pending_irq_type_, irq_flags_, (int)reading_active_,
+                (unsigned long long)pending_irq_due_cycle_, (unsigned long long)next_irq_ready_cycle_);
         }
     }
 
@@ -3532,13 +3533,16 @@ void Cdrom::tick(uint32_t cycles)
                         const bool is_null_pad = is_mode2 && (submode == 0x00u);
                         if (is_xa_audio || is_null_pad)
                         {
-                            // XA audio or null padding sector: skip INT1, schedule next
-                            const uint32_t next_delay = read_sector_ticks();
-                            pending_irq_type_ = 0x01;
-                            pending_irq_reason_ = 0xFFu;
-                            pending_irq_live_status_ = 1;
-                            arm_pending_irq_after(next_delay);
-                            return; // don't deliver INT1
+                            // XA audio or null padding: skip INT1.
+                            // Don't re-arm pending — let the timer/thread
+                            // schedule the next sector naturally. Re-arming
+                            // here caused infinite loops when consecutive
+                            // sectors are all XA (Soul Reaver BIGFILE.DAT).
+                            pending_irq_type_ = 0;
+                            pending_irq_due_cycle_ = 0;
+                            // The timer-driven advance or sector thread will
+                            // fire for the next sector interval.
+                            return;
                         }
                     }
                 }
