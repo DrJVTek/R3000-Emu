@@ -331,6 +331,16 @@ class Cdrom
     uint8_t read_pending_irq1_{0};   // second response INT1 pending (ReadN/ReadS)
     uint8_t data_ready_pending_{0};  // data can be loaded when want_data=1
     uint8_t async_stat_pending_{0};  // async status INT1 pending after certain commands
+
+    // Dual-channel IRQ (like real PS1 hardware / DuckStation):
+    // Sync channel: command responses (INT3/INT5) via set_irq() → irq_flags_ directly
+    // Async channel: sector data ready (INT1) via this pending + separate resp
+    // The async fires AFTER the sync is acked, with minimum delay.
+    uint8_t async_irq_type_{0};        // 0=none, 0x01=DataReady
+    uint8_t async_resp_{0};            // status byte for async delivery
+    uint8_t async_resp_valid_{0};      // 1 if async has response to deliver
+    void set_async_irq(uint8_t type, uint8_t resp);
+    void deliver_async_irq();
     uint8_t reading_active_{0};      // ReadN/ReadS continuous reading in progress
     uint32_t int1_deliver_count_{0}; // debug: total INT1 deliveries
     uint8_t streaming_mode_{0};      // 1 if ReadS (streaming), 0 if ReadN (normal)

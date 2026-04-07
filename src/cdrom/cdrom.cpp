@@ -1037,6 +1037,31 @@ void Cdrom::set_irq(uint8_t flags)
     }
 }
 
+void Cdrom::set_async_irq(uint8_t type, uint8_t resp)
+{
+    // Queue an async interrupt (sector data ready).
+    // This goes into a separate channel from command responses.
+    // It will be delivered when irq_flags_ is clear (game acked previous IRQ).
+    async_irq_type_ = type;
+    async_resp_ = resp;
+    async_resp_valid_ = 1;
+}
+
+void Cdrom::deliver_async_irq()
+{
+    if (!async_resp_valid_) return;
+    if ((irq_flags_ & 0x1Fu) != 0u) return; // sync channel busy
+    if (now_cycles_ < next_irq_ready_cycle_) return; // min delay
+
+    // Deliver: push async response and fire IRQ
+    clear_resp();
+    push_resp(async_resp_);
+    async_resp_valid_ = 0;
+    const uint8_t type = async_irq_type_;
+    async_irq_type_ = 0;
+    set_irq(type);
+}
+
 void Cdrom::debug_log_bus_irq_latched(uint32_t i_stat, uint32_t i_mask)
 {
     cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
@@ -3641,16 +3666,25 @@ void Cdrom::tick(uint32_t cycles)
             }
 
             const uint8_t irq_resp = pending_irq_live_status_ ? status_ : pending_irq_resp_;
-            clear_resp();
-            push_resp(irq_resp);
-            // 0xAAu is the Init-completion sentinel, not an actual response byte.
-            // Only push reason when it carries real data (e.g. error codes).
-            if (pending_irq_reason_ != 0 && pending_irq_reason_ != 0xAAu)
-                push_resp(pending_irq_reason_);
-            for (uint8_t i = 0; i < pending_irq_extra_len_; ++i)
-                push_resp(pending_irq_extra_[i]);
-            pending_irq_extra_len_ = 0;
-            set_irq(pending_irq_type_);
+
+            if (is_read_advance)
+            {
+                // Sector data ready → async channel (like real hardware).
+                // Delivered when irq_flags is clear (after game acks any pending INT3).
+                set_async_irq(pending_irq_type_, irq_resp);
+            }
+            else
+            {
+                // Command response → sync channel (direct to irq_flags).
+                clear_resp();
+                push_resp(irq_resp);
+                if (pending_irq_reason_ != 0 && pending_irq_reason_ != 0xAAu)
+                    push_resp(pending_irq_reason_);
+                for (uint8_t i = 0; i < pending_irq_extra_len_; ++i)
+                    push_resp(pending_irq_extra_[i]);
+                pending_irq_extra_len_ = 0;
+                set_irq(pending_irq_type_);
+            }
             if (deliver_read_lba == 60643u || deliver_data_lba == 60643u)
             {
                 cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
@@ -3677,8 +3711,9 @@ void Cdrom::tick(uint32_t cycles)
         }
     }
 
-    // Deliver pending read INT1 after delay.
-    // (ReadN/ReadS second response is also async on real hardware.)
+    // Deliver async IRQ (sector data ready) — separate channel from commands.
+    // Fires when sync channel (irq_flags_) is clear and min delay has passed.
+    deliver_async_irq();
 
     // Motor idle countdown: after Pause, motor spins down after ~1 second
     if (motor_idle_deadline_ != 0)
