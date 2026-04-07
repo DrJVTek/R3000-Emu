@@ -1014,6 +1014,7 @@ void Cdrom::set_irq(uint8_t flags)
     const int old_line = irq_line();
     irq_flags_ &= ~0x07u;
     irq_flags_ |= (flags & 0x07u);
+    if ((flags & 0x07u) == 0x01u) ++int1_deliver_count_;
     const int new_line = irq_line();
     // Route to BUS tag so it appears in system.log (trace only: fires every sector during ReadN)
     emu::logf(emu::LogLevel::trace, "BUS", "CD set_irq(%u): old=0x%02X new=0x%02X irq_en=0x%02X shell_sent=%d pending=%u last_cmd=0x%02X line=%d->%d",
@@ -3444,13 +3445,16 @@ void Cdrom::tick(uint32_t cycles)
         sector_thread_signal_.load(std::memory_order_acquire) != 0)
     {
         consume_sector_signal();
-        // Same logic as timer-driven advance below
-        if (reading_active_ && pending_irq_type_ == 0)
+        // Sector thread says: a sector interval has passed in real time.
+        // Set pending INT1 for immediate delivery. Override any existing
+        // pending that has a future due (e.g., from read_pending_irq1_
+        // or seek delay) — the real-time thread is the authority on timing.
+        if (reading_active_)
         {
             pending_irq_type_ = 0x01;
             pending_irq_reason_ = 0xFFu;
             pending_irq_live_status_ = 1;
-            pending_irq_due_cycle_ = now_cycles_;
+            pending_irq_due_cycle_ = now_cycles_; // immediate
         }
         // If pending INT3 (info cmd), don't block — thread will re-signal
     }

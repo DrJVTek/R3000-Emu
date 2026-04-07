@@ -154,6 +154,7 @@ class Cdrom
     uint64_t next_read_due_debug() const { return next_read_due_cycle_; }
     uint8_t want_data_debug() const { return want_data_; }
     uint8_t data_ready_pending_debug() const { return data_ready_pending_; }
+    uint32_t int1_deliver_count_debug() const { return int1_deliver_count_; }
     uint32_t resp_count_debug() const { return (resp_w_ >= resp_r_) ? (resp_w_ - resp_r_) : (32 - resp_r_ + resp_w_); }
     void log_external(const char* fmt, ...);  // Log via cdrom file logger (for UE5)
     uint64_t now_cycles_debug() const { return now_cycles_; }
@@ -327,6 +328,7 @@ class Cdrom
     uint8_t data_ready_pending_{0};  // data can be loaded when want_data=1
     uint8_t async_stat_pending_{0};  // async status INT1 pending after certain commands
     uint8_t reading_active_{0};      // ReadN/ReadS continuous reading in progress
+    uint32_t int1_deliver_count_{0}; // debug: total INT1 deliveries
     uint8_t streaming_mode_{0};      // 1 if ReadS (streaming), 0 if ReadN (normal)
 
     // Command queue (quand IRQ flags non ack ou Busy=1).
