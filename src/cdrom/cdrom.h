@@ -8,6 +8,7 @@
 
 #include "../log/filelog.h"
 #include "../log/logger.h"
+#include "../audio/audio_ring_buffer.h"
 #include "../audio/xa_decoder.h"
 
 namespace audio { class Spu; }
@@ -129,6 +130,10 @@ class Cdrom
 
     // Set SPU for XA-ADPCM audio output
     void set_spu(audio::Spu* spu) { spu_ = spu; }
+
+    // XA audio ring buffer: decoded XA-ADPCM goes here for UE5 consumption.
+    // The CDROM decodes XA sectors and pushes directly — no SPU involvement.
+    audio::AudioRingBuffer& xa_output_ring() { return xa_output_ring_; }
 
     // Returns true if the data FIFO is empty (DMA3 DREQ not yet asserted).
     // Used by Bus to defer DMA3 until the sector is ready.
@@ -270,6 +275,7 @@ class Cdrom
 
     // XA-ADPCM decoder + SPU output
     audio::Spu* spu_{nullptr};
+    audio::AudioRingBuffer xa_output_ring_;
     audio::XaDecoder xa_decoder_;
 
     TimingMode timing_mode_{TimingMode::CompatibilityFast};

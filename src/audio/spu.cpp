@@ -3,8 +3,10 @@
 #include "../log/emu_log.h"
 #include "../cdrom/cdrom.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 namespace audio
 {
@@ -563,6 +565,46 @@ void Spu::push_xa_samples(const int16_t* left, const int16_t* right, int count)
             xa_write_pos_ = (xa_write_pos_ + 1) % kXaBufferSize;
             xa_samples_available_++;
         }
+    }
+}
+
+// ================== SPU THREAD ==================
+
+void Spu::start_thread()
+{
+    stop_thread();
+    output_ring_.reset();
+    spu_thread_running_.store(true, std::memory_order_release);
+    spu_thread_ = std::thread([this]() {
+        // 44100 Hz = one sample pair every ~22.676µs
+        constexpr auto sample_interval = std::chrono::nanoseconds(22676);
+
+        auto next = std::chrono::steady_clock::now() + sample_interval;
+        while (spu_thread_running_.load(std::memory_order_acquire))
+        {
+            std::this_thread::sleep_until(next);
+            next += sample_interval;
+
+            // Generate one sample pair
+            int16_t l, r;
+            tick(&l, &r);
+
+            // Push to ring buffer (UE5 audio callback consumes)
+            output_ring_.write_one(l, r);
+
+            // WAV writer (debug)
+            if (wav_writer_) wav_writer_->write_sample(l, r);
+        }
+    });
+}
+
+void Spu::stop_thread()
+{
+    if (spu_thread_running_.load(std::memory_order_acquire))
+    {
+        spu_thread_running_.store(false, std::memory_order_release);
+        if (spu_thread_.joinable())
+            spu_thread_.join();
     }
 }
 

@@ -1,7 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <thread>
+#include "audio_ring_buffer.h"
 #include "spu_voice.h"
 
 namespace cdrom { class Cdrom; }
@@ -79,6 +82,12 @@ class Spu
     // Flush any buffered audio samples to the callback.
     // Call at end of each frame to avoid latency at high framerates.
     void flush_audio();
+
+    // SPU audio thread: generates samples at 44.1kHz real-time.
+    // Output goes to the ring buffer, consumed by UE5 audio callback.
+    void start_thread();
+    void stop_thread();
+    AudioRingBuffer& output_ring() { return output_ring_; }
 
   private:
     // Voice registers: 0x1F801C00 + voice*0x10 (voices 0-23)
@@ -167,6 +176,11 @@ class Spu
 
     // CDROM for CDDA audio
     cdrom::Cdrom* cdrom_{nullptr};
+
+    // SPU thread: generates audio at 44.1kHz real-time
+    std::thread spu_thread_;
+    std::atomic<bool> spu_thread_running_{false};
+    AudioRingBuffer output_ring_;
 };
 
 } // namespace audio
