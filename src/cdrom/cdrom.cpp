@@ -3432,10 +3432,27 @@ void Cdrom::tick(uint32_t cycles)
         queued_cmd_valid_ = 0;
     }
 
-    // DuckStation-style timer-driven read: when the next sector is due,
-    // queue a new pending IRQ. This runs OUTSIDE the pending_irq_type_ != 0
-    // block so it fires even when no pending IRQ exists.
-    if (next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
+    // Sector thread signal: replaces cycle-based timer when thread is active.
+    // The thread fired a real-time timer — treat it exactly like the
+    // cycle-based timer reaching next_read_due_cycle_.
+    if (sector_thread_running_.load(std::memory_order_acquire) &&
+        sector_thread_signal_.load(std::memory_order_acquire) != 0)
+    {
+        consume_sector_signal();
+        // Same logic as timer-driven advance below
+        if (reading_active_ && pending_irq_type_ == 0)
+        {
+            pending_irq_type_ = 0x01;
+            pending_irq_reason_ = 0xFFu;
+            pending_irq_live_status_ = 1;
+            pending_irq_due_cycle_ = now_cycles_;
+        }
+        // If pending INT3 (info cmd), don't block — thread will re-signal
+    }
+
+    // Cycle-based timer-driven read (fallback when sector thread is not active).
+    if (!sector_thread_running_.load(std::memory_order_relaxed) &&
+        next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
         {
             static int blocked_trace = 0;
             if (reading_active_ && pending_irq_type_ != 0 && blocked_trace < 3)
