@@ -148,6 +148,12 @@ class Cdrom
     void consume_sector_signal() { sector_thread_signal_.store(0, std::memory_order_release); }
     uint32_t read_lba_debug() const { return read_lba_; }
     uint8_t irq_flags_debug() const { return irq_flags_; }
+    uint8_t pending_irq_type_debug() const { return pending_irq_type_; }
+    uint64_t pending_irq_due_debug() const { return pending_irq_due_cycle_; }
+    uint64_t next_irq_ready_debug() const { return next_irq_ready_cycle_; }
+    uint64_t next_read_due_debug() const { return next_read_due_cycle_; }
+    uint8_t want_data_debug() const { return want_data_; }
+    uint8_t data_ready_pending_debug() const { return data_ready_pending_; }
     uint32_t resp_count_debug() const { return (resp_w_ >= resp_r_) ? (resp_w_ - resp_r_) : (32 - resp_r_ + resp_w_); }
     void log_external(const char* fmt, ...);  // Log via cdrom file logger (for UE5)
     uint64_t now_cycles_debug() const { return now_cycles_; }

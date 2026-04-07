@@ -250,13 +250,21 @@ std::string DebugServer::cmd_read_cdrom()
 {
     if (!core_ || !core_->bus() || !core_->bus()->cdrom()) return "{\"error\":\"no cdrom\"}";
     auto* cd = core_->bus()->cdrom();
-    char buf[512];
+    char buf[1024];
     std::snprintf(buf, sizeof(buf),
         "{\"read_lba\":%u,\"irq_flags\":\"0x%02X\",\"reading\":%d,"
-        "\"now_cycles\":%llu}",
+        "\"now_cycles\":%llu,"
+        "\"pend_type\":%u,\"pend_due\":%llu,\"irq_ready\":%llu,"
+        "\"read_due\":%llu,\"want_data\":%d,\"data_ready\":%d}",
         cd->read_lba_debug(), cd->irq_flags_debug(),
         cd->is_reading_active() ? 1 : 0,
-        (unsigned long long)cd->now_cycles_debug());
+        (unsigned long long)cd->now_cycles_debug(),
+        (unsigned)cd->pending_irq_type_debug(),
+        (unsigned long long)cd->pending_irq_due_debug(),
+        (unsigned long long)cd->next_irq_ready_debug(),
+        (unsigned long long)cd->next_read_due_debug(),
+        (int)cd->want_data_debug(),
+        (int)cd->data_ready_pending_debug());
     return buf;
 }
 
