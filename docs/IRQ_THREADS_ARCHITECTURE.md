@@ -89,6 +89,31 @@ for (;;) {
 
 Plus de `tick()`, plus de `tick_peripherals()`, plus de fast path. Le CPU ne fait QUE exécuter des instructions et vérifier I_STAT.
 
+## IRQs simultanées : comment le vrai hardware gère ça
+
+Sur vrai PS1, les IRQ lines sont des **fils électriques séparés**. Deux périphériques peuvent passer HIGH au même instant (ex: VBlank + CDROM sector ready). Il n'y a pas de "lock" hardware entre eux.
+
+Ce qui se passe :
+
+1. **Les deux bits sont set dans I_STAT simultanément** — c'est du hardware, deux signaux indépendants qui latent chacun leur bit
+2. **Le CPU finit son instruction courante** — il ne s'arrête jamais en plein milieu
+3. **Il vérifie `(I_STAT & I_MASK) != 0`** → voit les deux bits set
+4. **Il entre dans l'exception handler UNE SEULE FOIS** — jump à 0x80000080
+5. **Le handler BIOS boucle sur tous les bits set** dans `(I_STAT & I_MASK)` : traite VBlank (clear bit 0), puis CDROM (clear bit 2), etc.
+6. **`ReturnFromException`** — restaure PC et Status
+
+Le "lock" naturel : **les interrupts sont automatiquement désactivées** quand le CPU entre dans l'exception (COP0 Status `IEc` passe à 0). Pendant que le handler tourne, aucune nouvelle exception ne peut fire. Si un nouveau bit I_STAT est set pendant le handler (par un thread périphérique), il sera vu et traité soit dans la boucle `while(I_STAT & I_MASK)` du handler actuel, soit au prochain check après `ReturnFromException`.
+
+### Implication pour nos threads
+
+Exactement le même principe :
+- Deux threads font `i_stat.fetch_or(bit)` au même instant → les deux bits sont set
+- Le CPU thread voit les deux bits, entre dans le handler une fois, traite tout
+- Pendant le handler, les interrupts sont off (IEc=0) → pas de ré-entrance
+- Si un thread set un nouveau bit pendant le handler → traité au prochain tour
+
+**Pas de lock, pas de mutex, pas de condition variable.** Juste des atomic `fetch_or` sur I_STAT. C'est exactement comme le hardware : des fils qui passent HIGH indépendamment.
+
 ## Avantages
 
 1. **Fidélité** : les IRQs arrivent au bon moment réel, indépendamment du CPU
