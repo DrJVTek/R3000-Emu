@@ -3176,7 +3176,24 @@ void Bus::check_cdrom_irq_edge()
     cdrom_irq_prev_ = cdirq;
 }
 
-// ================== EXTERNAL VBLANK ==================
+// ================== EXTERNAL VBLANK / IRQ THREADS ==================
+
+void Bus::set_external_vblank(bool enabled)
+{
+    external_vblank_ = enabled;
+    if (enabled)
+    {
+        // Start IRQ threads: real-time hardware timing
+        if (cdrom_) cdrom_->start_sector_thread();
+        start_vblank_thread(true); // PAL default — TODO: detect from disc region
+        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (VBlank + CDROM sector)");
+    }
+    else
+    {
+        if (cdrom_) cdrom_->stop_sector_thread();
+        stop_vblank_thread();
+    }
+}
 
 void Bus::fire_vblank_external()
 {
@@ -3243,14 +3260,15 @@ void Bus::tick_peripherals(uint32_t cycles)
         return;
     }
 
-    // ---- GPU tick ----
+    // ---- GPU scanline (for Timer 1 HBlank clock) ----
+    // VBlank IRQ is handled by the VBlank thread via fire_irq_external(0).
+    // We still tick the GPU scanline counter for Timer 1 external clock.
     uint32_t gpu_scanline_delta = 0;
-    bool gpu_vblank_fired = false;
     if (gpu_)
     {
         const uint32_t old_sl = gpu_->current_scanline();
         const uint32_t tot_sl = gpu_->total_scanlines();
-        gpu_vblank_fired = gpu_->tick_vblank(cycles) != 0;
+        gpu_->tick_vblank(cycles); // scanline counter only — VBlank IRQ from thread
         const uint32_t new_sl = gpu_->current_scanline();
         if (tot_sl != 0u) gpu_scanline_delta = (new_sl + tot_sl - old_sl) % tot_sl;
     }
@@ -3274,23 +3292,6 @@ void Bus::tick_peripherals(uint32_t cycles)
         if (spu_busy_delay_ > 0) { if (cycles >= spu_busy_delay_) { spu_busy_delay_ = 0; spu_busy_ = 0; } else spu_busy_delay_ -= cycles; }
     }
     if (spu_) spu_->tick_cycles(cycles);
-
-    // ---- VBlank ----
-    if (gpu_vblank_fired)
-    {
-        if (!(i_stat_ & (1u << 0))) i_stat_ |= (1u << 0);
-        ++vblank_total_count_;
-        if (gte_3d_) gte_3d_->swap_frame();
-        if (gpu_3d_) gpu_3d_->on_vblank();
-        if (hooks_ && hooks_->has_vblank()) hooks_->fire_vblank(vblank_total_count_);
-        if (gpu_)
-        {
-            const auto& stats = gpu_->prev_frame_stats();
-            const uint32_t rp = stats.triangles + stats.quads + stats.rects + stats.lines + stats.fills;
-            if (rp > 0) { vblank_last_frame_ = vblank_total_count_; vblank_stuck_count_ = 0; vblank_stuck_logged_ = 0; }
-            else { vblank_stuck_count_++; if (vblank_stuck_logged_ && (vblank_stuck_count_ % 200) == 0) vblank_stuck_logged_ = 0; }
-        }
-    }
 }
 
 void Bus::tick(uint32_t cycles)

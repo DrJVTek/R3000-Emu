@@ -153,7 +153,7 @@ class Bus
     // Fire VBlank externally (from worker thread timer, independent of CPU speed).
     // When enabled, gpu_->tick_vblank() in Bus::tick() is skipped.
     void fire_vblank_external();
-    void set_external_vblank(bool enabled) { external_vblank_ = enabled; }
+    void set_external_vblank(bool enabled);
 
     // VBlank IRQ thread: fires I_STAT bit 0 at real-time intervals.
     // PAL = 50Hz (~20ms), NTSC = 60Hz (~16.67ms).
