@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace r3000 { class Bus; }
 namespace emu { class Core; }
@@ -46,12 +47,43 @@ class DebugServer
     std::string cmd_read_istat();
     std::string cmd_read_game_state(); // Soul Reaver specific variables
     std::string cmd_read_dma();
+    std::string cmd_read_cop0(uint32_t reg);
+    std::string cmd_write_cop0(uint32_t reg, uint32_t value);
+    std::string cmd_add_step_hook_write_cop0(uint32_t pc, uint32_t reg, uint32_t value, bool once);
+    std::string cmd_add_step_hook_write_ram_u32(uint32_t pc, uint32_t phys_addr, uint32_t value, bool once);
+    std::string cmd_list_step_hooks();
+    std::string cmd_clear_step_hook(uint32_t hook_id);
+    std::string cmd_clear_all_step_hooks();
+
+    enum class StepHookKind : uint32_t
+    {
+        write_cop0 = 0,
+        write_ram_u32 = 1,
+    };
+
+    struct StepHookRule
+    {
+        uint32_t id{0};
+        uint32_t pc{0};
+        StepHookKind kind{StepHookKind::write_cop0};
+        uint32_t arg0{0};
+        uint32_t arg1{0};
+        bool once{true};
+        bool enabled{true};
+        uint64_t hit_count{0};
+    };
+
+    static void step_hook_trampoline(uint32_t pc, void* user);
+    void on_step_hook(uint32_t pc);
 
     emu::Core* core_{nullptr};
     std::thread server_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> should_stop_{false};
     int listen_fd_{-1};
+    bool step_hook_registered_{false};
+    std::vector<StepHookRule> step_hooks_{};
+    uint32_t next_step_hook_id_{1};
 };
 
 } // namespace debug

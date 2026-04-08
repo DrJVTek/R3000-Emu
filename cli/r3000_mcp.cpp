@@ -131,6 +131,20 @@ static void handle_request(const std::string& line)
         tools += ",";
         tools += make_tool("read_dma", "Read all 7 DMA channel states", "{\"type\":\"object\",\"properties\":{}}");
         tools += ",";
+        tools += make_tool("read_cop0", "Read COP0 register by index", "{\"type\":\"object\",\"properties\":{\"reg\":{\"type\":\"number\",\"description\":\"COP0 register index 0-31\"}}}");
+        tools += ",";
+        tools += make_tool("write_cop0", "Write COP0 register by index", "{\"type\":\"object\",\"properties\":{\"reg\":{\"type\":\"number\"},\"value\":{\"type\":\"number\"}}}");
+        tools += ",";
+        tools += make_tool("add_step_hook_write_cop0", "Add runtime step hook: write COP0 when PC executes", "{\"type\":\"object\",\"properties\":{\"pc\":{\"type\":\"number\"},\"reg\":{\"type\":\"number\"},\"value\":{\"type\":\"number\"},\"once\":{\"type\":\"boolean\"}}}");
+        tools += ",";
+        tools += make_tool("add_step_hook_write_ram_u32", "Add runtime step hook: write RAM when PC executes", "{\"type\":\"object\",\"properties\":{\"pc\":{\"type\":\"number\"},\"phys_addr\":{\"type\":\"number\"},\"value\":{\"type\":\"number\"},\"once\":{\"type\":\"boolean\"}}}");
+        tools += ",";
+        tools += make_tool("list_step_hooks", "List active runtime step hooks", "{\"type\":\"object\",\"properties\":{}}");
+        tools += ",";
+        tools += make_tool("clear_step_hook", "Remove a runtime step hook by id", "{\"type\":\"object\",\"properties\":{\"hook_id\":{\"type\":\"number\"}}}");
+        tools += ",";
+        tools += make_tool("clear_all_step_hooks", "Remove all runtime step hooks", "{\"type\":\"object\",\"properties\":{}}");
+        tools += ",";
         tools += make_tool("ping", "Check emulator connection", "{\"type\":\"object\",\"properties\":{}}");
         tools += "]}";
         send_jsonrpc(id_raw.c_str(), tools.c_str());
@@ -149,6 +163,55 @@ static void handle_request(const std::string& line)
             uint32_t addr = addr_s.empty() ? 0 : (uint32_t)strtoul(addr_s.c_str(), nullptr, 0);
             uint32_t sz = size_s.empty() ? 64 : (uint32_t)strtoul(size_s.c_str(), nullptr, 0);
             char tmp[128]; snprintf(tmp, sizeof(tmp), "{\"cmd\":\"read_memory\",\"addr\":%u,\"size\":%u}", addr, sz);
+            emu_cmd = tmp;
+        }
+        else if (tool_name == "read_cop0")
+        {
+            std::string reg_s = find_str("reg");
+            uint32_t reg = reg_s.empty() ? 0 : (uint32_t)strtoul(reg_s.c_str(), nullptr, 0);
+            char tmp[128]; snprintf(tmp, sizeof(tmp), "{\"cmd\":\"read_cop0\",\"reg\":%u}", reg);
+            emu_cmd = tmp;
+        }
+        else if (tool_name == "write_cop0")
+        {
+            std::string reg_s = find_str("reg");
+            std::string value_s = find_str("value");
+            uint32_t reg = reg_s.empty() ? 0 : (uint32_t)strtoul(reg_s.c_str(), nullptr, 0);
+            uint32_t value = value_s.empty() ? 0 : (uint32_t)strtoul(value_s.c_str(), nullptr, 0);
+            char tmp[160]; snprintf(tmp, sizeof(tmp), "{\"cmd\":\"write_cop0\",\"reg\":%u,\"value\":%u}", reg, value);
+            emu_cmd = tmp;
+        }
+        else if (tool_name == "add_step_hook_write_cop0")
+        {
+            std::string pc_s = find_str("pc");
+            std::string reg_s = find_str("reg");
+            std::string value_s = find_str("value");
+            std::string once_s = find_str("once");
+            uint32_t pc = pc_s.empty() ? 0 : (uint32_t)strtoul(pc_s.c_str(), nullptr, 0);
+            uint32_t reg = reg_s.empty() ? 0 : (uint32_t)strtoul(reg_s.c_str(), nullptr, 0);
+            uint32_t value = value_s.empty() ? 0 : (uint32_t)strtoul(value_s.c_str(), nullptr, 0);
+            const char* once = (once_s == "false") ? "false" : "true";
+            char tmp[256]; snprintf(tmp, sizeof(tmp), "{\"cmd\":\"add_step_hook_write_cop0\",\"pc\":%u,\"reg\":%u,\"value\":%u,\"once\":%s}", pc, reg, value, once);
+            emu_cmd = tmp;
+        }
+        else if (tool_name == "add_step_hook_write_ram_u32")
+        {
+            std::string pc_s = find_str("pc");
+            std::string addr_s = find_str("phys_addr");
+            std::string value_s = find_str("value");
+            std::string once_s = find_str("once");
+            uint32_t pc = pc_s.empty() ? 0 : (uint32_t)strtoul(pc_s.c_str(), nullptr, 0);
+            uint32_t addr = addr_s.empty() ? 0 : (uint32_t)strtoul(addr_s.c_str(), nullptr, 0);
+            uint32_t value = value_s.empty() ? 0 : (uint32_t)strtoul(value_s.c_str(), nullptr, 0);
+            const char* once = (once_s == "false") ? "false" : "true";
+            char tmp[256]; snprintf(tmp, sizeof(tmp), "{\"cmd\":\"add_step_hook_write_ram_u32\",\"pc\":%u,\"phys_addr\":%u,\"value\":%u,\"once\":%s}", pc, addr, value, once);
+            emu_cmd = tmp;
+        }
+        else if (tool_name == "clear_step_hook")
+        {
+            std::string id_s = find_str("hook_id");
+            uint32_t hook_id = id_s.empty() ? 0 : (uint32_t)strtoul(id_s.c_str(), nullptr, 0);
+            char tmp[128]; snprintf(tmp, sizeof(tmp), "{\"cmd\":\"clear_step_hook\",\"hook_id\":%u}", hook_id);
             emu_cmd = tmp;
         }
         else

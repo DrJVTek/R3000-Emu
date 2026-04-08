@@ -1010,7 +1010,25 @@ void Cdrom::set_irq(uint8_t flags)
     // no$psx / PSX-SPX:
     // 1F801803h.Index1 bits0-2 contain response IRQ type (INT1..INT7 as value 1..7).
     // Upper bits 5..7 read as 1.
+    //
+    // DuckStation dual-channel emulation:
+    // When a command INT3 would overwrite an unACK'd sector INT1, defer the
+    // INT3 so the game sees the INT1 first. After the game ACKs INT1, the
+    // deferred INT3 fires. This matches DuckStation's separate sync/async
+    // interrupt channels where sector INT1 always goes through the async path.
     const uint8_t old = irq_flags_;
+    const uint8_t old_type = old & 0x07u;
+    const uint8_t new_type = flags & 0x07u;
+    if (reading_active_ && old_type == 0x01u && new_type == 0x03u)
+    {
+        // Defer the INT3 — let the game ACK the INT1 first.
+        deferred_cmd_irq_ = 0x03;
+        deferred_cmd_resp_valid_ = 1;
+        emu::logf(emu::LogLevel::warn, "CD",
+            "Deferred INT3 (command overwrite of sector INT1) reading=%d lba=%u",
+            (int)reading_active_, read_lba_);
+        return; // Don't overwrite irq_flags
+    }
     const int old_line = irq_line();
     irq_flags_ &= ~0x07u;
     irq_flags_ |= (flags & 0x07u);
@@ -1035,6 +1053,15 @@ void Cdrom::set_irq(uint8_t flags)
     {
         irq_callback_(new_line, irq_callback_user_);
     }
+    // DEBUG: trace set_irq when it fires (line change) — helps find missing IRQ delivery
+    static uint32_t set_irq_log = 0;
+    if (new_line != old_line && set_irq_log < 500) {
+        ++set_irq_log;
+        emu::logf(emu::LogLevel::warn, "CD_IRQ",
+            "set_irq(%u) line=%d->%d flags=0x%02X en=0x%02X cb=%p (#%u)",
+            (unsigned)flags, old_line, new_line, irq_flags_, irq_enable_,
+            (void*)irq_callback_, set_irq_log);
+    }
 }
 
 void Cdrom::set_async_irq(uint8_t type, uint8_t resp)
@@ -1042,6 +1069,13 @@ void Cdrom::set_async_irq(uint8_t type, uint8_t resp)
     // Queue an async interrupt (sector data ready).
     // This goes into a separate channel from command responses.
     // It will be delivered when irq_flags_ is clear (game acked previous IRQ).
+    if (read_lba_ >= 13952u && read_lba_ < 14064u)
+    {
+        emu::logf(emu::LogLevel::warn, "SR_CD",
+            "ASYNC_QUEUE now=%llu read_lba=%u type=%u resp=0x%02X irqf=0x%02X ready_at=%llu async_valid=%d",
+            (unsigned long long)now_cycles_, (unsigned)read_lba_, (unsigned)type, (unsigned)resp,
+            (unsigned)irq_flags_, (unsigned long long)next_irq_ready_cycle_, (int)async_resp_valid_);
+    }
     async_irq_type_ = type;
     async_resp_ = resp;
     async_resp_valid_ = 1;
@@ -1050,8 +1084,28 @@ void Cdrom::set_async_irq(uint8_t type, uint8_t resp)
 void Cdrom::deliver_async_irq()
 {
     if (!async_resp_valid_) return;
-    if ((irq_flags_ & 0x1Fu) != 0u) return; // sync channel busy
-    if (now_cycles_ < next_irq_ready_cycle_) return; // min delay
+    if ((irq_flags_ & 0x1Fu) != 0u)
+    {
+        if (read_lba_ >= 13952u && read_lba_ < 14064u)
+        {
+            emu::logf(emu::LogLevel::warn, "SR_CD",
+                "ASYNC_BLOCK irq now=%llu read_lba=%u type=%u irqf=0x%02X ready_at=%llu",
+                (unsigned long long)now_cycles_, (unsigned)read_lba_, (unsigned)async_irq_type_,
+                (unsigned)irq_flags_, (unsigned long long)next_irq_ready_cycle_);
+        }
+        return; // sync channel busy
+    }
+    if (now_cycles_ < next_irq_ready_cycle_)
+    {
+        if (read_lba_ >= 13952u && read_lba_ < 14064u)
+        {
+            emu::logf(emu::LogLevel::warn, "SR_CD",
+                "ASYNC_BLOCK ready now=%llu read_lba=%u type=%u irqf=0x%02X ready_at=%llu",
+                (unsigned long long)now_cycles_, (unsigned)read_lba_, (unsigned)async_irq_type_,
+                (unsigned)irq_flags_, (unsigned long long)next_irq_ready_cycle_);
+        }
+        return; // min delay
+    }
 
     // Deliver: push async response and fire IRQ
     clear_resp();
@@ -1059,6 +1113,12 @@ void Cdrom::deliver_async_irq()
     async_resp_valid_ = 0;
     const uint8_t type = async_irq_type_;
     async_irq_type_ = 0;
+    if (read_lba_ >= 13952u && read_lba_ < 14064u)
+    {
+        emu::logf(emu::LogLevel::warn, "SR_CD",
+            "ASYNC_DELIVER now=%llu read_lba=%u type=%u irqf=0x%02X",
+            (unsigned long long)now_cycles_, (unsigned)read_lba_, (unsigned)type, (unsigned)irq_flags_);
+    }
     set_irq(type);
 }
 
@@ -2232,6 +2292,10 @@ void Cdrom::exec_command(uint8_t cmd)
             streaming_mode_ = (cmd == 0x1Bu) ? 1u : 0u; // ReadS = streaming
             read_lba_ = loc_lba_;
             data_lba_ = read_lba_;
+            // Clear stale timer from previous read/speed change.
+            // The first sector comes via read_pending_irq1_ → INT1 path,
+            // and the continuous timer is re-armed after that delivery.
+            next_read_due_cycle_ = 0;
             // First response acknowledges the command with the pre-read drive state.
             push_resp(status_);
             queue_cmd_irq(0x03); // INT3 (first response)
@@ -2353,14 +2417,44 @@ void Cdrom::exec_command(uint8_t cmd)
         }
         case 0x0E: // SetMode
         {
+            const uint8_t old_mode = mode_;
             mode_ = param_fifo_[0];
-            emu::logf(emu::LogLevel::info, "CD", "SetMode: 0x%02X (ss=%s xa=%d speed=%s)",
+            const bool speed_change = ((old_mode ^ mode_) & 0x80u) != 0;
+            emu::logf(emu::LogLevel::info, "CD", "SetMode: 0x%02X (ss=%s xa=%d speed=%s%s)",
                 mode_,
                 (mode_ & 0x20) ? "2340" : "2048",
                 (mode_ >> 3) & 1,
-                (mode_ & 0x80) ? "2x" : "1x");
+                (mode_ & 0x80) ? "2x" : "1x",
+                speed_change ? " SPEED_CHANGE" : "");
             push_resp(status_);
             queue_cmd_irq(0x03);
+
+            // Real PS1 hardware: changing the speed bit requires the drive motor
+            // to physically change RPM. DuckStation models this as:
+            //   single→double: 0.6 * 33868800 ≈ 20.3M ticks
+            //   double→single: 0.7 * 33868800 ≈ 23.7M ticks
+            // Only applies when the drive is actively reading/seeking — not when
+            // idle (BIOS init sets mode without the motor spinning yet).
+            if (speed_change && reading_active_)
+            {
+                const bool now_double = (mode_ & 0x80u) != 0;
+                const uint32_t change_ticks = now_double
+                    ? (uint32_t)(0.6 * (double)kPsxMasterClock)   // single→double
+                    : (uint32_t)(0.7 * (double)kPsxMasterClock);  // double→single
+
+                if (next_read_due_cycle_ > now_cycles_)
+                    next_read_due_cycle_ += change_ticks;
+                else
+                    next_read_due_cycle_ = now_cycles_ + change_ticks;
+
+                if (pending_irq_due_cycle_ > now_cycles_)
+                    pending_irq_due_cycle_ += change_ticks;
+
+                emu::logf(emu::LogLevel::warn, "CD",
+                    "Speed change to %s while reading: delaying drive by %u ticks (~%.0f ms)",
+                    now_double ? "2x" : "1x",
+                    change_ticks, (double)change_ticks / 33868.0);
+            }
             break;
         }
         case 0x0F: // GetParam
@@ -2407,7 +2501,17 @@ void Cdrom::exec_command(uint8_t cmd)
             // LibCrypt protection: if an SBI file provides replacement SubQ
             // for the current head position, return the SBI data instead.
             // This is how LibCrypt-protected games verify disc authenticity.
-            const uint32_t current_lba = reading_active_ ? read_lba_ : head_lba_;
+            //
+            // Position logic (matches DuckStation):
+            // - During seek (seek_in_progress_ or pending first sector): use the
+            //   SEEK TARGET so the game sees the position it requested, not the
+            //   old head position. DuckStation interpolates; we snap to target.
+            // - After sector delivery: use head_lba_ (last delivered sector).
+            // - Idle: use head_lba_.
+            const uint32_t current_lba =
+                (reading_active_ && (seek_in_progress_ || seek_pending_ || read_pending_irq1_))
+                    ? read_lba_    // target position during seek/pending
+                    : head_lba_;   // last delivered sector
 
             // Check SBI replacement first (LibCrypt)
             if (disc_)
@@ -2486,6 +2590,11 @@ void Cdrom::exec_command(uint8_t cmd)
                 push_resp(u8_to_bcd((uint8_t)abs_mm));
                 push_resp(u8_to_bcd((uint8_t)abs_ss));
                 push_resp(u8_to_bcd((uint8_t)abs_ff));
+                emu::logf(emu::LogLevel::info, "CD",
+                    "GetLocP T%02X I%02X R[%02X:%02X:%02X] A[%02X:%02X:%02X] lba=%u head=%u read=%u seek=%d seekp=%d rpend=%d",
+                    track_bcd, index_bcd, rel_mm, rel_ss, rel_ff,
+                    u8_to_bcd((uint8_t)abs_mm), u8_to_bcd((uint8_t)abs_ss), u8_to_bcd((uint8_t)abs_ff),
+                    current_lba, head_lba_, read_lba_, (int)seek_in_progress_, (int)seek_pending_, (int)read_pending_irq1_);
             }
             queue_cmd_irq(0x03);
             break;
@@ -2812,7 +2921,8 @@ void Cdrom::exec_command(uint8_t cmd)
         {
             // GetQ: Read Q subchannel data from current position.
             // LibCrypt: SBI replacement applies here too.
-            const uint32_t current_lba = reading_active_ ? read_lba_ : head_lba_;
+            // Use head_lba_ (last delivered sector) — same fix as GetLocP.
+            const uint32_t current_lba = head_lba_;
 
             // Check SBI replacement first (LibCrypt)
             if (disc_)
@@ -3048,16 +3158,20 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
             {
                 emu::logf(emu::LogLevel::info, "CD", "CMD_WRITE: 0x%02X (%s) irq=0x%02X busy=%d queued=%d param_count=%d",
                     v, cmd_name(v), irq_flags_, busy_, queued_cmd_valid_, param_count_);
+                // DuckStation dual-channel model: commands execute even when
+                // irq_flags has unACK'd bits, as long as the internal pipeline
+                // (busy, cmd_exec, read_pending) is free. On real hardware, the
+                // game writes a command, the controller processes it with a delay,
+                // and the response INT3 overwrites whatever was in irq_flags.
+                // DuckStation's BeginCommand only checks HasPendingCommand(), NOT
+                // the interrupt_flag_register.
+                //
+                // We still block on busy_ and cmd_exec_valid_ (another command in
+                // flight) but NOT on irq_flags or pending_irq_type_ — the command
+                // and sector delivery are independent channels.
                 const uint8_t command_pipeline_busy =
-                    (((irq_flags_ & 0x1Fu) != 0u) ||
-                     busy_ ||
+                    (busy_ ||
                      cmd_exec_valid_ ||
-                     (pending_irq_type_ != 0u) ||
-                     // NOTE: resp_r_ != resp_w_ (FIFO not empty) intentionally NOT blocking here.
-                     // Real PS1 hardware: new command can be written while FIFO has unread data;
-                     // exec_command() calls clear_resp() before pushing a new response.
-                     // Blocking on non-empty FIFO caused BIOS GetStat to be stranded after
-                     // GetID (irq_en=0x18 → no HW IRQ → BIOS never drains FIFO).
                      read_pending_irq1_ ||
                      async_stat_pending_) ? 1u : 0u;
                 // If there are pending cdrom interrupts, they must be acknowledged before sending a command.
@@ -3240,6 +3354,22 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     next_irq_ready_cycle_ = now_cycles_ + kMinInterruptDelay;
                 }
 
+                // Deferred command INT3: fire now that the sector INT1 was ACK'd.
+                // This implements the second half of the dual-channel model:
+                // sector INT1 is seen first, then command INT3 follows.
+                if (deferred_cmd_resp_valid_ && (irq_flags_ & 0x1Fu) == 0)
+                {
+                    irq_flags_ = (irq_flags_ & ~0x07u) | (deferred_cmd_irq_ & 0x07u);
+                    deferred_cmd_resp_valid_ = 0;
+                    deferred_cmd_irq_ = 0;
+                    emu::logf(emu::LogLevel::warn, "CD",
+                        "Deferred INT3 delivered after INT1 ACK, irq_flags=0x%02X",
+                        irq_flags_);
+                    // Notify bus of new IRQ
+                    if (irq_callback_)
+                        irq_callback_(irq_line(), irq_callback_user_);
+                }
+
                 // Special bits:
                 if (v & 0x40u)
                 {
@@ -3298,8 +3428,15 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // Skip when sector thread is active — the thread handles timing.
                 // The ACK-driven code re-arms pending_irq with a future due that
                 // prevents the sector thread signal from being delivered.
+                // Continuous read: re-arm after INT1 ACK.
+                // Allow even with queued info commands (GetLocP/GetStat/GetLocL)
+                // — they don't stop reading. Only skip for drive-changing commands
+                // (Pause, SetLoc, Stop) that will cancel reading when executed.
                 else if (!sector_thread_running_.load(std::memory_order_relaxed) &&
-                         reading_active_ && !queued_cmd_valid_ && ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
+                         reading_active_ &&
+                         (!queued_cmd_valid_ ||
+                          queued_cmd_ == 0x01u || queued_cmd_ == 0x10u || queued_cmd_ == 0x11u) &&
+                         ((old_flags & 0x07u) == 0x01u) && ((irq_flags_ & 0x07u) == 0u))
                 {
                     pending_irq_type_ = 0x01;
                     pending_irq_resp_ = status_;
@@ -3308,6 +3445,19 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                     const uint32_t irq_delay = read_sector_ticks();
                     arm_pending_irq_after(irq_delay);
                     pending_read_seek_commit_ = 0;
+                }
+                // DuckStation dual-channel: after ACK'ing a command INT3 during
+                // active reading, re-arm the continuous read timer if nothing else
+                // is pending. Without this, GetLocP polling during ReadS kills
+                // sector delivery because the INT3 ACK doesn't trigger the
+                // continuous read path (old_flags==0x03 != 0x01).
+                else if (!sector_thread_running_.load(std::memory_order_relaxed) &&
+                         reading_active_ && pending_irq_type_ == 0 &&
+                         next_read_due_cycle_ == 0 &&
+                         ((old_flags & 0x07u) == 0x03u) && ((irq_flags_ & 0x07u) == 0u))
+                {
+                    // No sector delivery pending and no timer armed — re-arm.
+                    next_read_due_cycle_ = now_cycles_ + read_sector_ticks();
                 }
                 // If async status is pending and INT3 was just acknowledged,
                 // defer INT1 delivery for proper edge detection.
@@ -3331,12 +3481,14 @@ void Cdrom::mmio_write8(uint32_t addr, uint8_t v)
                 // because the BIOS event handler isn't installed for unsolicited IRQs.
                 // INT5 is queued after GetStat instead.
 
-                // If there is a queued command and no pending IRQ flags (and no
-                // deferred IRQ waiting), start it now. The queued command will
-                // produce its own IRQ via queue_cmd_irq, which has a delay.
+                // If there is a queued command and irq_flags is clear, start it.
+                // DuckStation model: commands execute independently of pending
+                // sector delivery (pending_irq_type_). The command's INT3 goes
+                // to irq_flags_ while the sector INT1 stays in pending_irq.
+                // Removing the pending_irq_type_==0 check fixes GetLocP being
+                // permanently blocked during ReadS continuous reading.
                 if (queued_cmd_valid_ &&
                     ((irq_flags_ & 0x1Fu) == 0u) &&
-                    pending_irq_type_ == 0 &&
                     !cmd_exec_valid_ &&
                     !read_pending_irq1_ &&
                     !async_stat_pending_)
@@ -3487,27 +3639,21 @@ void Cdrom::tick(uint32_t cycles)
         // If pending INT3 (info cmd), don't block — thread will re-signal
     }
 
-    // Cycle-based timer-driven read (legacy — will be removed when sector thread is active).
+    // Cycle-based timer-driven read.
+    // DuckStation model: the drive keeps reading at fixed intervals regardless
+    // of whether the game ACK'd. If the previous sector wasn't consumed,
+    // it's dropped and the new one supersedes it.
     if (!sector_thread_running_.load(std::memory_order_relaxed) &&
         next_read_due_cycle_ != 0 && now_cycles_ >= next_read_due_cycle_)
         {
-            static int blocked_trace = 0;
-            if (reading_active_ && pending_irq_type_ != 0 && blocked_trace < 3)
-            {
-                ++blocked_trace;
-                emu::logf(emu::LogLevel::warn, "CD_TIMER",
-                    "BLOCKED: pend_type=%u reason=0x%02X flags=0x%02X reading=%d LBA=%u",
-                    pending_irq_type_, pending_irq_reason_, irq_flags_, (int)reading_active_, read_lba_);
-            }
             if (reading_active_ && pending_irq_type_ == 0)
             {
+                // Normal path: no pending IRQ, schedule sector delivery
                 next_read_due_cycle_ = 0;
                 pending_irq_type_ = 0x01;
                 pending_irq_reason_ = 0xFFu;
                 pending_irq_live_status_ = 1;
                 pending_irq_due_cycle_ = now_cycles_;
-                emu::logf(emu::LogLevel::warn, "CD",
-                    "Timer-driven advance: LBA=%u -> %u (backup)", read_lba_, read_lba_ + 1);
             }
             else if (reading_active_ && pending_irq_type_ == 0x03)
             {
@@ -3516,12 +3662,36 @@ void Cdrom::tick(uint32_t cycles)
                 // INT3 is delivered. Without this, GetLocP polling during ReadS
                 // starves sector delivery indefinitely.
                 next_read_due_cycle_ = now_cycles_ + read_sector_ticks();
+                if (read_lba_ >= 13952u && read_lba_ < 14064u)
+                {
+                    emu::logf(emu::LogLevel::warn, "SR_CD",
+                        "REARM_INT3 now=%llu read_lba=%u pend_type=%u irqf=0x%02X next_read=%llu pend_due=%llu async=%d dr=%d want=%d",
+                        (unsigned long long)now_cycles_, (unsigned)read_lba_, (unsigned)pending_irq_type_,
+                        (unsigned)irq_flags_, (unsigned long long)next_read_due_cycle_,
+                        (unsigned long long)pending_irq_due_cycle_, (int)async_stat_pending_,
+                        (int)data_ready_pending_, (int)want_data_);
+                }
             }
             else if (!reading_active_)
             {
                 next_read_due_cycle_ = 0; // cancelled
             }
-            // else: pending INT1/INT2 — keep retrying next tick
+            else
+            {
+                // Pending INT1/INT2/INT5: re-arm for the next sector interval.
+                // The drive keeps spinning regardless; the game will eventually
+                // ACK and get the latest sector from the buffer.
+                next_read_due_cycle_ = now_cycles_ + read_sector_ticks();
+                if (read_lba_ >= 13952u && read_lba_ < 14064u)
+                {
+                    emu::logf(emu::LogLevel::warn, "SR_CD",
+                        "REARM_PEND now=%llu read_lba=%u pend_type=%u irqf=0x%02X next_read=%llu pend_due=%llu async=%d dr=%d want=%d",
+                        (unsigned long long)now_cycles_, (unsigned)read_lba_, (unsigned)pending_irq_type_,
+                        (unsigned)irq_flags_, (unsigned long long)next_read_due_cycle_,
+                        (unsigned long long)pending_irq_due_cycle_, (int)async_stat_pending_,
+                        (int)data_ready_pending_, (int)want_data_);
+                }
+            }
         }
 
     // Deliver pending async IRQs after delay expires.
@@ -3552,6 +3722,15 @@ void Cdrom::tick(uint32_t cycles)
             const uint32_t deliver_read_lba = read_lba_;
             const uint32_t deliver_data_lba = data_lba_;
             const uint8_t deliver_type = pending_irq_type_;
+            if (deliver_read_lba >= 13952u && deliver_read_lba < 14064u)
+            {
+                emu::logf(emu::LogLevel::warn, "SR_CD",
+                    "DELIVER now=%llu read_lba=%u data_lba=%u pend_type=%u reason=0x%02X irqf=0x%02X next_read=%llu pend_due=%llu async=%d dr=%d want=%d",
+                    (unsigned long long)now_cycles_, (unsigned)deliver_read_lba, (unsigned)deliver_data_lba,
+                    (unsigned)deliver_type, (unsigned)pending_irq_reason_, (unsigned)irq_flags_,
+                    (unsigned long long)next_read_due_cycle_, (unsigned long long)pending_irq_due_cycle_,
+                    (int)async_stat_pending_, (int)data_ready_pending_, (int)want_data_);
+            }
             // For continuous ReadN/ReadS: advance sector before delivering INT1
             const uint8_t is_read_advance = (pending_irq_reason_ == 0xFFu) ? 1u : 0u;
             if (is_read_advance)
@@ -3628,10 +3807,13 @@ void Cdrom::tick(uint32_t cycles)
                     // Sector was written to buffer — point read to it
                     sb_r_ = (sb_w_ + kNumSB - 1) % kNumSB;
                 }
-                else if (is_read_advance && reading_active_)
+                else if (is_read_advance && reading_active_ && want_data_)
                 {
-                    // try_fill skipped this sector (XA audio, null pad, or error).
-                    // Don't deliver INT1 — schedule the next sector instead.
+                    // If software explicitly requested data and we still couldn't
+                    // expose a sector (XA audio, null pad, or read error), skip
+                    // the INT1 and move on. Do NOT use this path when want_data_
+                    // is false: the sector-ready INT1 still exists on hardware,
+                    // only the FIFO/DRQ visibility is suppressed.
                     const uint32_t next_delay = read_sector_ticks();
                     pending_irq_type_ = 0x01;
                     pending_irq_reason_ = 0xFFu;

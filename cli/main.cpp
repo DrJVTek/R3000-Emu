@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -14,6 +17,8 @@
 #if defined(_WIN32)
 #include <direct.h>
 #include <codecvt>
+#include <fcntl.h>
+#include <io.h>
 #include <locale>
 #include <map>
 #include <string>
@@ -53,10 +58,101 @@ static int has_flag(int argc, char** argv, const char* flag)
     return 0;
 }
 
+namespace
+{
+
+struct McpLogEntry
+{
+    uint64_t seq{0};
+    uint64_t ts_ns{0};
+    emu::LogLevel level{emu::LogLevel::info};
+    char tag[32]{};
+    char msg[256]{};
+};
+
+struct McpLogSink
+{
+    static constexpr size_t kCap = 512;
+    std::mutex mtx{};
+    std::array<McpLogEntry, kCap> ring{};
+    uint32_t head{0};
+    uint32_t count{0};
+    uint64_t next_seq{1};
+};
+
+static McpLogSink g_mcp_log_sink{};
+
+static const char* log_level_name(emu::LogLevel lvl)
+{
+    switch (lvl)
+    {
+    case emu::LogLevel::error: return "error";
+    case emu::LogLevel::warn: return "warn";
+    case emu::LogLevel::info: return "info";
+    case emu::LogLevel::debug: return "debug";
+    case emu::LogLevel::trace: return "trace";
+    }
+    return "unknown";
+}
+
+static bool str_contains_ci(const char* haystack, const char* needle)
+{
+    if (!needle || !*needle)
+        return true;
+    if (!haystack)
+        return false;
+    const size_t nlen = std::strlen(needle);
+    if (nlen == 0)
+        return true;
+    for (const char* h = haystack; *h; ++h)
+    {
+        size_t i = 0;
+        while (i < nlen)
+        {
+            const unsigned char hc = (unsigned char)h[i];
+            const unsigned char nc = (unsigned char)needle[i];
+            if (!hc)
+                return false;
+            if (std::tolower(hc) != std::tolower(nc))
+                break;
+            ++i;
+        }
+        if (i == nlen)
+            return true;
+    }
+    return false;
+}
+
+static void mcp_async_log_consumer(uint64_t ts_ns, emu::LogLevel level, const char* tag, const char* msg, void* /*user*/)
+{
+    static const char* level_str[] = {"ERROR","WARN ","INFO ","DEBUG","TRACE"};
+    const uint8_t lvl = ((uint8_t)level < 5u) ? (uint8_t)level : 4u;
+    std::fprintf(stderr, "[%s] [%s] %s\n", level_str[lvl], tag ? tag : "", msg ? msg : "");
+
+    McpLogSink& sink = g_mcp_log_sink;
+    std::lock_guard<std::mutex> lock(sink.mtx);
+    McpLogEntry entry{};
+    entry.seq = sink.next_seq++;
+    entry.ts_ns = ts_ns;
+    entry.level = level;
+    std::snprintf(entry.tag, sizeof(entry.tag), "%s", tag ? tag : "");
+    std::snprintf(entry.msg, sizeof(entry.msg), "%s", msg ? msg : "");
+    sink.ring[sink.head] = entry;
+    sink.head = (sink.head + 1u) % (uint32_t)sink.kCap;
+    if (sink.count < sink.kCap)
+        ++sink.count;
+}
+
+} // namespace
+
 class CliMcpBackend final : public emu::IMcpBackend
 {
 public:
-    explicit CliMcpBackend(emu::Core& core) : core_(core) {}
+    explicit CliMcpBackend(emu::Core& core) : core_(core)
+    {
+        core_.hooks().add_step(&CliMcpBackend::step_hook_trampoline, this);
+        core_.hooks().add_write(&CliMcpBackend::write_hook_trampoline, this);
+    }
 
     emu::McpFrontendKind frontend_kind() const override
     {
@@ -134,6 +230,345 @@ public:
             | ((uint32_t)ram[phys_addr + 1] << 8)
             | ((uint32_t)ram[phys_addr + 2] << 16)
             | ((uint32_t)ram[phys_addr + 3] << 24);
+        return true;
+    }
+
+    bool read_cop0(uint32_t reg, uint32_t& out, std::string& err) const override
+    {
+        const r3000::Cpu* cpu = core_.cpu();
+        if (!cpu)
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+        if (reg >= 32u)
+        {
+            err = "cop0 reg out of range";
+            return false;
+        }
+        out = cpu->cop0(reg);
+        return true;
+    }
+
+    bool write_cop0(uint32_t reg, uint32_t value, std::string& err) override
+    {
+        r3000::Cpu* cpu = core_.cpu();
+        if (!cpu)
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+        if (reg >= 32u)
+        {
+            err = "cop0 reg out of range";
+            return false;
+        }
+        cpu->set_cop0(reg, value);
+        return true;
+    }
+
+    bool add_step_hook_write_cop0(uint32_t pc, uint32_t reg, uint32_t value, bool once, uint32_t& hook_id, std::string& err)
+    {
+        if (reg >= 32u)
+        {
+            err = "cop0 reg out of range";
+            return false;
+        }
+        StepHookRule rule{};
+        rule.id = next_step_hook_id_++;
+        rule.pc = pc;
+        rule.kind = StepHookKind::write_cop0;
+        rule.arg0 = reg;
+        rule.arg1 = value;
+        rule.once = once;
+        rule.enabled = true;
+        step_hooks_.push_back(rule);
+        hook_id = rule.id;
+        return true;
+    }
+
+    bool add_step_hook_write_ram_u32(uint32_t pc, uint32_t phys_addr, uint32_t value, bool once, uint32_t& hook_id, std::string& err)
+    {
+        uint8_t* ram = core_.ram();
+        if (!ram)
+        {
+            err = "ram not allocated";
+            return false;
+        }
+        if ((uint64_t)phys_addr + 4u > core_.ram_size())
+        {
+            err = "phys_addr out of range";
+            return false;
+        }
+        StepHookRule rule{};
+        rule.id = next_step_hook_id_++;
+        rule.pc = pc;
+        rule.kind = StepHookKind::write_ram_u32;
+        rule.arg0 = phys_addr;
+        rule.arg1 = value;
+        rule.once = once;
+        rule.enabled = true;
+        step_hooks_.push_back(rule);
+        hook_id = rule.id;
+        return true;
+    }
+
+    bool list_step_hooks(std::string& out_json, std::string& err) const
+    {
+        (void)err;
+        out_json = "{\"step_hooks\":[";
+        for (size_t i = 0; i < step_hooks_.size(); ++i)
+        {
+            const auto& h = step_hooks_[i];
+            if (i)
+                out_json += ",";
+            out_json += std::string("{\"id\":") + std::to_string(h.id) +
+                ",\"pc\":" + std::to_string(h.pc) +
+                ",\"kind\":\"" + std::string(h.kind == StepHookKind::write_cop0 ? "write_cop0" : "write_ram_u32") + "\"" +
+                ",\"arg0\":" + std::to_string(h.arg0) +
+                ",\"arg1\":" + std::to_string(h.arg1) +
+                ",\"once\":" + (h.once ? "true" : "false") +
+                ",\"enabled\":" + (h.enabled ? "true" : "false") +
+                ",\"hit_count\":" + std::to_string(h.hit_count) + "}";
+        }
+        out_json += "]}";
+        return true;
+    }
+
+    bool clear_step_hook(uint32_t hook_id, bool& removed, std::string& err)
+    {
+        (void)err;
+        removed = false;
+        for (size_t i = 0; i < step_hooks_.size(); ++i)
+        {
+            if (step_hooks_[i].id == hook_id)
+            {
+                step_hooks_.erase(step_hooks_.begin() + (ptrdiff_t)i);
+                removed = true;
+                return true;
+            }
+        }
+        return true;
+    }
+
+    bool clear_all_step_hooks(uint32_t& removed_count, std::string& err)
+    {
+        (void)err;
+        removed_count = (uint32_t)step_hooks_.size();
+        step_hooks_.clear();
+        return true;
+    }
+
+    bool add_mem_watch_write(uint32_t phys_addr_start, uint32_t phys_addr_end, bool has_pc, uint32_t pc,
+        bool has_value, uint32_t value, bool once, uint32_t& watch_id, std::string& err) override
+    {
+        if (phys_addr_end < phys_addr_start)
+        {
+            err = "phys_addr_end before phys_addr_start";
+            return false;
+        }
+        if ((uint64_t)phys_addr_end >= core_.ram_size())
+        {
+            err = "phys_addr_end out of range";
+            return false;
+        }
+        MemWatchRule rule{};
+        rule.id = next_mem_watch_id_++;
+        rule.phys_addr_start = phys_addr_start;
+        rule.phys_addr_end = phys_addr_end;
+        rule.has_pc = has_pc;
+        rule.pc = pc;
+        rule.has_value = has_value;
+        rule.value = value;
+        rule.once = once;
+        rule.enabled = true;
+        mem_watches_.push_back(rule);
+        watch_id = rule.id;
+        return true;
+    }
+
+    bool list_mem_watches(std::string& out_json, std::string& err) const override
+    {
+        (void)err;
+        out_json = "{\"mem_watches\":[";
+        for (size_t i = 0; i < mem_watches_.size(); ++i)
+        {
+            const auto& w = mem_watches_[i];
+            if (i)
+                out_json += ",";
+            out_json += std::string("{\"id\":") + std::to_string(w.id) +
+                ",\"phys_addr_start\":" + std::to_string(w.phys_addr_start) +
+                ",\"phys_addr_end\":" + std::to_string(w.phys_addr_end) +
+                ",\"has_pc\":" + (w.has_pc ? "true" : "false") +
+                ",\"pc\":" + std::to_string(w.pc) +
+                ",\"has_value\":" + (w.has_value ? "true" : "false") +
+                ",\"value\":" + std::to_string(w.value) +
+                ",\"once\":" + (w.once ? "true" : "false") +
+                ",\"enabled\":" + (w.enabled ? "true" : "false") +
+                ",\"hit_count\":" + std::to_string(w.hit_count) + "}";
+        }
+        out_json += "]}";
+        return true;
+    }
+
+    bool clear_mem_watch(uint32_t watch_id, bool& removed, std::string& err) override
+    {
+        (void)err;
+        removed = false;
+        for (size_t i = 0; i < mem_watches_.size(); ++i)
+        {
+            if (mem_watches_[i].id == watch_id)
+            {
+                mem_watches_.erase(mem_watches_.begin() + (ptrdiff_t)i);
+                removed = true;
+                return true;
+            }
+        }
+        return true;
+    }
+
+    bool clear_all_mem_watches(uint32_t& removed_count, std::string& err) override
+    {
+        (void)err;
+        removed_count = (uint32_t)mem_watches_.size();
+        mem_watches_.clear();
+        return true;
+    }
+
+    bool list_mem_watch_events(std::string& out_json, std::string& err) const override
+    {
+        (void)err;
+        out_json = "{\"events\":[";
+        const uint32_t count = mem_watch_event_count_;
+        const uint32_t start = (mem_watch_event_head_ + kMaxMemWatchEvents - count) % kMaxMemWatchEvents;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const auto& e = mem_watch_events_[(start + i) % kMaxMemWatchEvents];
+            if (i)
+                out_json += ",";
+            out_json += std::string("{\"seq\":") + std::to_string(e.seq) +
+                ",\"watch_id\":" + std::to_string(e.watch_id) +
+                ",\"pc\":" + std::to_string(e.pc) +
+                ",\"phys_addr\":" + std::to_string(e.phys_addr) +
+                ",\"value\":" + std::to_string(e.value) +
+                ",\"size\":" + std::to_string(e.size) + "}";
+        }
+        out_json += "]}";
+        return true;
+    }
+
+    bool clear_mem_watch_events(uint32_t& cleared_count, std::string& err) override
+    {
+        (void)err;
+        cleared_count = mem_watch_event_count_;
+        mem_watch_event_count_ = 0;
+        mem_watch_event_head_ = 0;
+        return true;
+    }
+
+    bool list_logs(uint64_t since_seq, bool has_min_level, uint32_t min_level,
+        const char* tag, const char* contains, uint32_t max_entries, std::string& out_json, std::string& err) const override
+    {
+        (void)err;
+        if (has_min_level && min_level > 4u)
+        {
+            err = "min_level out of range";
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(g_mcp_log_sink.mtx);
+        const uint32_t count = g_mcp_log_sink.count;
+        const uint32_t start = (g_mcp_log_sink.head + (uint32_t)McpLogSink::kCap - count) % (uint32_t)McpLogSink::kCap;
+        out_json = "{\"logs\":[";
+        uint32_t added = 0;
+        uint64_t newest_seq = 0;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const McpLogEntry& e = g_mcp_log_sink.ring[(start + i) % (uint32_t)McpLogSink::kCap];
+            newest_seq = e.seq;
+            if (e.seq <= since_seq)
+                continue;
+            if (has_min_level && (uint32_t)e.level > min_level)
+                continue;
+            if (tag && *tag && std::strcmp(e.tag, tag) != 0)
+                continue;
+            if (contains && *contains && !str_contains_ci(e.msg, contains) && !str_contains_ci(e.tag, contains))
+                continue;
+            if (added >= max_entries)
+                break;
+            if (added)
+                out_json += ",";
+            out_json += std::string("{\"seq\":") + std::to_string(e.seq) +
+                ",\"ts_ns\":" + std::to_string(e.ts_ns) +
+                ",\"level\":\"" + emu::McpServer::json_escape(log_level_name(e.level)) + "\"" +
+                ",\"tag\":\"" + emu::McpServer::json_escape(e.tag) + "\"" +
+                ",\"msg\":\"" + emu::McpServer::json_escape(e.msg) + "\"}";
+            ++added;
+        }
+        out_json += "],\"returned\":" + std::to_string(added) +
+            ",\"buffered\":" + std::to_string(count) +
+            ",\"newest_seq\":" + std::to_string(newest_seq) + "}";
+        return true;
+    }
+
+    bool clear_logs(uint32_t& cleared_count, std::string& err) override
+    {
+        (void)err;
+        std::lock_guard<std::mutex> lock(g_mcp_log_sink.mtx);
+        cleared_count = g_mcp_log_sink.count;
+        g_mcp_log_sink.head = 0;
+        g_mcp_log_sink.count = 0;
+        return true;
+    }
+
+    bool run_until_mem_watch(uint32_t max_steps, uint64_t& event_seq, uint32_t& watch_id,
+        uint32_t& hit_pc, uint32_t& hit_phys_addr, uint32_t& hit_value, uint32_t& hit_size,
+        uint32_t& steps_done, bool& hit, std::string& err) override
+    {
+        if (!core_.cpu())
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+        if (mem_watches_.empty())
+        {
+            err = "no mem watches set";
+            return false;
+        }
+        event_seq = 0;
+        watch_id = 0;
+        hit_pc = 0;
+        hit_phys_addr = 0;
+        hit_value = 0;
+        hit_size = 0;
+        steps_done = 0;
+        hit = false;
+        const uint64_t start_seq = next_mem_watch_event_seq_;
+        for (uint32_t i = 0; i < max_steps; ++i)
+        {
+            const auto res = core_.step();
+            if (res.kind != r3000::Cpu::StepResult::Kind::ok)
+            {
+                char msg[160];
+                std::snprintf(msg, sizeof(msg), "step stopped kind=%d pc=0x%08X", (int)res.kind, res.pc);
+                err = msg;
+                steps_done = i;
+                return false;
+            }
+            steps_done = i + 1;
+            if (last_mem_watch_event_seq_ >= start_seq)
+            {
+                const MemWatchEvent& e = last_mem_watch_event_;
+                event_seq = e.seq;
+                watch_id = e.watch_id;
+                hit_pc = e.pc;
+                hit_phys_addr = e.phys_addr;
+                hit_value = e.value;
+                hit_size = e.size;
+                hit = true;
+                return true;
+            }
+        }
         return true;
     }
 
@@ -306,8 +741,136 @@ public:
     }
 
 private:
+    enum class StepHookKind : uint32_t
+    {
+        write_cop0 = 0,
+        write_ram_u32 = 1,
+    };
+
+    struct StepHookRule
+    {
+        uint32_t id{0};
+        uint32_t pc{0};
+        StepHookKind kind{StepHookKind::write_cop0};
+        uint32_t arg0{0};
+        uint32_t arg1{0};
+        bool once{true};
+        bool enabled{true};
+        uint64_t hit_count{0};
+    };
+
+    static void step_hook_trampoline(uint32_t pc, void* user)
+    {
+        static_cast<CliMcpBackend*>(user)->on_step_hook(pc);
+    }
+
+    static void write_hook_trampoline(uint32_t phys_addr, uint32_t value, uint32_t size, void* user)
+    {
+        static_cast<CliMcpBackend*>(user)->on_write_hook(phys_addr, value, size);
+    }
+
+    void on_step_hook(uint32_t pc)
+    {
+        r3000::Cpu* cpu = core_.cpu();
+        uint8_t* ram = core_.ram();
+        if (!cpu)
+            return;
+        for (auto& h : step_hooks_)
+        {
+            if (!h.enabled || h.pc != pc)
+                continue;
+            ++h.hit_count;
+            if (h.kind == StepHookKind::write_cop0)
+            {
+                cpu->set_cop0(h.arg0, h.arg1);
+            }
+            else if (h.kind == StepHookKind::write_ram_u32 && ram && ((uint64_t)h.arg0 + 4u <= core_.ram_size()))
+            {
+                const uint32_t addr = h.arg0;
+                const uint32_t v = h.arg1;
+                ram[addr] = (uint8_t)(v & 0xFFu);
+                ram[addr + 1] = (uint8_t)((v >> 8) & 0xFFu);
+                ram[addr + 2] = (uint8_t)((v >> 16) & 0xFFu);
+                ram[addr + 3] = (uint8_t)((v >> 24) & 0xFFu);
+            }
+            if (h.once)
+                h.enabled = false;
+        }
+    }
+
+    void on_write_hook(uint32_t phys_addr, uint32_t value, uint32_t size)
+    {
+        if (mem_watches_.empty())
+            return;
+        const r3000::Cpu* cpu = core_.cpu();
+        const uint32_t pc = cpu ? cpu->pc() : 0;
+        const uint64_t write_start = phys_addr;
+        const uint64_t write_end = write_start + (size ? (uint64_t)size - 1u : 0u);
+        for (auto& w : mem_watches_)
+        {
+            if (!w.enabled)
+                continue;
+            if (write_end < w.phys_addr_start || write_start > w.phys_addr_end)
+                continue;
+            if (w.has_pc && w.pc != pc)
+                continue;
+            if (w.has_value && w.value != value)
+                continue;
+
+            ++w.hit_count;
+            MemWatchEvent ev{};
+            ev.seq = next_mem_watch_event_seq_++;
+            ev.watch_id = w.id;
+            ev.pc = pc;
+            ev.phys_addr = phys_addr;
+            ev.value = value;
+            ev.size = size;
+            mem_watch_events_[mem_watch_event_head_] = ev;
+            last_mem_watch_event_ = ev;
+            last_mem_watch_event_seq_ = ev.seq;
+            mem_watch_event_head_ = (mem_watch_event_head_ + 1u) % kMaxMemWatchEvents;
+            if (mem_watch_event_count_ < kMaxMemWatchEvents)
+                ++mem_watch_event_count_;
+            if (w.once)
+                w.enabled = false;
+        }
+    }
+
     emu::Core& core_;
     std::vector<emu::McpBreakpoint> breakpoints_{};
+    std::vector<StepHookRule> step_hooks_{};
+    struct MemWatchRule
+    {
+        uint32_t id{0};
+        uint32_t phys_addr_start{0};
+        uint32_t phys_addr_end{0};
+        bool has_pc{false};
+        uint32_t pc{0};
+        bool has_value{false};
+        uint32_t value{0};
+        bool once{false};
+        bool enabled{true};
+        uint64_t hit_count{0};
+    };
+    struct MemWatchEvent
+    {
+        uint64_t seq{0};
+        uint32_t watch_id{0};
+        uint32_t pc{0};
+        uint32_t phys_addr{0};
+        uint32_t value{0};
+        uint32_t size{0};
+    };
+    static constexpr uint32_t kMaxMemWatchEvents = 256;
+    std::vector<MemWatchRule> mem_watches_{};
+    std::array<MemWatchEvent, kMaxMemWatchEvents> mem_watch_events_{};
+    uint32_t mem_watch_event_head_{0};
+    uint32_t mem_watch_event_count_{0};
+    uint32_t next_mem_watch_id_{1};
+    uint64_t next_mem_watch_event_seq_{1};
+    MemWatchEvent last_mem_watch_event_{};
+    uint64_t last_mem_watch_event_seq_{0};
+    uint32_t next_step_hook_id_{1};
 };
 
 // --- Hook: RAM address watch (logs value each VBlank when it changes) ---
@@ -892,6 +1455,13 @@ static flog::Level parse_flog_level_or(const char* s, flog::Level fallback)
 int main(int argc, char** argv)
 {
     const int mcp_stdio = has_flag(argc, argv, "--mcp-stdio");
+#if defined(_WIN32)
+    if (mcp_stdio)
+    {
+        _setmode(_fileno(stdin), _O_BINARY);
+        _setmode(_fileno(stdout), _O_BINARY);
+    }
+#endif
     rlog::Logger logger{};
     rlog::logger_init(&logger, mcp_stdio ? stderr : stdout);
 
@@ -912,7 +1482,7 @@ int main(int argc, char** argv)
     // from the emulation thread, eliminating fflush overhead (~10-30ns per log call).
     const char* emu_lvl = arg_value(argc, argv, "--emu-log-level=");
     const emu::LogLevel log_max_level = emu::log_parse_level(emu_lvl);
-    emu::async_log_init(log_max_level);
+    emu::async_log_init(log_max_level, 14, &mcp_async_log_consumer, nullptr);
 
     const char* bios_path = arg_value(argc, argv, "--bios=");
     const char* load_path = arg_value(argc, argv, "--load=");

@@ -49,6 +49,11 @@ DebugServer::~DebugServer()
 bool DebugServer::start(uint16_t port)
 {
     if (running_.load()) return true;
+    if (core_ && !step_hook_registered_)
+    {
+        const int idx = core_->hooks().add_step(&DebugServer::step_hook_trampoline, this);
+        step_hook_registered_ = (idx >= 0);
+    }
     should_stop_.store(false);
     server_thread_ = std::thread(&DebugServer::server_thread_func, this, port);
     return true;
@@ -140,6 +145,40 @@ void DebugServer::handle_client(int client_fd)
     }
 }
 
+void DebugServer::step_hook_trampoline(uint32_t pc, void* user)
+{
+    static_cast<DebugServer*>(user)->on_step_hook(pc);
+}
+
+void DebugServer::on_step_hook(uint32_t pc)
+{
+    if (!core_) return;
+    auto* cpu = core_->cpu();
+    uint8_t* ram = core_->ram();
+    if (!cpu) return;
+    for (auto& h : step_hooks_)
+    {
+        if (!h.enabled || h.pc != pc)
+            continue;
+        ++h.hit_count;
+        if (h.kind == StepHookKind::write_cop0)
+        {
+            cpu->set_cop0(h.arg0, h.arg1);
+        }
+        else if (h.kind == StepHookKind::write_ram_u32 && ram && ((uint64_t)h.arg0 + 4u <= core_->ram_size()))
+        {
+            const uint32_t addr = h.arg0;
+            const uint32_t v = h.arg1;
+            ram[addr] = (uint8_t)(v & 0xFFu);
+            ram[addr + 1] = (uint8_t)((v >> 8) & 0xFFu);
+            ram[addr + 2] = (uint8_t)((v >> 16) & 0xFFu);
+            ram[addr + 3] = (uint8_t)((v >> 24) & 0xFFu);
+        }
+        if (h.once)
+            h.enabled = false;
+    }
+}
+
 // Simple JSON helpers (no dependency)
 static std::string json_str(const char* key, const char* val)
 {
@@ -183,6 +222,18 @@ std::string DebugServer::process_command(const std::string& line)
         if (pos == std::string::npos) return 0;
         return (uint32_t)strtoul(line.c_str() + pos + 1, nullptr, 0);
     };
+    auto find_bool = [&](const char* key, bool def) -> bool {
+        std::string k = "\""; k += key; k += "\"";
+        auto pos = line.find(k);
+        if (pos == std::string::npos) return def;
+        pos = line.find(':', pos + k.size());
+        if (pos == std::string::npos) return def;
+        auto vstart = line.find_first_not_of(" \t", pos + 1);
+        if (vstart == std::string::npos) return def;
+        if (line.compare(vstart, 4, "true") == 0) return true;
+        if (line.compare(vstart, 5, "false") == 0) return false;
+        return def;
+    };
 
     std::string cmd = find_str("cmd");
 
@@ -194,6 +245,15 @@ std::string DebugServer::process_command(const std::string& line)
     if (cmd == "read_istat")      return cmd_read_istat();
     if (cmd == "read_game_state") return cmd_read_game_state();
     if (cmd == "read_dma")        return cmd_read_dma();
+    if (cmd == "read_cop0")       return cmd_read_cop0(find_num("reg"));
+    if (cmd == "write_cop0")      return cmd_write_cop0(find_num("reg"), find_num("value"));
+    if (cmd == "add_step_hook_write_cop0")
+        return cmd_add_step_hook_write_cop0(find_num("pc"), find_num("reg"), find_num("value"), find_bool("once", true));
+    if (cmd == "add_step_hook_write_ram_u32")
+        return cmd_add_step_hook_write_ram_u32(find_num("pc"), find_num("phys_addr"), find_num("value"), find_bool("once", true));
+    if (cmd == "list_step_hooks") return cmd_list_step_hooks();
+    if (cmd == "clear_step_hook") return cmd_clear_step_hook(find_num("hook_id"));
+    if (cmd == "clear_all_step_hooks") return cmd_clear_all_step_hooks();
     if (cmd == "ping")            return "{\"ok\":true,\"msg\":\"pong\"}";
 
     return "{\"error\":\"unknown command\"}";
@@ -364,6 +424,111 @@ std::string DebugServer::cmd_read_dma()
     }
     s += "]}";
     return s;
+}
+
+std::string DebugServer::cmd_read_cop0(uint32_t reg)
+{
+    if (!core_ || !core_->cpu()) return "{\"error\":\"no cpu\"}";
+    if (reg >= 32u) return "{\"error\":\"cop0 reg out of range\"}";
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "{\"reg\":%u,\"value\":\"0x%08X\"}", reg, core_->cpu()->cop0(reg));
+    return buf;
+}
+
+std::string DebugServer::cmd_write_cop0(uint32_t reg, uint32_t value)
+{
+    if (!core_ || !core_->cpu()) return "{\"error\":\"no cpu\"}";
+    if (reg >= 32u) return "{\"error\":\"cop0 reg out of range\"}";
+    core_->cpu()->set_cop0(reg, value);
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"reg\":%u,\"value\":\"0x%08X\"}", reg, value);
+    return buf;
+}
+
+std::string DebugServer::cmd_add_step_hook_write_cop0(uint32_t pc, uint32_t reg, uint32_t value, bool once)
+{
+    if (!core_ || !core_->cpu()) return "{\"error\":\"no cpu\"}";
+    if (reg >= 32u) return "{\"error\":\"cop0 reg out of range\"}";
+    StepHookRule h{};
+    h.id = next_step_hook_id_++;
+    h.pc = pc;
+    h.kind = StepHookKind::write_cop0;
+    h.arg0 = reg;
+    h.arg1 = value;
+    h.once = once;
+    h.enabled = true;
+    step_hooks_.push_back(h);
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"hook_id\":%u,\"pc\":\"0x%08X\",\"reg\":%u,\"value\":\"0x%08X\",\"once\":%s}",
+        h.id, pc, reg, value, once ? "true" : "false");
+    return buf;
+}
+
+std::string DebugServer::cmd_add_step_hook_write_ram_u32(uint32_t pc, uint32_t phys_addr, uint32_t value, bool once)
+{
+    if (!core_ || !core_->ram()) return "{\"error\":\"no ram\"}";
+    if ((uint64_t)phys_addr + 4u > core_->ram_size()) return "{\"error\":\"phys_addr out of range\"}";
+    StepHookRule h{};
+    h.id = next_step_hook_id_++;
+    h.pc = pc;
+    h.kind = StepHookKind::write_ram_u32;
+    h.arg0 = phys_addr;
+    h.arg1 = value;
+    h.once = once;
+    h.enabled = true;
+    step_hooks_.push_back(h);
+    char buf[176];
+    std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"hook_id\":%u,\"pc\":\"0x%08X\",\"phys_addr\":\"0x%08X\",\"value\":\"0x%08X\",\"once\":%s}",
+        h.id, pc, phys_addr, value, once ? "true" : "false");
+    return buf;
+}
+
+std::string DebugServer::cmd_list_step_hooks()
+{
+    std::string s = "{\"step_hooks\":[";
+    for (size_t i = 0; i < step_hooks_.size(); ++i)
+    {
+        const auto& h = step_hooks_[i];
+        char tmp[256];
+        std::snprintf(tmp, sizeof(tmp),
+            "%s{\"id\":%u,\"pc\":\"0x%08X\",\"kind\":\"%s\",\"arg0\":\"0x%08X\",\"arg1\":\"0x%08X\",\"once\":%s,\"enabled\":%s,\"hit_count\":%llu}",
+            i ? "," : "",
+            h.id, h.pc,
+            h.kind == StepHookKind::write_cop0 ? "write_cop0" : "write_ram_u32",
+            h.arg0, h.arg1,
+            h.once ? "true" : "false",
+            h.enabled ? "true" : "false",
+            (unsigned long long)h.hit_count);
+        s += tmp;
+    }
+    s += "]}";
+    return s;
+}
+
+std::string DebugServer::cmd_clear_step_hook(uint32_t hook_id)
+{
+    for (size_t i = 0; i < step_hooks_.size(); ++i)
+    {
+        if (step_hooks_[i].id == hook_id)
+        {
+            step_hooks_.erase(step_hooks_.begin() + (ptrdiff_t)i);
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"removed\":true,\"hook_id\":%u}", hook_id);
+            return buf;
+        }
+    }
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"removed\":false,\"hook_id\":%u}", hook_id);
+    return buf;
+}
+
+std::string DebugServer::cmd_clear_all_step_hooks()
+{
+    const uint32_t removed = (uint32_t)step_hooks_.size();
+    step_hooks_.clear();
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"removed_count\":%u}", removed);
+    return buf;
 }
 
 } // namespace debug

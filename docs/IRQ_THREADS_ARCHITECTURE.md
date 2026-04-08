@@ -20,9 +20,9 @@ Sur vrai hardware PS1, chaque périphérique a son propre oscillateur/horloge et
 |--------|--------|--------|------------|--------|
 | GPU scanline | Cristal GPU | ~63.5µs/scanline | bit 0 (VBlank), HBlank signal | ✅ Implémenté |
 | CDROM sector | Moteur drive | ~6.67ms (2x) / ~13.3ms (1x) | bit 2 | ✅ Implémenté |
-| Timer 0 | Reprogrammable (sysclk ou dotclock) | Dépend de la config game | bit 4 | 🔲 À faire |
-| Timer 1 | Reprogrammable (sysclk ou HBlank) | Dépend de la config game | bit 5 | ✅ HBlank dans GPU thread |
-| Timer 2 | Reprogrammable (sysclk ou sysclk/8) | Dépend de la config game | bit 6 | 🔲 À faire |
+| Timer 0 | Reprogrammable (sysclk ou dotclock) | Dépend de la config game | bit 4 | ✅ Thread (sysclk), 🔲 dotclock ext |
+| Timer 1 | Reprogrammable (sysclk ou HBlank) | Dépend de la config game | bit 5 | ✅ Thread (sysclk) + HBlank dans GPU thread |
+| Timer 2 | Reprogrammable (sysclk ou sysclk/8) | Dépend de la config game | bit 6 | ✅ Thread (sysclk + sysclk/8) — spin-wait hybride ~1µs |
 | SIO0 | Transfer complete | BAUD * 8 ticks | bit 7 | 🔲 À faire |
 | DMA mémoire | Bus transfer | Variable | bit 3 | 🔲 À faire |
 
@@ -172,6 +172,10 @@ Le déterminisme n'est pas un problème pour nous : le vrai PS1 n'est pas déter
 ### Fait
 - ✅ Phase 1 : GPU scanline thread (VBlank + HBlank + Timer 1 ext clock)
 - ✅ Phase 2 : CDROM sector delivery thread
+- ✅ Phase 3 : Timer 0/1/2 threads avec spin-wait hybride (~1µs précision)
+  - Timer 2 sysclk/8 géré par le thread (pas skippé)
+  - Reset-at-target : count reset à 0 dans le thread
+  - Spin-wait : sleep chunks 500µs + yield() les dernières 200µs
 - ✅ Infrastructure : `irq_ext_pending_` atomic register, `fire_irq_external(bit)`
 
 ### Résolu : pas de threads pour le hardware CPU-synchrone
@@ -181,6 +185,58 @@ Seul le hardware piloté par un oscillateur/moteur **physiquement indépendant**
 - GPU crystal → VBlank (50/60Hz) + HBlank (~15.7kHz)
 - Drive CD → secteurs (75/150 par seconde)
 
+**Exception** : Timer 0/1/2 ont quand même des threads pour le mode UE5 (où la boucle CPU tick ne peut pas les cadencer précisément). Voir section "Timer threads" ci-dessous.
+
+### Timer threads (implémentés 2026-04-08)
+
+Les timers PS1 ont des threads dédiés quand `timer_threads_running_` est actif (mode UE5). Chaque thread dort jusqu'au prochain event (target hit ou overflow) puis fire l'IRQ.
+
+#### Règles de dispatch :
+| Timer | Clock source | Géré par |
+|-------|-------------|----------|
+| Timer 0 | sysclk | Thread timer 0 |
+| Timer 0 | dotclock (ext) | GPU thread (non implémenté) |
+| Timer 1 | sysclk | Thread timer 1 |
+| Timer 1 | HBlank (ext) | GPU thread via `fire_hblank_external()` |
+| Timer 2 | sysclk | Thread timer 2 |
+| Timer 2 | sysclk/8 (ext) | **Thread timer 2** (pas le GPU — c'est un clock CPU-dérivé) |
+
+#### Spin-wait hybride (précision sub-milliseconde)
+
+`std::this_thread::sleep_for()` a une précision de ~15ms sur Windows (scheduler tick). C'est insuffisant pour les timers PS1 qui fire souvent à ~1ms (ex: Timer 2 target=0x1000 à sysclk/8 ≈ 0.97ms).
+
+**Solution** : spin-wait hybride en deux phases.
+
+```
+Phase 1 — Coarse sleep : chunks de 500µs
+  while (now + 200µs < target_time)
+      sleep(500µs)
+      check reconfig
+
+Phase 2 — Spin-wait : yield() pour les dernières ~200µs
+  while (now < target_time)
+      yield()
+```
+
+| Approche | Précision | CPU cost |
+|----------|-----------|----------|
+| `sleep_for()` seul | ~15ms (Windows) | Minimal |
+| `yield()` seul | ~1-10µs | 100% un core |
+| **Hybride** | **~1-10µs** | **~0.1%** un core |
+
+Le coût CPU est négligeable : on spin seulement les dernières ~200µs de chaque période timer. Le reste c'est du sleep OS normal.
+
+#### Reset at target
+
+Quand un timer atteint sa target avec `reset_at_target` (mode bit 3) :
+1. Le thread reset count à 0 **avant** de calculer le prochain sleep
+2. Fire l'IRQ via `fire_irq_external(4 + ch)`
+3. Recalcule `ticks_to_event = target - 0 = target`
+4. Dort pour `target * ns_per_tick`
+
+Sans ce reset, le timer se bloquait définitivement à count=target (bug fix 2026-04-08).
+
 ### À faire
 - 🔲 Phase 5 : DMA threads pour les canaux mémoire (si nécessaire pour UE5)
 - 🔲 Phase 6 : Nettoyer tick()/tick_peripherals() — retirer le code legacy
+- 🔲 Timer 0 dotclock : actuellement non géré quand `use_external_clock` (rare)

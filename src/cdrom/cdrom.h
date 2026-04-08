@@ -341,6 +341,11 @@ class Cdrom
     uint8_t async_resp_valid_{0};      // 1 if async has response to deliver
     void set_async_irq(uint8_t type, uint8_t resp);
     void deliver_async_irq();
+
+    // Deferred command INT3: set when a command INT3 would overwrite an
+    // unACK'd sector INT1 in irq_flags. Delivered after the INT1 is ACK'd.
+    uint8_t deferred_cmd_irq_{0};       // 0=none, 0x03=INT3
+    uint8_t deferred_cmd_resp_valid_{0}; // 1 if deferred INT3 waiting
     uint8_t reading_active_{0};      // ReadN/ReadS continuous reading in progress
     uint32_t int1_deliver_count_{0}; // debug: total INT1 deliveries
     uint8_t streaming_mode_{0};      // 1 if ReadS (streaming), 0 if ReadN (normal)

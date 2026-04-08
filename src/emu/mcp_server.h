@@ -52,6 +52,26 @@ public:
     virtual bool get_cpu_state(McpCpuState& out) const = 0;
     virtual bool step(uint32_t count, std::string& err) = 0;
     virtual bool read_ram_u32(uint32_t phys_addr, uint32_t& out, std::string& err) const = 0;
+    virtual bool read_cop0(uint32_t reg, uint32_t& out, std::string& err) const = 0;
+    virtual bool write_cop0(uint32_t reg, uint32_t value, std::string& err) = 0;
+    virtual bool add_step_hook_write_cop0(uint32_t pc, uint32_t reg, uint32_t value, bool once, uint32_t& hook_id, std::string& err) = 0;
+    virtual bool add_step_hook_write_ram_u32(uint32_t pc, uint32_t phys_addr, uint32_t value, bool once, uint32_t& hook_id, std::string& err) = 0;
+    virtual bool list_step_hooks(std::string& out_json, std::string& err) const = 0;
+    virtual bool clear_step_hook(uint32_t hook_id, bool& removed, std::string& err) = 0;
+    virtual bool clear_all_step_hooks(uint32_t& removed_count, std::string& err) = 0;
+    virtual bool add_mem_watch_write(uint32_t phys_addr_start, uint32_t phys_addr_end, bool has_pc, uint32_t pc,
+        bool has_value, uint32_t value, bool once, uint32_t& watch_id, std::string& err) = 0;
+    virtual bool list_mem_watches(std::string& out_json, std::string& err) const = 0;
+    virtual bool clear_mem_watch(uint32_t watch_id, bool& removed, std::string& err) = 0;
+    virtual bool clear_all_mem_watches(uint32_t& removed_count, std::string& err) = 0;
+    virtual bool list_mem_watch_events(std::string& out_json, std::string& err) const = 0;
+    virtual bool clear_mem_watch_events(uint32_t& cleared_count, std::string& err) = 0;
+    virtual bool run_until_mem_watch(uint32_t max_steps, uint64_t& event_seq, uint32_t& watch_id,
+        uint32_t& hit_pc, uint32_t& hit_phys_addr, uint32_t& hit_value, uint32_t& hit_size,
+        uint32_t& steps_done, bool& hit, std::string& err) = 0;
+    virtual bool list_logs(uint64_t since_seq, bool has_min_level, uint32_t min_level,
+        const char* tag, const char* contains, uint32_t max_entries, std::string& out_json, std::string& err) const = 0;
+    virtual bool clear_logs(uint32_t& cleared_count, std::string& err) = 0;
     virtual bool set_psx3d_mode(const char* mode, std::string& err) = 0;
     virtual bool request_psx3d_refresh(const char* reason, const char* scope, uint32_t& id, std::string& err) = 0;
     virtual bool set_gte_trace_window(uint32_t pc_start, uint32_t pc_end, uint32_t start_frame, uint32_t end_frame, bool enabled, std::string& err) = 0;

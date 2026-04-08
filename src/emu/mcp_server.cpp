@@ -1,5 +1,7 @@
 #include "mcp_server.h"
 
+#include "log/emu_log.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -52,7 +54,12 @@ bool McpServer::read_stdio_message(std::FILE* in, std::string& out_json)
         out_json.resize((size_t)content_length);
         const size_t got = std::fread(out_json.data(), 1, (size_t)content_length, in);
         if (got != (size_t)content_length)
+        {
+            emu::logf(emu::LogLevel::warn, "MCP", "stdio read short body got=%u want=%u",
+                (unsigned)got, (unsigned)content_length);
             return false;
+        }
+        emu::logf(emu::LogLevel::debug, "MCP", "stdio read body bytes=%u", (unsigned)content_length);
         return true;
     }
 
@@ -69,6 +76,7 @@ bool McpServer::write_stdio_message(std::FILE* out, const std::string& json)
     if (!json.empty())
         std::fwrite(json.data(), 1, json.size(), out);
     std::fflush(out);
+    emu::logf(emu::LogLevel::debug, "MCP", "stdio wrote body bytes=%u", (unsigned)json.size());
     return true;
 }
 
@@ -86,7 +94,16 @@ std::string McpServer::json_escape(const std::string& s)
         case '\n': out += "\\n"; break;
         case '\t': out += "\\t"; break;
         default:
-            out += c;
+            if ((unsigned char)c < 0x20)
+            {
+                char buf[7];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned int)(unsigned char)c);
+                out += buf;
+            }
+            else
+            {
+                out += c;
+            }
             break;
         }
     }
@@ -264,12 +281,92 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"phys_addr\":{\"type\":\"integer\"}},\"required\":[\"phys_addr\"],\"additionalProperties\":false}"
         "},"
         "{"
+        "\"name\":\"emu.read_cop0\","
+        "\"description\":\"Reads a COP0 register by index (0-31).\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"reg\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":31}},\"required\":[\"reg\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.write_cop0\","
+        "\"description\":\"Writes a COP0 register by index (0-31). Useful for debug experiments.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"reg\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":31},\"value\":{\"type\":\"integer\"}},\"required\":[\"reg\",\"value\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.add_step_hook_write_cop0\","
+        "\"description\":\"Adds a step hook that writes a COP0 register when a specific PC executes.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"pc\":{\"type\":\"integer\"},\"reg\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":31},\"value\":{\"type\":\"integer\"},\"once\":{\"type\":\"boolean\"}},\"required\":[\"pc\",\"reg\",\"value\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.add_step_hook_write_ram_u32\","
+        "\"description\":\"Adds a step hook that writes a 32-bit RAM value when a specific PC executes.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"pc\":{\"type\":\"integer\"},\"phys_addr\":{\"type\":\"integer\"},\"value\":{\"type\":\"integer\"},\"once\":{\"type\":\"boolean\"}},\"required\":[\"pc\",\"phys_addr\",\"value\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.list_step_hooks\","
+        "\"description\":\"Lists active MCP-managed step hooks.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.clear_step_hook\","
+        "\"description\":\"Removes a step hook by id.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"hook_id\":{\"type\":\"integer\"}},\"required\":[\"hook_id\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.clear_all_step_hooks\","
+        "\"description\":\"Removes all MCP-managed step hooks.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.add_mem_watch_write\","
+        "\"description\":\"Adds a low-overhead RAM write watchpoint with optional PC and value filters.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"phys_addr_start\":{\"type\":\"integer\"},\"phys_addr_end\":{\"type\":\"integer\"},\"pc\":{\"type\":\"integer\"},\"value\":{\"type\":\"integer\"},\"once\":{\"type\":\"boolean\"}},\"required\":[\"phys_addr_start\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.list_mem_watches\","
+        "\"description\":\"Lists active MCP-managed RAM write watchpoints.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.clear_mem_watch\","
+        "\"description\":\"Removes a RAM write watchpoint by id.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"watch_id\":{\"type\":\"integer\"}},\"required\":[\"watch_id\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.clear_all_mem_watches\","
+        "\"description\":\"Removes all RAM write watchpoints.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.list_mem_watch_events\","
+        "\"description\":\"Lists recent RAM write watchpoint hits captured in the event ring buffer.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.clear_mem_watch_events\","
+        "\"description\":\"Clears the RAM write watchpoint event ring buffer.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.run_until_mem_watch\","
+        "\"description\":\"Runs CPU steps until an active RAM write watchpoint hits or the step budget is exhausted.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.list_logs\","
+        "\"description\":\"Lists recent emu::log entries captured by the async log sink with optional filters.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"since_seq\":{\"type\":\"integer\"},\"min_level\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4},\"tag\":{\"type\":\"string\"},\"contains\":{\"type\":\"string\"},\"max_entries\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1024}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.clear_logs\","
+        "\"description\":\"Clears the captured emu::log ring buffer.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
         "\"name\":\"emu.set_psx3d_mode\","
         "\"description\":\"Sets the PSX3D run mode to game or analysis.\","
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"mode\":{\"type\":\"string\",\"enum\":[\"game\",\"analysis\"]}},\"required\":[\"mode\"],\"additionalProperties\":false}"
         "},"
         "{"
-        "\"name\":\"emu.request_psx3d_refresh\","
+        "\"name\":\"emu.request_psx3d_refresh\"," 
         "\"description\":\"Queues a PSX3D analysis refresh request.\","
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"},\"scope\":{\"type\":\"string\"}},\"required\":[\"reason\"],\"additionalProperties\":false}"
         "},"
@@ -392,6 +489,272 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
         if (!backend_.read_ram_u32(phys_addr, value, err))
             return json_error(id_raw, -32004, err.empty() ? "read failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("read ok", std::string("{\"phys_addr\":") + std::to_string(phys_addr) + ",\"value\":" + std::to_string(value) + "}"));
+    }
+
+    if (name == "emu.read_cop0")
+    {
+        uint32_t reg = 0;
+        if (!extract_json_uint32(json, "reg", reg))
+            return json_error(id_raw, -32602, "missing reg");
+        uint32_t value = 0;
+        std::string err;
+        if (!backend_.read_cop0(reg, value, err))
+            return json_error(id_raw, -32013, err.empty() ? "read cop0 failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("cop0 read ok",
+            std::string("{\"reg\":") + std::to_string(reg) +
+            ",\"value\":" + std::to_string(value) + "}"));
+    }
+
+    if (name == "emu.write_cop0")
+    {
+        uint32_t reg = 0;
+        uint32_t value = 0;
+        if (!extract_json_uint32(json, "reg", reg))
+            return json_error(id_raw, -32602, "missing reg");
+        if (!extract_json_uint32(json, "value", value))
+            return json_error(id_raw, -32602, "missing value");
+        std::string err;
+        if (!backend_.write_cop0(reg, value, err))
+            return json_error(id_raw, -32014, err.empty() ? "write cop0 failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("cop0 write ok",
+            std::string("{\"reg\":") + std::to_string(reg) +
+            ",\"value\":" + std::to_string(value) + "}"));
+    }
+
+    if (name == "emu.add_step_hook_write_cop0")
+    {
+        uint32_t pc = 0;
+        uint32_t reg = 0;
+        uint32_t value = 0;
+        bool once = true;
+        if (!extract_json_uint32(json, "pc", pc))
+            return json_error(id_raw, -32602, "missing pc");
+        if (!extract_json_uint32(json, "reg", reg))
+            return json_error(id_raw, -32602, "missing reg");
+        if (!extract_json_uint32(json, "value", value))
+            return json_error(id_raw, -32602, "missing value");
+        extract_json_bool(json, "once", once);
+        uint32_t hook_id = 0;
+        std::string err;
+        if (!backend_.add_step_hook_write_cop0(pc, reg, value, once, hook_id, err))
+            return json_error(id_raw, -32015, err.empty() ? "add step hook write_cop0 failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("step hook added",
+            std::string("{\"hook_id\":") + std::to_string(hook_id) +
+            ",\"pc\":" + std::to_string(pc) +
+            ",\"reg\":" + std::to_string(reg) +
+            ",\"value\":" + std::to_string(value) +
+            ",\"once\":" + (once ? "true" : "false") + "}"));
+    }
+
+    if (name == "emu.add_step_hook_write_ram_u32")
+    {
+        uint32_t pc = 0;
+        uint32_t phys_addr = 0;
+        uint32_t value = 0;
+        bool once = true;
+        if (!extract_json_uint32(json, "pc", pc))
+            return json_error(id_raw, -32602, "missing pc");
+        if (!extract_json_uint32(json, "phys_addr", phys_addr))
+            return json_error(id_raw, -32602, "missing phys_addr");
+        if (!extract_json_uint32(json, "value", value))
+            return json_error(id_raw, -32602, "missing value");
+        extract_json_bool(json, "once", once);
+        uint32_t hook_id = 0;
+        std::string err;
+        if (!backend_.add_step_hook_write_ram_u32(pc, phys_addr, value, once, hook_id, err))
+            return json_error(id_raw, -32016, err.empty() ? "add step hook write_ram_u32 failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("step hook added",
+            std::string("{\"hook_id\":") + std::to_string(hook_id) +
+            ",\"pc\":" + std::to_string(pc) +
+            ",\"phys_addr\":" + std::to_string(phys_addr) +
+            ",\"value\":" + std::to_string(value) +
+            ",\"once\":" + (once ? "true" : "false") + "}"));
+    }
+
+    if (name == "emu.list_step_hooks")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.list_step_hooks(data, err))
+            return json_error(id_raw, -32017, err.empty() ? "list step hooks failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("step hooks", data));
+    }
+
+    if (name == "emu.clear_step_hook")
+    {
+        uint32_t hook_id = 0;
+        if (!extract_json_uint32(json, "hook_id", hook_id))
+            return json_error(id_raw, -32602, "missing hook_id");
+        bool removed = false;
+        std::string err;
+        if (!backend_.clear_step_hook(hook_id, removed, err))
+            return json_error(id_raw, -32018, err.empty() ? "clear step hook failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("step hook clear",
+            std::string("{\"hook_id\":") + std::to_string(hook_id) +
+            ",\"removed\":" + (removed ? std::string("true") : std::string("false")) + "}"));
+    }
+
+    if (name == "emu.clear_all_step_hooks")
+    {
+        uint32_t removed_count = 0;
+        std::string err;
+        if (!backend_.clear_all_step_hooks(removed_count, err))
+            return json_error(id_raw, -32019, err.empty() ? "clear all step hooks failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("step hooks cleared",
+            std::string("{\"removed_count\":") + std::to_string(removed_count) + "}"));
+    }
+
+    if (name == "emu.add_mem_watch_write")
+    {
+        uint32_t phys_addr_start = 0;
+        uint32_t phys_addr_end = 0;
+        uint32_t pc = 0;
+        uint32_t value = 0;
+        bool once = false;
+        bool has_pc = false;
+        bool has_value = false;
+        if (!extract_json_uint32(json, "phys_addr_start", phys_addr_start))
+            return json_error(id_raw, -32602, "missing phys_addr_start");
+        phys_addr_end = phys_addr_start;
+        (void)extract_json_uint32(json, "phys_addr_end", phys_addr_end);
+        has_pc = extract_json_uint32(json, "pc", pc);
+        has_value = extract_json_uint32(json, "value", value);
+        extract_json_bool(json, "once", once);
+        uint32_t watch_id = 0;
+        std::string err;
+        if (!backend_.add_mem_watch_write(phys_addr_start, phys_addr_end, has_pc, pc, has_value, value, once, watch_id, err))
+            return json_error(id_raw, -32020, err.empty() ? "add mem watch failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("mem watch added",
+            std::string("{\"watch_id\":") + std::to_string(watch_id) +
+            ",\"phys_addr_start\":" + std::to_string(phys_addr_start) +
+            ",\"phys_addr_end\":" + std::to_string(phys_addr_end) +
+            ",\"has_pc\":" + (has_pc ? "true" : "false") +
+            ",\"pc\":" + std::to_string(pc) +
+            ",\"has_value\":" + (has_value ? "true" : "false") +
+            ",\"value\":" + std::to_string(value) +
+            ",\"once\":" + (once ? "true" : "false") + "}"));
+    }
+
+    if (name == "emu.list_mem_watches")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.list_mem_watches(data, err))
+            return json_error(id_raw, -32021, err.empty() ? "list mem watches failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("mem watches", data));
+    }
+
+    if (name == "emu.clear_mem_watch")
+    {
+        uint32_t watch_id = 0;
+        if (!extract_json_uint32(json, "watch_id", watch_id))
+            return json_error(id_raw, -32602, "missing watch_id");
+        bool removed = false;
+        std::string err;
+        if (!backend_.clear_mem_watch(watch_id, removed, err))
+            return json_error(id_raw, -32022, err.empty() ? "clear mem watch failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("mem watch clear",
+            std::string("{\"watch_id\":") + std::to_string(watch_id) +
+            ",\"removed\":" + (removed ? std::string("true") : std::string("false")) + "}"));
+    }
+
+    if (name == "emu.clear_all_mem_watches")
+    {
+        uint32_t removed_count = 0;
+        std::string err;
+        if (!backend_.clear_all_mem_watches(removed_count, err))
+            return json_error(id_raw, -32023, err.empty() ? "clear all mem watches failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("mem watches cleared",
+            std::string("{\"removed_count\":") + std::to_string(removed_count) + "}"));
+    }
+
+    if (name == "emu.list_mem_watch_events")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.list_mem_watch_events(data, err))
+            return json_error(id_raw, -32024, err.empty() ? "list mem watch events failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("mem watch events", data));
+    }
+
+    if (name == "emu.clear_mem_watch_events")
+    {
+        uint32_t cleared_count = 0;
+        std::string err;
+        if (!backend_.clear_mem_watch_events(cleared_count, err))
+            return json_error(id_raw, -32025, err.empty() ? "clear mem watch events failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("mem watch events cleared",
+            std::string("{\"cleared_count\":") + std::to_string(cleared_count) + "}"));
+    }
+
+    if (name == "emu.run_until_mem_watch")
+    {
+        uint32_t max_steps = 1000000;
+        extract_json_uint32(json, "max_steps", max_steps);
+        if (max_steps == 0)
+            max_steps = 1;
+        if (max_steps > 100000000u)
+            max_steps = 100000000u;
+        uint64_t event_seq = 0;
+        uint32_t watch_id = 0;
+        uint32_t hit_pc = 0;
+        uint32_t hit_phys_addr = 0;
+        uint32_t hit_value = 0;
+        uint32_t hit_size = 0;
+        uint32_t steps_done = 0;
+        bool hit = false;
+        std::string err;
+        if (!backend_.run_until_mem_watch(max_steps, event_seq, watch_id, hit_pc, hit_phys_addr, hit_value, hit_size, steps_done, hit, err))
+            return json_error(id_raw, -32026, err.empty() ? "run until mem watch failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result(hit ? "mem watch hit" : "budget exhausted",
+            std::string("{\"hit\":") + (hit ? "true" : "false") +
+            ",\"event_seq\":" + std::to_string(event_seq) +
+            ",\"watch_id\":" + std::to_string(watch_id) +
+            ",\"hit_pc\":" + std::to_string(hit_pc) +
+            ",\"hit_phys_addr\":" + std::to_string(hit_phys_addr) +
+            ",\"hit_value\":" + std::to_string(hit_value) +
+            ",\"hit_size\":" + std::to_string(hit_size) +
+            ",\"steps_done\":" + std::to_string(steps_done) +
+            ",\"max_steps\":" + std::to_string(max_steps) + "}"));
+    }
+
+    if (name == "emu.list_logs")
+    {
+        uint32_t since_seq_lo = 0;
+        uint64_t since_seq = 0;
+        uint32_t min_level = 0;
+        uint32_t max_entries = 128;
+        const bool has_since_seq = extract_json_uint32(json, "since_seq", since_seq_lo);
+        const bool has_min_level = extract_json_uint32(json, "min_level", min_level);
+        if (has_since_seq)
+            since_seq = since_seq_lo;
+        extract_json_uint32(json, "max_entries", max_entries);
+        if (max_entries == 0)
+            max_entries = 1;
+        if (max_entries > 1024u)
+            max_entries = 1024u;
+        const std::string tag = extract_json_string(json, "tag");
+        const std::string contains = extract_json_string(json, "contains");
+        std::string data;
+        std::string err;
+        if (!backend_.list_logs(since_seq, has_min_level, min_level,
+                tag.empty() ? nullptr : tag.c_str(),
+                contains.empty() ? nullptr : contains.c_str(),
+                max_entries, data, err))
+        {
+            return json_error(id_raw, -32027, err.empty() ? "list logs failed" : err.c_str());
+        }
+        return json_result(id_raw, mcp_text_result("logs", data));
+    }
+
+    if (name == "emu.clear_logs")
+    {
+        uint32_t cleared_count = 0;
+        std::string err;
+        if (!backend_.clear_logs(cleared_count, err))
+            return json_error(id_raw, -32028, err.empty() ? "clear logs failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("logs cleared",
+            std::string("{\"cleared_count\":") + std::to_string(cleared_count) + "}"));
     }
 
     if (name == "emu.set_psx3d_mode")
@@ -541,10 +904,13 @@ int McpServer::run_stdio(std::FILE* in, std::FILE* out)
     std::string req;
     while (read_stdio_message(in, req))
     {
+        emu::logf(emu::LogLevel::debug, "MCP", "request method=%s",
+            extract_json_string(req, "method").c_str());
         const std::string resp = handle_request(req);
         if (!resp.empty() && !write_stdio_message(out, resp))
             return 1;
     }
+    emu::logf(emu::LogLevel::warn, "MCP", "stdio loop ended");
     return 0;
 }
 

@@ -2276,6 +2276,75 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                     evt_u32_cnt, mp0, v, cpu_pc_);
             }
         }
+        // Soul Reaver LibCrypt status watchpoints
+        if (mp0 == 0x000CD2E0u || mp0 == 0x000CD2E4u)
+        {
+            static uint32_t lcrypt_cnt = 0;
+            const bool late_cd2e4_rearm =
+                (mp0 == 0x000CD2E4u &&
+                 vblank_total_count_ >= 4000u &&
+                 (v == 0x800C12F8u || v == 0x800C12D4u || v == 0x800C131Cu || v == 0u));
+            if (lcrypt_cnt < 50 || v == 0 || late_cd2e4_rearm) {
+                ++lcrypt_cnt;
+                emu::logf(emu::LogLevel::warn, "SR_LCRYPT",
+                    "WRITE 0x%08X = %u (0x%08X) pc=0x%08X vbl=%u",
+                    addr, v, v, cpu_pc_, vblank_total_count_);
+            }
+        }
+        // Soul Reaver: track if FUN_800bfb34 is called
+        if (mp0 == 0x000CD5BCu)
+        {
+            static uint32_t bfb34_cnt = 0;
+            if (bfb34_cnt < 200) {
+                ++bfb34_cnt;
+                emu::logf(emu::LogLevel::warn, "SR_CDEVT",
+                    "cd5bc=%u pc=0x%08X vbl=%u irq_flags=0x%02X",
+                    v, cpu_pc_, vblank_total_count_,
+                    cdrom_ ? cdrom_->irq_flags_raw() : 0xFF);
+            }
+        }
+        // Dump code at 0x800C1130-0x800C1190 once at vbl=2600 to check if code is encrypted
+        if (mp0 == 0x000D19B4u && v == 5)
+        {
+            emu::logf(emu::LogLevel::warn, "SR_MEMDUMP",
+                "Code dump at 0x800C1130 (check if encrypted/different from EXE):");
+            for (uint32_t off = 0; off < 0x80; off += 4) {
+                uint32_t a = (0x000C1130u + off) & (ram_size_ - 1);
+                uint32_t w = *(uint32_t*)(ram_ + a);
+                emu::logf(emu::LogLevel::warn, "SR_MEMDUMP",
+                    "  [0x%08X] = 0x%08X", 0x800C1130u + off, w);
+            }
+        }
+        // Soul Reaver vi watchpoint: 0x800D19B4 → phys 0x000D19B4
+        if (mp0 == 0x000D19B4u && v == 5)
+        {
+            // Dump CPU state at the moment vi=5 is written
+            emu::logf(emu::LogLevel::warn, "SR_VI5",
+                "vi=5! pc=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X vbl=%u",
+                cpu_pc_, i_stat_, i_mask_, (i_stat_ & i_mask_), vblank_total_count_);
+        }
+        if (mp0 == 0x000D19B4u)
+        {
+            emu::logf(emu::LogLevel::warn, "SR_VI_WR",
+                "vi WRITE pc=0x%08X val=%u (0x%08X) vbl=%u",
+                cpu_pc_, v, v, vblank_total_count_);
+            // Dump video table when vi changes (entries at 0x800CEEC4, stride 0x38)
+            // type at +0x34 (short), next at +0x36 (short)
+            if (v <= 10) {
+                for (int i = 0; i < 6; ++i) {
+                    const uint32_t base = (0x000CEEC4u + i * 0x38u) & (ram_size_ - 1);
+                    const int16_t type_val = *(int16_t*)(ram_ + base + 0x34);
+                    const int16_t next_val = *(int16_t*)(ram_ + base + 0x36);
+                    // Read filename (first 20 chars)
+                    char fname[21] = {};
+                    for (int c = 0; c < 20; ++c) fname[c] = ram_[base + c];
+                    fname[20] = 0;
+                    emu::logf(emu::LogLevel::warn, "SR_VTBL",
+                        "  entry[%d] type=%d next=%d name='%s'",
+                        i, (int)type_val, (int)next_val, fname);
+                }
+            }
+        }
         log_stage67_watch(stage67_watch_log_count_, "WR32", cpu_pc_, addr, mp0, v, 4);
         {
             const char* gname = nullptr;
@@ -3440,10 +3509,16 @@ void Bus::timer_thread_func(int ch)
     {
         Timer& t = timers_[ch];
 
-        if (!t.counting_enabled ||
-            t.use_external_clock)
+        if (!t.counting_enabled)
         {
-            // Not counting or using external clock (HBlank/dotclock handled elsewhere)
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            continue;
+        }
+        // Timer 0 dotclock and Timer 1 HBlank are driven by the GPU thread
+        // — skip them here. But Timer 2 sysclk/8 is CPU-derived and MUST
+        // be handled by this thread (the main loop is disabled when threads run).
+        if (t.use_external_clock && ch != 2)
+        {
             std::this_thread::sleep_for(std::chrono::microseconds(100));
             continue;
         }
@@ -3451,7 +3526,7 @@ void Bus::timer_thread_func(int ch)
         // Compute ticks until next IRQ event
         const uint16_t mode = t.mode;
         const uint16_t target = t.target;
-        const uint32_t count = t.count;
+        uint32_t count = t.count;
         const bool irq_at_target = (mode & 0x0010u) != 0;
         const bool irq_on_overflow = (mode & 0x0020u) != 0;
 
@@ -3467,6 +3542,15 @@ void Bus::timer_thread_func(int ch)
         if (ch == 2 && t.use_external_clock)
             ns_per_tick = kSysclk8PeriodNs;
 
+        // Handle reset_at_target: if count >= target, the counter should
+        // have been reset to 0. Do it here so the next sleep is correct.
+        const bool reset_at_target = (mode & 0x0008u) != 0;
+        if (reset_at_target && target > 0 && count >= target)
+        {
+            t.count = 0;
+            count = 0;
+        }
+
         // Calculate ticks until next event
         uint32_t ticks_to_event = 0xFFFF; // default: overflow from current count
 
@@ -3477,21 +3561,37 @@ void Bus::timer_thread_func(int ch)
 
         if (ticks_to_event == 0) ticks_to_event = 1;
 
-        // Sleep for the computed duration
-        const auto sleep_ns = std::chrono::nanoseconds((int64_t)(ticks_to_event * ns_per_tick));
+        // Hybrid spin-wait: sleep coarsely then spin for sub-ms precision.
+        // std::this_thread::sleep_for has ~15ms granularity on Windows.
+        // We sleep until ~200us before target, then spin the remainder.
+        const auto wait_ns = std::chrono::nanoseconds((int64_t)(ticks_to_event * ns_per_tick));
+        const auto target_time = std::chrono::steady_clock::now() + wait_ns;
+        const auto spin_threshold = std::chrono::microseconds(200);
 
-        // Cap sleep to 2ms max — recheck config regularly
-        const auto max_sleep = std::chrono::microseconds(2000);
-        const auto actual_sleep = (sleep_ns < max_sleep) ? sleep_ns : max_sleep;
-
-        std::this_thread::sleep_for(actual_sleep);
+        // Coarse sleep phase — sleep in small increments, check reconfig
+        while (std::chrono::steady_clock::now() + spin_threshold < target_time)
+        {
+            if (!timer_threads_running_.load(std::memory_order_relaxed))
+                goto thread_exit;
+            if (t.reconfig.load(std::memory_order_relaxed))
+                break;
+            // Sleep 500us chunks (short enough to react to reconfig)
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
 
         // Check if game reconfigured the timer while we slept
         if (t.reconfig.exchange(0, std::memory_order_acquire))
             continue; // recalculate
 
-        // If we slept the full duration (not capped), fire the IRQ
-        if (sleep_ns <= max_sleep)
+        // Spin-wait phase — burn CPU for final ~200us for precise timing
+        while (std::chrono::steady_clock::now() < target_time)
+        {
+            if (!timer_threads_running_.load(std::memory_order_relaxed))
+                goto thread_exit;
+            std::this_thread::yield();
+        }
+
+        // Timer fired — advance count and deliver IRQ
         {
             // Advance count
             t.count = (count + ticks_to_event) & 0xFFFF;
@@ -3521,6 +3621,7 @@ void Bus::timer_thread_func(int ch)
         }
     }
 
+thread_exit:
     emu::logf(emu::LogLevel::warn, "TMR_THREAD", "Timer %d thread stopped", ch);
 }
 
@@ -3605,6 +3706,23 @@ void Bus::tick(uint32_t cycles)
             cdrom_->tick(cycles);
             check_cdrom_irq_edge();
         }
+        // Crash tick counter dump (periodic)
+        if (vblank_total_count_ > 500 && (vblank_total_count_ % 200) == 0)
+        {
+            static uint32_t crash_last_vbl = 0;
+            if (vblank_total_count_ != crash_last_vbl)
+            {
+                crash_last_vbl = vblank_total_count_;
+                const uint32_t tick = *(uint32_t*)(ram_ + (0x80034520u & (ram_size_ - 1)));
+                const uint32_t t2mode = timers_[2].mode;
+                const uint32_t t2target = timers_[2].target;
+                const uint32_t t2count = timers_[2].count;
+                const uint32_t t2en = timers_[2].counting_enabled;
+                emu::logf(emu::LogLevel::warn, "CRASH_TICK",
+                    "vbl=%u tick=0x%08X T2:mode=0x%04X tgt=0x%04X cnt=%u en=%u ext=%u",
+                    vblank_total_count_, tick, t2mode, t2target, t2count, t2en, timers_[2].use_external_clock);
+            }
+        }
         // Soul Reaver game state dump (periodic)
         if (vblank_total_count_ > 800 && (vblank_total_count_ % 100) == 0)
         {
@@ -3617,10 +3735,14 @@ void Bus::tick(uint32_t cycles)
                 const uint32_t dd9c0 = *(uint32_t*)(ram_ + (0x800dd9c0u & (ram_size_ - 1)));
                 const uint32_t cb6e4 = *(uint32_t*)(ram_ + (0x800cb6e4u & (ram_size_ - 1)));
                 const uint32_t dd9ac = *(uint32_t*)(ram_ + (0x800dd9acu & (ram_size_ - 1)));
+                const uint32_t cd2e0 = *(uint32_t*)(ram_ + (0x800cd2e0u & (ram_size_ - 1)));
+                const uint32_t cd2e4 = *(uint32_t*)(ram_ + (0x800cd2e4u & (ram_size_ - 1)));
+                const uint32_t ceec0 = *(uint32_t*)(ram_ + (0x800ceec0u & (ram_size_ - 1)));
+                const uint32_t cd5bc = *(uint32_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
                 const uint32_t dma1_chcr = dma_[1].chcr;
                 emu::logf(emu::LogLevel::warn, "CORE",
-                    "SR_STATE vbl=%u st=%u vi=%u d9c0=%u d9ac=%u cb6e4=0x%08X dma1=0x%08X pc=0x%08X",
-                    vblank_total_count_, state, vidx, dd9c0, dd9ac, cb6e4, dma1_chcr, cpu_pc_);
+                    "SR_STATE vbl=%u st=%u vi=%u d9c0=%u d9ac=%u cb6e4=0x%08X cd2e0=0x%08X cd2e4=0x%08X ceec0=%u cd5bc=%u dma1=0x%08X pc=0x%08X",
+                    vblank_total_count_, state, vidx, dd9c0, dd9ac, cb6e4, cd2e0, cd2e4, ceec0, cd5bc, dma1_chcr, cpu_pc_);
             }
         }
 
@@ -3710,6 +3832,62 @@ void Bus::tick(uint32_t cycles)
                         cdrom_->irq_flags_debug(), i_stat_, i_mask_, sw_mask, cd_handler, intr_timeout,
                         t2.count, t2.mode, t2.target, (int)t2.counting_enabled, (int)t2.use_external_clock);
                 }
+            }
+        }
+
+        // Soul Reaver LibCrypt callback window.
+        // We want the full state machine here:
+        //   cd2e4=0x800C12D4 -> cd2e0=0x800C1340
+        //   cd2e4=0x800C12F8 -> cd2e0=0x800C13C0
+        //   cd2e4=0x800C131C -> cd2e0=0x800C142C
+        //   cd2e0=0x800C14DC final async completion
+        if (cpu_pc_ >= 0x800C1280u && cpu_pc_ < 0x800C1540u)
+        {
+            static uint32_t sr_cb_trace_count = 0;
+            const bool late_window = (vblank_total_count_ >= 4000u);
+            if (sr_cb_trace_count < 120 || late_window)
+            {
+                if (!late_window)
+                    ++sr_cb_trace_count;
+                const uint32_t cd2e0 = *(uint32_t*)(ram_ + (0x800cd2e0u & (ram_size_ - 1)));
+                const uint32_t cd2e4 = *(uint32_t*)(ram_ + (0x800cd2e4u & (ram_size_ - 1)));
+                const uint32_t ceec0 = *(uint32_t*)(ram_ + (0x800ceec0u & (ram_size_ - 1)));
+                const uint32_t cd5bc = *(uint32_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1)));
+                emu::logf(emu::LogLevel::warn, "SR_CB",
+                    "pc=0x%08X vbl=%u cd2e0=0x%08X cd2e4=0x%08X ceec0=%u cd5bc=%u i_stat=0x%04X i_mask=0x%04X irqf=0x%02X",
+                    cpu_pc_, vblank_total_count_, cd2e0, cd2e4, ceec0, cd5bc,
+                    i_stat_, i_mask_, cdrom_ ? cdrom_->irq_flags_raw() : 0xFF);
+            }
+        }
+
+        // Soul Reaver CD event handler around the LibCrypt stall.
+        // If cd2e4 is re-armed to 0x800C12F8 but this handler no longer runs,
+        // the problem is the callback dispatch itself, not the callback code.
+        if (cpu_pc_ >= 0x800BFB34u && cpu_pc_ < 0x800BFC80u)
+        {
+            static uint32_t sr_evt_trace_count = 0;
+            const uint32_t cd2e0 = *(uint32_t*)(ram_ + (0x800cd2e0u & (ram_size_ - 1)));
+            const uint32_t cd2e4 = *(uint32_t*)(ram_ + (0x800cd2e4u & (ram_size_ - 1)));
+            const bool libcrypt_pending =
+                (cd2e4 == 0x800C12D4u || cd2e4 == 0x800C12F8u || cd2e4 == 0x800C131Cu ||
+                 cd2e0 == 0x800C1340u || cd2e0 == 0x800C13C0u || cd2e0 == 0x800C142Cu || cd2e0 == 0x800C14DCu);
+            if (libcrypt_pending && (sr_evt_trace_count < 160u || vblank_total_count_ >= 4200u))
+            {
+                ++sr_evt_trace_count;
+                emu::logf(emu::LogLevel::warn, "SR_EVT",
+                    "pc=0x%08X vbl=%u cd2e0=0x%08X cd2e4=0x%08X cd5bc=%u irqf=0x%02X pend=%u read_lba=%u data_lba=%u next_read=%llu next_irq=%llu want=%u data_ready=%u resp=%u istat=0x%04X imask=0x%04X",
+                    cpu_pc_, vblank_total_count_, cd2e0, cd2e4,
+                    *(uint32_t*)(ram_ + (0x800cd5bcu & (ram_size_ - 1))),
+                    cdrom_ ? cdrom_->irq_flags_debug() : 0xFFu,
+                    cdrom_ ? (unsigned)cdrom_->pending_irq_type_debug() : 0u,
+                    cdrom_ ? (unsigned)cdrom_->read_lba_debug() : 0u,
+                    cdrom_ ? (unsigned)cdrom_->debug_data_lba() : 0u,
+                    cdrom_ ? (unsigned long long)cdrom_->next_read_due_debug() : 0ull,
+                    cdrom_ ? (unsigned long long)cdrom_->pending_irq_due_debug() : 0ull,
+                    cdrom_ ? (unsigned)cdrom_->want_data_debug() : 0u,
+                    cdrom_ ? (unsigned)cdrom_->data_ready_pending_debug() : 0u,
+                    cdrom_ ? (unsigned)cdrom_->resp_count_debug() : 0u,
+                    i_stat_, i_mask_);
             }
         }
         return;
