@@ -2,7 +2,7 @@
 
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
-#include "R3000GpuComponent.generated.h"
+#include "PSX2DRenderComponent.generated.h"
 
 class UTexture2D;
 class UMaterialInterface;
@@ -30,20 +30,20 @@ enum class EHdDefinition : uint8
  * PS1 GPU bridge: renders emulated GPU draw commands as real UE5 geometry.
  * VRAM is uploaded as a texture for the material to sample (texture pages, CLUTs).
  * Also provides an optional VRAM debug viewer (flat plane showing the full 1024x512 VRAM).
- * Place on the same Actor as UR3000EmuComponent.
+ * Place on the same Actor as UPSXEmulatorComponent.
  */
-UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
-class UR3000GpuComponent : public USceneComponent
+UCLASS(ClassGroup = (PSXEmu), meta = (BlueprintSpawnableComponent))
+class UPSX2DRenderComponent : public USceneComponent
 {
     GENERATED_BODY()
 
 public:
-    UR3000GpuComponent();
+    UPSX2DRenderComponent();
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
-    /** Connect to the emulated GPU (called by R3000EmuComponent after core init). */
+    /** Connect to the emulated GPU (called by PSXEmulatorComponent after core init). */
     void BindGpu(gpu::Gpu* InGpu);
 
     // ------- VRAM Texture (received from VramViewerComponent) -------
@@ -52,54 +52,54 @@ public:
     void SetVramTexture(UTexture2D* InTexture);
 
     /** VRAM texture (1024x512 BGRA8) — the raw PS1 VRAM as an UE5 texture. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     UTexture2D* GetVramTexture() const { return VramTexture_; }
 
     // ------- Materials -------
 
     /** Force refresh of material instances from current MatSemi0-3 / BaseMaterial slots.
      *  Called automatically each frame, but you can call it manually after assigning materials in Blueprint. */
-    UFUNCTION(BlueprintCallable, Category = "R3000Emu|GPU|Materials")
+    UFUNCTION(BlueprintCallable, Category = "PSXEmu|GPU|Materials")
     void RefreshMaterials();
 
     // ------- Geometry mesh access -------
 
     /** The ProceduralMeshComponent that receives PS1 geometry each frame. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     UProceduralMeshComponent* GetMeshComponent() const { return MeshComp_; }
 
     // ------- Display info -------
 
     /** PS1 display resolution from GP1 registers. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     int32 GetDisplayWidth() const;
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     int32 GetDisplayHeight() const;
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     bool IsDisplayEnabled() const;
 
     /** Number of triangles in the last rendered frame (all sections). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     int32 GetLastTriangleCount() const { return LastTriCount_; }
 
     /** Number of opaque triangles (section 0) in the last frame. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU|Stats")
     int32 GetOpaqueTriCount() const { return SectionTriCount_[0]; }
 
     /** Number of semi-transparent triangles (sections 1-4) in the last frame. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU|Stats")
     int32 GetSemiTransTriCount() const { return SectionTriCount_[1] + SectionTriCount_[2] + SectionTriCount_[3] + SectionTriCount_[4]; }
 
     /** Number of non-empty mesh sections in the last frame (0-5). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU|Stats")
     int32 GetMeshSectionCount() const { return LastSectionCount_; }
 
     /** GPU frames per second (based on draw list swaps, not VBlank). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU|Stats")
     float GetGpuFramesPerSecond() const { return GpuFps_; }
 
     /** Per-section triangle count (0=opaque, 1-4=semi modes 0-3). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU|Stats")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU|Stats")
     int32 GetSectionTriCount(int32 Section) const { return (Section >= 0 && Section < kNumSections) ? SectionTriCount_[Section] : 0; }
 
 
@@ -107,54 +107,54 @@ public:
 
     /** Enable/disable this 2D renderer at runtime. When disabled, mesh is hidden but VRAM texture
      *  continues to be updated (shared with 3D component). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
     bool bEnabled{true};
 
     /** Enable uniform HD scaling: output is always the same size regardless of PS1 resolution.
      *  When enabled, PixelScale is computed automatically based on HD definition.
      *  PS1 resolutions (256, 320, 512, 640) are all scaled to fill the target size. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
     bool bUniformHdScale{true};
 
     /** HD output resolution preset. Select a standard resolution or Custom for manual values. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (EditCondition = "bUniformHdScale"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU", meta = (EditCondition = "bUniformHdScale"))
     EHdDefinition HdDefinition{EHdDefinition::HD_1080p};
 
     /** Target output width in UE units (only used when HdDefinition is Custom). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "100.0", ClampMax = "8000.0", EditCondition = "bUniformHdScale && HdDefinition == EHdDefinition::Custom"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU", meta = (ClampMin = "100.0", ClampMax = "8000.0", EditCondition = "bUniformHdScale && HdDefinition == EHdDefinition::Custom"))
     float TargetWidth{1920.0f};
 
     /** Target output height in UE units (only used when HdDefinition is Custom). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "100.0", ClampMax = "8000.0", EditCondition = "bUniformHdScale && HdDefinition == EHdDefinition::Custom"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU", meta = (ClampMin = "100.0", ClampMax = "8000.0", EditCondition = "bUniformHdScale && HdDefinition == EHdDefinition::Custom"))
     float TargetHeight{1080.0f};
 
     /** Manual UE units per PS1 pixel (used only when bUniformHdScale is disabled). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "0.01", ClampMax = "100.0", EditCondition = "!bUniformHdScale"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU", meta = (ClampMin = "0.01", ClampMax = "100.0", EditCondition = "!bUniformHdScale"))
     float PixelScale{1.0f};
 
     /** Z-axis increment per draw command (separates primitives for painter's algorithm). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU", meta = (ClampMin = "0.0001", ClampMax = "1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU", meta = (ClampMin = "0.0001", ClampMax = "1.0"))
     float ZStep{0.01f};
 
     /** Manual offset for PS1→UE5 coordinate mapping (add to vertex positions). Tune if image is shifted. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
     FVector2D DisplayOffset{FVector2D::ZeroVector};
 
     /** Center the PS1 display in UE5 space. Uses display rect center (GP1(05)+wh/2). Disable if using custom layout. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
     bool bCenterDisplay{true};
 
     /** Get the effective pixel scale (computed from target size if bUniformHdScale, else manual PixelScale). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|GPU")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     float GetEffectivePixelScale() const;
 
     /** Skip GP0(02h) fill rect commands (screen clears). Enable to prevent background fills
      *  from hiding 3D geometry in VR mode. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
     bool bSkipFillRect{false};
 
     /** When enabled, log transform params and vertex coords to UE Output Log (Verbose). Useful for debugging offset/exploding polygons. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Debug")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Debug")
     bool bDebugMeshLog{false};
 
     /**
@@ -234,23 +234,23 @@ public:
      */
 
     /** Base material for opaque/masked primitives (section 0). Also used as fallback for semi-transparent slots left empty. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
     UMaterialInterface* BaseMaterial{nullptr};
 
     /** Material for semi-transparency mode 0: B/2 + F/2. UE5 Blend Mode: Translucent, Opacity=0.5. Falls back to BaseMaterial if null. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Materials")
     UMaterialInterface* MatSemi0{nullptr};
 
     /** Material for semi-transparency mode 1: B + F (additive). UE5 Blend Mode: Additive. Falls back to BaseMaterial if null. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Materials")
     UMaterialInterface* MatSemi1{nullptr};
 
     /** Material for semi-transparency mode 2: B - F (subtractive). UE5 Blend Mode: Modulate (approx). Falls back to BaseMaterial if null. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Materials")
     UMaterialInterface* MatSemi2{nullptr};
 
     /** Material for semi-transparency mode 3: B + F/4 (25% additive). UE5 Blend Mode: Additive, color*0.25. Falls back to BaseMaterial if null. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|GPU|Materials")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Materials")
     UMaterialInterface* MatSemi3{nullptr};
 
 

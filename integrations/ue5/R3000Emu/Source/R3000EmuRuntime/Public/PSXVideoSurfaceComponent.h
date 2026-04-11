@@ -3,82 +3,87 @@
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Engine/Texture2D.h"
-#include "R3000VideoComponent.generated.h"
+#include "PSXVideoSurfaceComponent.generated.h"
 
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class UPSXSurfaceComponent;
 namespace gpu { class Gpu; }
 
 /**
- * PS1 FMV video component — auto-detects 24-bit GPU display mode (MDEC video)
- * and renders the decoded framebuffer onto a plane (or sphere for VR).
+ * Presents PS1 video content decoded into the display area.
  *
- * Usage: place on the same Actor as R3000EmuComponent.
- * The plane appears automatically when 24-bit mode is active and hides
- * after HideDelayFrames of inactivity. No manual intervention needed.
- *
- * Material setup: Unlit/Opaque material with a Texture2D parameter named "VideoTexture".
- * The texture is RGBA8, sized to the PS1 display area (e.g. 320x240).
+ * Current implementation still focuses on MDEC-driven full-screen video.
+ * Longer term, this component is expected to become a presenter behind the
+ * unified surface system described in the strategy docs.
  */
-UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
-class UR3000VideoComponent : public USceneComponent
+UCLASS(ClassGroup = (PSXEmu), meta = (BlueprintSpawnableComponent))
+class UPSXVideoSurfaceComponent : public USceneComponent
 {
     GENERATED_BODY()
 
 public:
-    UR3000VideoComponent();
+    UPSXVideoSurfaceComponent();
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
-    /** Called by R3000EmuComponent after core init — connects to the PS1 GPU. */
+    /** Connects the component to the emulated GPU. */
     void BindGpu(gpu::Gpu* InGpu);
 
     // ─── Display settings ───────────────────────────────────────────
 
     /** Material for the video plane. Must have a Texture2D parameter "VideoTexture". */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Video")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Video")
     UMaterialInterface* VideoMaterial{nullptr};
 
     /** Width of the video plane in UE world units. Height is auto-computed from aspect ratio. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Video", meta = (ClampMin = "1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Video", meta = (ClampMin = "1.0"))
     float PlaneWidth{320.0f};
 
     /** Frames of non-video mode before hiding the plane. Set 0 to hide immediately. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Video", meta = (ClampMin = "0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Video", meta = (ClampMin = "0"))
     int32 HideDelayFrames{10};
 
-    // ─── VR settings (future) ────────────────────────────────────────
+    // ─── Surface settings ────────────────────────────────────────────
 
-    /** [Future VR] Render on a sphere section instead of flat plane. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Video|VR")
+    /** Render on a sphere section instead of a flat plane. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Video|VR")
     bool bSphereMode{false};
 
-    /** [Future VR] Sphere radius (world units). Only used when bSphereMode=true. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Video|VR",
+    /** Sphere radius in world units. Only used when bSphereMode=true. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Video|VR",
               meta = (ClampMin = "10.0", EditCondition = "bSphereMode"))
     float SphereRadius{500.0f};
+
+    /** Mirror video detection into the unified PSX surface component while keeping legacy rendering active. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Video")
+    bool bMirrorToUnifiedSurface{true};
+
+    /** When a unified PSX surface is available, let it be the visible presenter instead of this legacy mesh. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Video")
+    bool bPreferUnifiedSurfacePresenter{true};
 
     // ─── Runtime queries ─────────────────────────────────────────────
 
     /** True when the PS1 GPU is in 24-bit display mode (video active). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Video")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Video")
     bool IsVideoActive() const { return bVideoVisible_; }
 
     /** The current video texture (RGBA8, sized to the PS1 display area). May be null before first frame. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Video")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Video")
     UTexture2D* GetVideoTexture() const { return VideoTexture_; }
 
     /** PS1 display width of the current video frame (0 if no video). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Video")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Video")
     int32 GetVideoWidth() const { return VideoTexW_; }
 
     /** PS1 display height of the current video frame (0 if no video). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Video")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Video")
     int32 GetVideoHeight() const { return VideoTexH_; }
 
-    /** The procedural mesh holding the video plane. */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Video")
+    /** The procedural mesh used to present the current video surface. */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Video")
     UProceduralMeshComponent* GetVideoMesh() const { return VideoMesh_; }
 
 private:
@@ -86,8 +91,11 @@ private:
     void UploadVideoFrame(int32 W, int32 H);
     void RebuildPlaneMesh(int32 W, int32 H);
     void SetVideoVisible(bool bShow);
+    void SyncUnifiedSurface(bool bSurfaceVisible);
+    bool ShouldUseUnifiedSurfacePresenter() const;
 
     gpu::Gpu* Gpu_{nullptr};
+    TWeakObjectPtr<UPSXSurfaceComponent> SurfaceComp_;
 
     UPROPERTY()
     UProceduralMeshComponent* VideoMesh_{nullptr};

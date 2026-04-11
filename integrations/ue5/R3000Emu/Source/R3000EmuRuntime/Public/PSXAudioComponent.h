@@ -3,36 +3,36 @@
 #include "Components/SynthComponent.h"
 #include <atomic>
 #include <cstdint>
-#include "R3000AudioComponent.generated.h"
+#include "PSXAudioComponent.generated.h"
 
 /**
  * Streams PS1 SPU audio to UE5's AudioMixer via a lock-free ring buffer.
- * Place on the same Actor as UR3000EmuComponent.
+ * Place on the same Actor as UPSXEmulatorComponent.
  */
-UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
-class UR3000AudioComponent : public USynthComponent
+UCLASS(ClassGroup = (PSXEmu), meta = (BlueprintSpawnableComponent))
+class UPSXAudioComponent : public USynthComponent
 {
     GENERATED_BODY()
 
 public:
-    UR3000AudioComponent(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+    UPSXAudioComponent(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
     /** Called by SPU callback (game thread). Interleaved stereo int16. */
     void PushSamples(const int16_t* Samples, int32 Count);
 
-    UFUNCTION(BlueprintCallable, Category = "R3000Emu|Audio")
+    UFUNCTION(BlueprintCallable, Category = "PSXEmu|Audio")
     void SetMuted(bool bMute);
 
-    UFUNCTION(BlueprintCallable, Category = "R3000Emu|Audio")
+    UFUNCTION(BlueprintCallable, Category = "PSXEmu|Audio")
     bool IsMuted() const { return bMuted_; }
 
     // Clears buffered audio so old samples (e.g. BIOS jingle) cannot replay on next run.
-    UFUNCTION(BlueprintCallable, Category = "R3000Emu|Audio")
+    UFUNCTION(BlueprintCallable, Category = "PSXEmu|Audio")
     void ResetBuffer(bool bZeroMemory = false);
 
     // Output gain applied to generated audio (post int16->float conversion).
     // Use this to compensate for low SPU mix levels without touching emulation.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Audio", meta = (ClampMin = "0.0", ClampMax = "8.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Audio", meta = (ClampMin = "0.0", ClampMax = "8.0"))
     float OutputGain{4.0f};
 
     // Debug counters (thread-safe). Counts are in *samples* (int16 for pushed, float for generated).

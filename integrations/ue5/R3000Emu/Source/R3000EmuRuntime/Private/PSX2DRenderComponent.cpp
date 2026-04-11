@@ -1,4 +1,4 @@
-#include "R3000GpuComponent.h"
+#include "PSX2DRenderComponent.h"
 
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -12,29 +12,29 @@ DEFINE_LOG_CATEGORY_STATIC(LogR3000Gpu, Log, All);
 // ===================================================================
 // Constructor
 // ===================================================================
-UR3000GpuComponent::UR3000GpuComponent()
+UPSX2DRenderComponent::UPSX2DRenderComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
     SetMobility(EComponentMobility::Movable);
 
-    UE_LOG(LogR3000Gpu, Warning, TEXT("GpuComponent CONSTRUCTOR - tick enabled"));
+    UE_LOG(LogR3000Gpu, VeryVerbose, TEXT("2D render component constructed"));
 }
 
 // ===================================================================
 // BeginPlay - ensure tick is enabled
 // ===================================================================
-void UR3000GpuComponent::BeginPlay()
+void UPSX2DRenderComponent::BeginPlay()
 {
     Super::BeginPlay();
     SetComponentTickEnabled(true);
-    UE_LOG(LogR3000Gpu, Warning, TEXT("GpuComponent BeginPlay - SetComponentTickEnabled(true)"));
+    UE_LOG(LogR3000Gpu, VeryVerbose, TEXT("2D render component BeginPlay"));
 }
 
 // ===================================================================
 // Cleanup
 // ===================================================================
-void UR3000GpuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void UPSX2DRenderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
     Super::EndPlay(EndPlayReason);
@@ -43,7 +43,7 @@ void UR3000GpuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 // ===================================================================
 // GetEffectivePixelScale - compute uniform HD scale or return manual
 // ===================================================================
-float UR3000GpuComponent::GetEffectivePixelScale() const
+float UPSX2DRenderComponent::GetEffectivePixelScale() const
 {
     if (!bUniformHdScale)
     {
@@ -98,11 +98,11 @@ float UR3000GpuComponent::GetEffectivePixelScale() const
 }
 
 // ===================================================================
-// BindGpu - called by R3000EmuComponent after core init
+// BindGpu - called by PSXEmulatorComponent after core init
 // ===================================================================
-void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
+void UPSX2DRenderComponent::BindGpu(gpu::Gpu* InGpu)
 {
-    UE_LOG(LogR3000Gpu, Warning, TEXT("BindGpu called. InGpu=%p (was Gpu_=%p)"), InGpu, Gpu_);
+    UE_LOG(LogR3000Gpu, Verbose, TEXT("BindGpu called. InGpu=%p (was Gpu_=%p)"), InGpu, Gpu_);
     emu::logf(emu::LogLevel::info, "GPU", "GpuComponent v11 (run_based_sections)");
 
     Gpu_ = InGpu;
@@ -125,7 +125,7 @@ void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
 
     if (!BaseMaterial)
     {
-        UE_LOG(LogR3000Gpu, Error, TEXT("WARNING: BaseMaterial is NULL! Assign a material in the Blueprint or mesh will be invisible."));
+        UE_LOG(LogR3000Gpu, Error, TEXT("BaseMaterial is NULL. Assign a material in the Blueprint or the mesh will be invisible."));
         emu::logf(emu::LogLevel::error, "GPU", "BaseMaterial is NULL - mesh will be invisible! Assign a material in Blueprint.");
     }
 
@@ -141,7 +141,7 @@ void UR3000GpuComponent::BindGpu(gpu::Gpu* InGpu)
 // ===================================================================
 // Material instance management — lazy create/refresh
 // ===================================================================
-void UR3000GpuComponent::EnsureMaterialInstances()
+void UPSX2DRenderComponent::EnsureMaterialInstances()
 {
     // Resolve source material for each section: specific slot → BaseMaterial fallback
     UMaterialInterface* Wanted[kNumSections] = {
@@ -185,7 +185,7 @@ void UR3000GpuComponent::EnsureMaterialInstances()
     }
 }
 
-void UR3000GpuComponent::RefreshMaterials()
+void UPSX2DRenderComponent::RefreshMaterials()
 {
     // Force re-evaluation by clearing source tracking
     MatInstSource_.SetNum(kNumSections);
@@ -202,7 +202,7 @@ void UR3000GpuComponent::RefreshMaterials()
 // ===================================================================
 // SetVramTexture — receive shared texture from VramViewerComponent
 // ===================================================================
-void UR3000GpuComponent::SetVramTexture(UTexture2D* InTexture)
+void UPSX2DRenderComponent::SetVramTexture(UTexture2D* InTexture)
 {
     VramTexture_ = InTexture;
     UE_LOG(LogR3000Gpu, Log, TEXT("SetVramTexture: %p"), InTexture);
@@ -218,7 +218,7 @@ void UR3000GpuComponent::SetVramTexture(UTexture2D* InTexture)
 // ===================================================================
 // Rebuild geometry mesh from the GPU's ready draw list
 // ===================================================================
-void UR3000GpuComponent::RebuildMesh()
+void UPSX2DRenderComponent::RebuildMesh()
 {
     if (!Gpu_ || !MeshComp_)
     {
@@ -246,7 +246,7 @@ void UR3000GpuComponent::RebuildMesh()
     sRebuildCount++;
     if (sRebuildCount <= 10 || (sRebuildCount % 100) == 0)
     {
-        UE_LOG(LogR3000Gpu, Warning, TEXT("RebuildMesh #%d: %d triangles in draw list, frame_id=%u"),
+        UE_LOG(LogR3000Gpu, Verbose, TEXT("RebuildMesh #%d: %d triangles in draw list, frame_id=%u"),
             sRebuildCount, NumCmds, DrawList.frame_id);
     }
 
@@ -273,7 +273,7 @@ void UR3000GpuComponent::RebuildMesh()
     if (bFirstPrimitives)
     {
         const bool bHasMat0 = MatInst_.IsValidIndex(0) && MatInst_[0] != nullptr;
-        UE_LOG(LogR3000Gpu, Warning, TEXT("GPU: First primitives received! %d triangles. Mat[0]=%d"), NumCmds, bHasMat0 ? 1 : 0);
+        UE_LOG(LogR3000Gpu, Log, TEXT("First primitives received: %d triangles. Mat[0]=%d"), NumCmds, bHasMat0 ? 1 : 0);
         emu::logf(emu::LogLevel::info, "GPU", "UE5 First primitives! %d tris, Mat[0]=%s", NumCmds, bHasMat0 ? "OK" : "NULL (INVISIBLE!)");
         bFirstPrimitives = false;
     }
@@ -481,7 +481,7 @@ void UR3000GpuComponent::RebuildMesh()
 // ===================================================================
 // Tick - rebuild geometry when new frame available
 // ===================================================================
-void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UPSX2DRenderComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
@@ -490,7 +490,7 @@ void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
     sTickCount++;
     if (sTickCount <= 5 || (sTickCount % 300) == 0)
     {
-        UE_LOG(LogR3000Gpu, Warning, TEXT("TickComponent #%d: Gpu_=%p"), sTickCount, Gpu_);
+        UE_LOG(LogR3000Gpu, VeryVerbose, TEXT("TickComponent #%d: Gpu_=%p"), sTickCount, Gpu_);
     }
 
     // Debug: check if Gpu_ is null or stale (freed memory from Hot Reload)
@@ -542,7 +542,7 @@ void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         static uint32 sLoggedFrames = 0;
         if (sLoggedFrames < 10)
         {
-            UE_LOG(LogR3000Gpu, Warning, TEXT("RebuildMesh: frame %u -> %u (LastTriCount=%d)"),
+            UE_LOG(LogR3000Gpu, Verbose, TEXT("RebuildMesh: frame %u -> %u (LastTriCount=%d)"),
                 LastVramFrame_, CurrentFrame, LastTriCount_);
             sLoggedFrames++;
         }
@@ -554,17 +554,17 @@ void UR3000GpuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 // ===================================================================
 // Display info accessors
 // ===================================================================
-int32 UR3000GpuComponent::GetDisplayWidth() const
+int32 UPSX2DRenderComponent::GetDisplayWidth() const
 {
     return Gpu_ ? static_cast<int32>(Gpu_->display_config().width()) : 320;
 }
 
-int32 UR3000GpuComponent::GetDisplayHeight() const
+int32 UPSX2DRenderComponent::GetDisplayHeight() const
 {
     return Gpu_ ? static_cast<int32>(Gpu_->display_config().height()) : 240;
 }
 
-bool UR3000GpuComponent::IsDisplayEnabled() const
+bool UPSX2DRenderComponent::IsDisplayEnabled() const
 {
     return Gpu_ ? Gpu_->display_config().display_enabled : false;
 }

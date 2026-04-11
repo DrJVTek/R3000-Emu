@@ -1,15 +1,15 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "R3000Gpu3DComponent.h"
+#include "PSX3DRenderComponent.h"
 
 class UProceduralMeshComponent;
-class UR3000Gpu3DComponent;
+class UPSX3DRenderComponent;
 
-class FR3000Gpu3DTrackingController
+class FPSX3DTrackingController
 {
 public:
-    explicit FR3000Gpu3DTrackingController(UR3000Gpu3DComponent& InOwner);
+    explicit FPSX3DTrackingController(UPSX3DRenderComponent& InOwner);
 
     void Update(
         UProceduralMeshComponent* MeshComp,
@@ -28,6 +28,6 @@ private:
     void EnsureDetached(UProceduralMeshComponent* MeshComp, bool& bMeshDetachedForWorldLock) const;
     void EnsureAttached(UProceduralMeshComponent* MeshComp, bool& bMeshDetachedForWorldLock) const;
 
-    UR3000Gpu3DComponent& Owner_;
+    UPSX3DRenderComponent& Owner_;
     EGpu3DTrackingMode LastMode_{EGpu3DTrackingMode::LegacyFollowOwner};
 };

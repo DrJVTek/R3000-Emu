@@ -99,7 +99,7 @@ void DebugServer::server_thread_func(uint16_t port)
     listen(fd, 2);
     listen_fd_ = (int)fd;
     running_.store(true, std::memory_order_release);
-    emu::logf(emu::LogLevel::warn, "DEBUG", "Debug server listening on port %u", port);
+    emu::logf(emu::LogLevel::info, "DEBUG", "Debug server listening on port %u", port);
 
     while (!should_stop_.load(std::memory_order_acquire))
     {
@@ -108,10 +108,10 @@ void DebugServer::server_thread_func(uint16_t port)
         socket_t client = accept(fd, (struct sockaddr*)&client_addr, (socklen_t*)&client_len);
         if (client == INVALID_SOCK) break;
 
-        emu::logf(emu::LogLevel::warn, "DEBUG", "Client connected");
+            emu::logf(emu::LogLevel::info, "DEBUG", "Client connected");
         handle_client((int)client);
         CLOSE_SOCKET(client);
-        emu::logf(emu::LogLevel::warn, "DEBUG", "Client disconnected");
+            emu::logf(emu::LogLevel::info, "DEBUG", "Client disconnected");
     }
 
     CLOSE_SOCKET(fd);
@@ -406,7 +406,6 @@ std::string DebugServer::cmd_read_dma()
 {
     if (!core_ || !core_->bus()) return "{\"error\":\"no bus\"}";
     // Read DMA channel registers via bus MMIO
-    char buf[1024];
     std::string s = "{\"channels\":[";
     for (int ch = 0; ch < 7; ++ch)
     {

@@ -78,7 +78,7 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3, uint32_t& flag_out)
 
 Gte::Gte()
 {
-    emu::logf(emu::LogLevel::warn, "GTE", "GTE source v12 (session_2026_03_22)");
+    emu::logf(emu::LogLevel::debug, "GTE", "GTE created");
     reset();
 }
 

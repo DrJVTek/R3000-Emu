@@ -3316,7 +3316,7 @@ void Bus::set_external_vblank(bool enabled)
         // A sector thread conflicts with this state machine.
         start_gpu_thread(true); // PAL default — TODO: detect from disc region
         start_timer_threads();
-        emu::logf(emu::LogLevel::warn, "BUS", "IRQ threads started (GPU + Timers)");
+        emu::logf(emu::LogLevel::info, "BUS", "IRQ threads started (GPU + Timers)");
     }
     else
     {
@@ -3397,7 +3397,7 @@ void Bus::start_gpu_thread(bool pal)
             ? std::chrono::nanoseconds(63694)  // 20ms / 314
             : std::chrono::nanoseconds(63492); // 16.67ms / 263
 
-        emu::logf(emu::LogLevel::warn, "GPU_THREAD",
+        emu::logf(emu::LogLevel::info, "GPU_THREAD",
             "Started (%s, %u scanlines, VBlank@%u, %lld ns/line)",
             gpu_thread_pal_ ? "PAL" : "NTSC",
             scanlines_per_frame, vblank_start,
@@ -3426,7 +3426,7 @@ void Bus::start_gpu_thread(bool pal)
             }
         }
 
-        emu::logf(emu::LogLevel::warn, "GPU_THREAD", "Stopped");
+        emu::logf(emu::LogLevel::debug, "GPU_THREAD", "Stopped");
     });
 }
 
@@ -3453,7 +3453,7 @@ void Bus::start_sio0_thread()
     stop_sio0_thread();
     sio0_thread_running_.store(true, std::memory_order_release);
     sio0_thread_ = std::thread([this]() {
-        emu::logf(emu::LogLevel::warn, "SIO0_THREAD", "Started");
+        emu::logf(emu::LogLevel::debug, "SIO0_THREAD", "Started");
         while (sio0_thread_running_.load(std::memory_order_acquire))
         {
             // Wait for wake signal (zero-latency via condition_variable)
@@ -3484,7 +3484,7 @@ void Bus::start_sio0_thread()
                 sio0_transfer_signal_.store(2, std::memory_order_release);
             }
         }
-        emu::logf(emu::LogLevel::warn, "SIO0_THREAD", "Stopped");
+        emu::logf(emu::LogLevel::debug, "SIO0_THREAD", "Stopped");
     });
 }
 
@@ -3503,7 +3503,7 @@ void Bus::stop_sio0_thread()
 
 void Bus::timer_thread_func(int ch)
 {
-    emu::logf(emu::LogLevel::warn, "TMR_THREAD", "Timer %d thread started", ch);
+    emu::logf(emu::LogLevel::debug, "TMR_THREAD", "Timer %d thread started", ch);
 
     while (timer_threads_running_.load(std::memory_order_acquire))
     {
@@ -3622,7 +3622,7 @@ void Bus::timer_thread_func(int ch)
     }
 
 thread_exit:
-    emu::logf(emu::LogLevel::warn, "TMR_THREAD", "Timer %d thread stopped", ch);
+    emu::logf(emu::LogLevel::debug, "TMR_THREAD", "Timer %d thread stopped", ch);
 }
 
 void Bus::start_timer_threads()

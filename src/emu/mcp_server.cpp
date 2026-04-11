@@ -910,7 +910,7 @@ int McpServer::run_stdio(std::FILE* in, std::FILE* out)
         if (!resp.empty() && !write_stdio_message(out, resp))
             return 1;
     }
-    emu::logf(emu::LogLevel::warn, "MCP", "stdio loop ended");
+    emu::logf(emu::LogLevel::info, "MCP", "stdio loop ended");
     return 0;
 }
 

@@ -3,50 +3,58 @@
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Engine/Texture2D.h"
-#include "R3000ImageComponent.generated.h"
+#include "PSXImageSurfaceComponent.generated.h"
 
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
-class UR3000GpuComponent;
+class UPSX2DRenderComponent;
+class UPSXSurfaceComponent;
 namespace gpu { class Gpu; struct CpuVramWriteInfo; }
 
 /**
- * Static display-image component.
+ * Presents static display images written directly into VRAM.
  *
- * Shows a plane only when the GPU receives a direct CPU->VRAM DMA write that
- * exactly matches the current display area. Decoding follows the active display
- * format (15-bit or 24-bit). Once latched, the plane stays visible until the
- * display format or display start changes.
+ * Current detection is still based on CPU->VRAM writes compatible with the
+ * display area. Longer term, this should become one source handled by the
+ * unified PSX surface system.
  */
-UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
-class UR3000ImageComponent : public USceneComponent
+UCLASS(ClassGroup = (PSXEmu), meta = (BlueprintSpawnableComponent))
+class UPSXImageSurfaceComponent : public USceneComponent
 {
     GENERATED_BODY()
 
 public:
-    UR3000ImageComponent();
+    UPSXImageSurfaceComponent();
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
     void BindGpu(gpu::Gpu* InGpu);
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Image")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Image")
     UMaterialInterface* ImageMaterial{nullptr};
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Image", meta = (ClampMin = "1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Image", meta = (ClampMin = "1.0"))
     float PlaneWidth{320.0f};
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Image|Debug")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Image|Debug")
     bool bHideGpu2DWhileImageVisible{true};
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Image")
+    /** Mirror static-image detection into the unified PSX surface component while keeping legacy rendering active. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Image")
+    bool bMirrorToUnifiedSurface{true};
+
+    /** When a unified PSX surface is available, let it be the visible presenter instead of this legacy mesh. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Image")
+    bool bPreferUnifiedSurfacePresenter{true};
+
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Image")
     bool IsImageActive() const { return bImageVisible_; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Image")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Image")
     UTexture2D* GetImageTexture() const { return ImageTexture_; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Image")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Image")
     UProceduralMeshComponent* GetImageMesh() const { return ImageMesh_; }
 
 private:
@@ -58,9 +66,12 @@ private:
     bool IsWriteEligible(const gpu::CpuVramWriteInfo& Write) const;
     bool DoesCurrentDisplayMatchLatch() const;
     void SetGpu2DVisible(bool bGpuVisible);
+    void SyncUnifiedSurface(bool bSurfaceVisible);
+    bool ShouldUseUnifiedSurfacePresenter() const;
 
     gpu::Gpu* Gpu_{nullptr};
-    TWeakObjectPtr<UR3000GpuComponent> Gpu2DComp_;
+    TWeakObjectPtr<UPSX2DRenderComponent> Gpu2DComp_;
+    TWeakObjectPtr<UPSXSurfaceComponent> SurfaceComp_;
 
     UPROPERTY()
     UProceduralMeshComponent* ImageMesh_{nullptr};

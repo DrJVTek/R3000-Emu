@@ -1,10 +1,11 @@
-#include "R3000EmuComponent.h"
-#include "R3000AudioComponent.h"
-#include "R3000GpuComponent.h"
-#include "R3000Gpu3DComponent.h"
-#include "R3000VramViewerComponent.h"
-#include "R3000VideoComponent.h"
-#include "R3000ImageComponent.h"
+#include "PSXEmulatorComponent.h"
+#include "PSXAudioComponent.h"
+#include "PSX2DRenderComponent.h"
+#include "PSX3DRenderComponent.h"
+#include "PSXVramViewerComponent.h"
+#include "PSXVideoSurfaceComponent.h"
+#include "PSXImageSurfaceComponent.h"
+#include "PSXSurfaceComponent.h"
 
 #include "Logging/LogMacros.h"
 #include "Containers/StringConv.h"
@@ -37,18 +38,12 @@ using util::fopen_utf8;
 #include "Windows/HideWindowsPlatformTypes.h"
 #endif
 
-DEFINE_LOG_CATEGORY_STATIC(LogR3000Emu, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogPSXEmu, Log, All);
 
-// PS1 CPU clock: 33.8688 MHz
 static constexpr double kPS1CpuClock = 33868800.0;
-
-// PS1 audio timing (local constants used inside functions, see kCyclesPerSampleLocal below)
 
 static uint32 EffectiveBusTickBatch(bool bThreadedMode, int32 RequestedBusTickBatch)
 {
-    // With IRQ threads, bus_tick_batch must be 1 for cycle-accurate
-    // peripheral ticking (SIO0, CDROM command processing, DMA).
-    // Batching caused timing divergence vs CLI (Soul Reaver stall).
     return static_cast<uint32>(FMath::Clamp(RequestedBusTickBatch, 1, 128));
 }
 
@@ -67,28 +62,22 @@ static const TCHAR* LexToString(ECDTimingMode Mode)
     }
 }
 
-//=============================================================================
-// FR3000EmuWorker: Worker thread for emulation with precise timing
-//=============================================================================
-class FR3000EmuWorker : public FRunnable
+class FPSXEmuWorker : public FRunnable
 {
 public:
-    FR3000EmuWorker(UR3000EmuComponent* InOwner)
+    FPSXEmuWorker(UPSXEmulatorComponent* InOwner)
         : Owner(InOwner)
 #if PLATFORM_WINDOWS
         , WaitableTimer(nullptr)
 #endif
     {
 #if PLATFORM_WINDOWS
-        // Create a high-resolution waitable timer for precise timing.
-        // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION requires Windows 10 1803+
         WaitableTimer = CreateWaitableTimerExW(
             nullptr, nullptr,
             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
             TIMER_ALL_ACCESS);
         if (!WaitableTimer)
         {
-            // Fallback to regular timer on older Windows
             WaitableTimer = CreateWaitableTimerW(nullptr, false, nullptr);
         }
         if (WaitableTimer)
@@ -97,12 +86,12 @@ public:
         }
         else
         {
-            emu::logf(emu::LogLevel::warn, "CORE", "Worker thread: failed to create waitable timer, using Sleep fallback");
+            emu::logf(emu::LogLevel::info, "CORE", "Worker thread: failed to create waitable timer, using Sleep fallback");
         }
 #endif
     }
 
-    virtual ~FR3000EmuWorker()
+    virtual ~FPSXEmuWorker()
     {
 #if PLATFORM_WINDOWS
         if (WaitableTimer)
@@ -120,30 +109,24 @@ public:
 
     virtual uint32 Run() override
     {
-        emu::logf(emu::LogLevel::warn, "CORE", "Worker Run() entered (delta-time loop v26 session_2026_03_22)");
+        emu::logf(emu::LogLevel::debug, "CORE", "Worker Run() entered");
 
         uint64 LocalTotalCycles = 0;
         uint64 LocalSteps = 0;
         uint64 NextPcSampleAt = (Owner->GetPcSampleIntervalSteps() > 0)
             ? static_cast<uint64>(Owner->GetPcSampleIntervalSteps()) : 0;
 
-        // Delta-time loop: CycleDebt tracks fractional cycles owed.
-        // Positive = behind real-time (must execute), negative = ahead (sleep).
         double CycleDebt = 0.0;
         double LastTime = FPlatformTime::Seconds();
         double LastVblTime = LastTime;
 
-        // VBlank period: 20ms for PAL (50Hz), ~16.7ms for NTSC (60Hz)
-        // TODO: read from GPU display config (is_pal)
         constexpr double kVblPeriod = 1.0 / 50.0; // PAL
 
-        // Timing stats (logged every 2 seconds)
         double StatsTime = LastTime;
         uint64 StatsCycles = 0;
         uint64 StatsSteps = 0;
         uint32 StatsVBlanks = 0;
 
-        // Enable external VBlank on the bus (disables tick_vblank in Bus::tick)
         {
             r3000::Bus* Bus = Owner->GetCore() ? Owner->GetCore()->bus() : nullptr;
             if (Bus)
@@ -152,7 +135,6 @@ public:
 
         while (!Owner->bWorkerShouldStop_.Load())
         {
-            // Check if emulation is paused
             if (!Owner->IsRunning() || Owner->bWorkerPaused_.Load())
             {
                 FPlatformProcess::Sleep(0.001f);
@@ -172,21 +154,15 @@ public:
                 continue;
             }
 
-            // Compute delta time since last iteration
             const double Now = FPlatformTime::Seconds();
             double DeltaTime = Now - LastTime;
             LastTime = Now;
 
-            // Cap delta to 50ms to prevent spiral-of-death after hitches
             if (DeltaTime > 0.05)
                 DeltaTime = 0.05;
 
-            // Accumulate cycle debt: how many PS1 cycles this wall-clock delta represents
             CycleDebt += DeltaTime * kPS1CpuClock;
 
-            // Execute instructions until debt is paid off.
-            // Tick peripherals every ~1000 cycles to deliver IRQs (VBlank, SIO0, etc.)
-            // without per-instruction overhead.
             {
                 r3000::Bus* Bus = Core->bus();
                 uint32 PeriphAccum = 0;
@@ -218,19 +194,12 @@ public:
                     }
                 }
 
-                // Flush remaining peripheral cycles
                 if (Bus && PeriphAccum > 0)
                     Bus->tick_peripherals(PeriphAccum);
             }
 
-            // VBlank is handled by tick_peripherals via gpu_->tick_vblank().
-            // No separate fire_vblank_external needed — it caused double-swap
-            // which cleared the draw list before UE5 could read it.
-
-            // Update owner stats (atomic)
             Owner->UpdateStepsExecuted(LocalSteps, LocalTotalCycles);
 
-            // Periodic timing diagnostics (every 2 seconds)
             {
                 const double StatsNow = FPlatformTime::Seconds();
                 const double StatsElapsed = StatsNow - StatsTime;
@@ -300,7 +269,7 @@ public:
             }
         }
 
-        emu::logf(emu::LogLevel::warn, "CORE", "Emulation worker thread exiting");
+        emu::logf(emu::LogLevel::debug, "CORE", "Emulation worker thread exiting");
         return 0;
     }
 
@@ -331,7 +300,7 @@ private:
             FPlatformProcess::Sleep(static_cast<float>(Seconds));
     }
 
-    UR3000EmuComponent* Owner;
+    UPSXEmulatorComponent* Owner;
 #if PLATFORM_WINDOWS
     HANDLE WaitableTimer;
 #endif
@@ -342,11 +311,11 @@ static void UERlogCallback(rlog::Level Level, rlog::Category /*Cat*/, const char
 {
     switch (Level)
     {
-    case rlog::Level::error: UE_LOG(LogR3000Emu, Error,       TEXT("[CPU] %hs"), Msg); break;
-    case rlog::Level::warn:  UE_LOG(LogR3000Emu, Warning,     TEXT("[CPU] %hs"), Msg); break;
-    case rlog::Level::info:  UE_LOG(LogR3000Emu, Log,         TEXT("[CPU] %hs"), Msg); break;
-    case rlog::Level::debug: UE_LOG(LogR3000Emu, Verbose,     TEXT("[CPU] %hs"), Msg); break;
-    case rlog::Level::trace: UE_LOG(LogR3000Emu, VeryVerbose, TEXT("[CPU] %hs"), Msg); break;
+    case rlog::Level::error: UE_LOG(LogPSXEmu, Error,       TEXT("[CPU] %hs"), Msg); break;
+    case rlog::Level::warn:  UE_LOG(LogPSXEmu, Warning,     TEXT("[CPU] %hs"), Msg); break;
+    case rlog::Level::info:  UE_LOG(LogPSXEmu, Log,         TEXT("[CPU] %hs"), Msg); break;
+    case rlog::Level::debug: UE_LOG(LogPSXEmu, Verbose,     TEXT("[CPU] %hs"), Msg); break;
+    case rlog::Level::trace: UE_LOG(LogPSXEmu, VeryVerbose, TEXT("[CPU] %hs"), Msg); break;
     }
 }
 
@@ -358,16 +327,16 @@ static void UEAsyncLogOutput(uint64_t /*ts_ns*/, emu::LogLevel Level,
 {
     switch (Level)
     {
-    case emu::LogLevel::error: UE_LOG(LogR3000Emu, Error,       TEXT("[%hs] %hs"), Tag, Msg); break;
-    case emu::LogLevel::warn:  UE_LOG(LogR3000Emu, Warning,     TEXT("[%hs] %hs"), Tag, Msg); break;
-    case emu::LogLevel::info:  UE_LOG(LogR3000Emu, Log,         TEXT("[%hs] %hs"), Tag, Msg); break;
-    case emu::LogLevel::debug: UE_LOG(LogR3000Emu, Verbose,     TEXT("[%hs] %hs"), Tag, Msg); break;
-    case emu::LogLevel::trace: UE_LOG(LogR3000Emu, VeryVerbose, TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::error: UE_LOG(LogPSXEmu, Error,       TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::warn:  UE_LOG(LogPSXEmu, Warning,     TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::info:  UE_LOG(LogPSXEmu, Log,         TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::debug: UE_LOG(LogPSXEmu, Verbose,     TEXT("[%hs] %hs"), Tag, Msg); break;
+    case emu::LogLevel::trace: UE_LOG(LogPSXEmu, VeryVerbose, TEXT("[%hs] %hs"), Tag, Msg); break;
     }
 
     if (!User || !Tag)
         return;
-    const auto* Files = static_cast<const UR3000EmuComponent::EmuLogFiles*>(User);
+    const auto* Files = static_cast<const UPSXEmulatorComponent::EmuLogFiles*>(User);
     if (Files->spu && std::strcmp(Tag, "SPU") == 0)
     {
         std::fprintf(Files->spu, "[%hs] %hs\n", Tag, Msg);
@@ -413,7 +382,7 @@ static const char* ToPsx3dRefreshScope(EPsx3dRefreshScope V)
     }
 }
 
-UR3000EmuComponent::UR3000EmuComponent()
+UPSXEmulatorComponent::UPSXEmulatorComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
 
@@ -449,13 +418,13 @@ UR3000EmuComponent::UR3000EmuComponent()
     PadMappingContext = Cast<UInputMappingContext>(StaticLoadObject(UInputMappingContext::StaticClass(), nullptr, *IMCPath));
 }
 
-void UR3000EmuComponent::UpdateStepsExecuted(uint64 Steps, uint64 Cycles)
+void UPSXEmulatorComponent::UpdateStepsExecuted(uint64 Steps, uint64 Cycles)
 {
     StepsExecuted_.Store(Steps);
     TotalCyclesExecuted_.Store(Cycles);
 }
 
-void UR3000EmuComponent::StopWorkerThread()
+void UPSXEmulatorComponent::StopWorkerThread()
 {
     if (EmuWorker_)
     {
@@ -477,7 +446,7 @@ void UR3000EmuComponent::StopWorkerThread()
 
 // fopen_utf8 now provided by util/file_util.h
 
-bool UR3000EmuComponent::BootBiosInternal()
+bool UPSXEmulatorComponent::BootBiosInternal()
 {
     if (!Core_)
         return false;
@@ -494,7 +463,7 @@ bool UR3000EmuComponent::BootBiosInternal()
     err[0] = '\0';
     if (!Core_->set_bios_copy(BiosBytes_.GetData(), (uint32)BiosBytes_.Num(), err, sizeof(err)))
     {
-        UE_LOG(LogR3000Emu, Error, TEXT("BIOS setup failed: %hs"), err[0] ? err : "unknown error");
+        UE_LOG(LogPSXEmu, Error, TEXT("BIOS setup failed: %hs"), err[0] ? err : "unknown error");
         return false;
     }
 
@@ -516,7 +485,7 @@ bool UR3000EmuComponent::BootBiosInternal()
     Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
     if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
     {
-        UE_LOG(LogR3000Emu, Error, TEXT("Core init (BIOS) failed: %hs"), err[0] ? err : "unknown error");
+        UE_LOG(LogPSXEmu, Error, TEXT("Core init (BIOS) failed: %hs"), err[0] ? err : "unknown error");
         emu::logf(emu::LogLevel::error, "CORE", "UE BIOS init failed: %s", err[0] ? err : "unknown error");
         return false;
     }
@@ -524,7 +493,7 @@ bool UR3000EmuComponent::BootBiosInternal()
     // Apply cycle multiplier for timing accuracy
     Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
 
-    UE_LOG(LogR3000Emu, Log, TEXT("BIOS boot initialized. PC=0x%08X CycleMult=%d Timing=WallClock CDTiming=%s"),
+    UE_LOG(LogPSXEmu, Log, TEXT("BIOS boot initialized. PC=0x%08X CycleMult=%d Timing=WallClock CDTiming=%s"),
         Core_->pc(), CycleMultiplier, LexToString(CDTimingMode));
     emu::logf(emu::LogLevel::info, "CORE",
         "UE BIOS init OK pc=0x%08X hle_vectors=%d bus_tick_batch=%u cycle_mult=%u threaded=%d timing=wallclock cd_timing=%s",
@@ -536,16 +505,16 @@ bool UR3000EmuComponent::BootBiosInternal()
     return true;
 }
 
-void UR3000EmuComponent::BeginPlay()
+void UPSXEmulatorComponent::BeginPlay()
 {
     Super::BeginPlay();
 }
 
-void UR3000EmuComponent::InitEmulator()
+void UPSXEmulatorComponent::InitEmulator()
 {
     if (Core_)
     {
-        UE_LOG(LogR3000Emu, Warning, TEXT("InitEmulator called but emulator already initialized."));
+        UE_LOG(LogPSXEmu, Warning, TEXT("InitEmulator called but emulator already initialized."));
         return;
     }
 
@@ -620,11 +589,11 @@ void UR3000EmuComponent::InitEmulator()
     err[0] = '\0';
     if (!Core_->alloc_ram(2u * 1024u * 1024u, err, sizeof(err)))
     {
-        UE_LOG(LogR3000Emu, Error, TEXT("R3000 core RAM alloc failed: %hs"), err[0] ? err : "unknown error");
+        UE_LOG(LogPSXEmu, Error, TEXT("PSX core RAM allocation failed: %hs"), err[0] ? err : "unknown error");
         return;
     }
 
-    UE_LOG(LogR3000Emu, Log, TEXT("R3000 core created (RAM allocated)."));
+    UE_LOG(LogPSXEmu, Log, TEXT("PSX core created."));
 
     // Hook HW/system log sinks to files (optional).
     if (CdLogFile_ || GpuLogFile_ || SysLogFile_ || IoLogFile_)
@@ -645,7 +614,7 @@ void UR3000EmuComponent::InitEmulator()
     }
 
     // BIOS putchar → OnBiosPrint delegate.
-    Core_->set_putchar_callback(&UR3000EmuComponent::PutcharCB, this);
+    Core_->set_putchar_callback(&UPSXEmulatorComponent::PutcharCB, this);
 
     // Init core.
     // Priority: bDevKitMode (EXE direct boot with HLE) > bFastBoot (CD fast boot) > BIOS boot.
@@ -655,7 +624,7 @@ void UR3000EmuComponent::InitEmulator()
         // Like a real DTL-H2000: BIOS kernel is initialized, then EXE is loaded on top.
         if (ExePath.IsEmpty())
         {
-            UE_LOG(LogR3000Emu, Error, TEXT("bDevKitMode=true but ExePath is empty!"));
+            UE_LOG(LogPSXEmu, Error, TEXT("bDevKitMode=true but ExePath is empty!"));
             emu::logf(emu::LogLevel::error, "CORE", "bDevKitMode=true but ExePath is empty");
             return;
         }
@@ -675,7 +644,7 @@ void UR3000EmuComponent::InitEmulator()
         Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
-            UE_LOG(LogR3000Emu, Error, TEXT("Core init (devkit) failed: %hs"), err[0] ? err : "unknown error");
+            UE_LOG(LogPSXEmu, Error, TEXT("Core init (devkit) failed: %hs"), err[0] ? err : "unknown error");
             return;
         }
 
@@ -688,7 +657,7 @@ void UR3000EmuComponent::InitEmulator()
             if (FFileHelper::LoadFileToArray(BiosBytes_, *BiosPath))
             {
                 Core_->set_bios_copy(BiosBytes_.GetData(), (uint32)BiosBytes_.Num(), err, sizeof(err));
-                UE_LOG(LogR3000Emu, Log, TEXT("DevKit: BIOS ROM loaded for font data (%d bytes)"), BiosBytes_.Num());
+                UE_LOG(LogPSXEmu, Log, TEXT("DevKit: BIOS ROM loaded for font data (%d bytes)"), BiosBytes_.Num());
             }
         }
 
@@ -696,12 +665,12 @@ void UR3000EmuComponent::InitEmulator()
         FTCHARToUTF8 ExeUtf8(*ExePath);
         if (!Core_->fast_boot_from_exe(ExeUtf8.Get(), err, sizeof(err)))
         {
-            UE_LOG(LogR3000Emu, Error, TEXT("Dev kit EXE boot failed: %hs"), err[0] ? err : "unknown error");
+            UE_LOG(LogPSXEmu, Error, TEXT("Dev kit EXE boot failed: %hs"), err[0] ? err : "unknown error");
             return;
         }
 
         Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
-        UE_LOG(LogR3000Emu, Log, TEXT("Dev kit boot OK: %s → PC=0x%08X CDTiming=%s"), *ExePath, Core_->pc(), LexToString(CDTimingMode));
+        UE_LOG(LogPSXEmu, Log, TEXT("Dev kit boot OK: %s → PC=0x%08X CDTiming=%s"), *ExePath, Core_->pc(), LexToString(CDTimingMode));
     }
     else if (bFastBoot)
     {
@@ -721,7 +690,7 @@ void UR3000EmuComponent::InitEmulator()
         Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
         {
-            UE_LOG(LogR3000Emu, Error, TEXT("Core init (fastboot) failed: %hs"), err[0] ? err : "unknown error");
+            UE_LOG(LogPSXEmu, Error, TEXT("Core init (fastboot) failed: %hs"), err[0] ? err : "unknown error");
             emu::logf(emu::LogLevel::error, "CORE", "UE fastboot init_from_image failed: %s", err[0] ? err : "unknown error");
             return;
         }
@@ -738,7 +707,7 @@ void UR3000EmuComponent::InitEmulator()
             BiosBytes_.Reset();
             if (!FFileHelper::LoadFileToArray(BiosBytes_, *BiosPath))
             {
-                UE_LOG(LogR3000Emu, Error, TEXT("Failed to load BIOS: %s"), *BiosPath);
+                UE_LOG(LogPSXEmu, Error, TEXT("Failed to load BIOS: %s"), *BiosPath);
                 emu::logf(emu::LogLevel::error, "CORE", "UE BIOS load failed: %s", FTCHARToUTF8(*BiosPath).Get());
                 return;
             }
@@ -749,15 +718,15 @@ void UR3000EmuComponent::InitEmulator()
         }
         else
         {
-            emu::logf(emu::LogLevel::warn, "CORE", "UE BiosPath is empty (BIOS init will be skipped)");
+            emu::logf(emu::LogLevel::info, "CORE", "UE BiosPath is empty (BIOS init will be skipped)");
         }
     }
 
     // Optional disc insert (skip in dev kit mode — no CD needed).
     if (!bDevKitMode && !DiscPath.IsEmpty())
     {
-        emu::logf(
-            emu::LogLevel::warn,
+            emu::logf(
+            emu::LogLevel::info,
             "CORE",
             "UE insert_disc begin path='%s' fastboot=%d hle_vectors=%d",
             FTCHARToUTF8(*DiscPath).Get(),
@@ -766,7 +735,7 @@ void UR3000EmuComponent::InitEmulator()
         FTCHARToUTF8 DiscUtf8(*DiscPath);
         if (!Core_->insert_disc(DiscUtf8.Get(), err, sizeof(err)))
         {
-            UE_LOG(LogR3000Emu, Error, TEXT("CD insert failed: %hs"), err[0] ? err : "unknown error");
+            UE_LOG(LogPSXEmu, Error, TEXT("CD insert failed: %hs"), err[0] ? err : "unknown error");
             emu::logf(
                 emu::LogLevel::error,
                 "CORE",
@@ -776,9 +745,9 @@ void UR3000EmuComponent::InitEmulator()
         }
         else
         {
-            UE_LOG(LogR3000Emu, Log, TEXT("CD inserted."));
+            UE_LOG(LogPSXEmu, Log, TEXT("CD inserted."));
             emu::logf(
-                emu::LogLevel::warn,
+                emu::LogLevel::info,
                 "CORE",
                 "UE insert_disc OK path='%s'",
                 DiscUtf8.Get());
@@ -786,7 +755,7 @@ void UR3000EmuComponent::InitEmulator()
     }
     else if (!bDevKitMode)
     {
-        emu::logf(emu::LogLevel::warn, "CORE", "UE DiscPath is empty (no disc inserted)");
+        emu::logf(emu::LogLevel::info, "CORE", "UE DiscPath is empty (no disc inserted)");
     }
 
     // Fast boot: skip BIOS, load game EXE directly from CD (skip in dev kit mode).
@@ -798,12 +767,12 @@ void UR3000EmuComponent::InitEmulator()
         fberr[0] = '\0';
         if (Core_->fast_boot_from_cd(fberr, sizeof(fberr)))
         {
-            UE_LOG(LogR3000Emu, Log, TEXT("Fast boot OK. PC=0x%08X"), Core_->pc());
+            UE_LOG(LogPSXEmu, Log, TEXT("Fast boot OK. PC=0x%08X"), Core_->pc());
             emu::logf(emu::LogLevel::info, "CORE", "UE fastboot OK pc=0x%08X", (unsigned)Core_->pc());
         }
         else
         {
-            UE_LOG(LogR3000Emu, Error, TEXT("Fast boot failed: %hs"), fberr[0] ? fberr : "unknown");
+            UE_LOG(LogPSXEmu, Error, TEXT("Fast boot failed: %hs"), fberr[0] ? fberr : "unknown");
             emu::logf(emu::LogLevel::error, "CORE", "UE fastboot FAILED: %s", fberr[0] ? fberr : "unknown");
         }
     }
@@ -850,7 +819,7 @@ void UR3000EmuComponent::InitEmulator()
             if (speed != ctx->last_speed || rpm != ctx->last_rpm
                 || torque != ctx->last_torque || speed_delta != ctx->last_delta)
             {
-                emu::logf(emu::LogLevel::warn, "HOOK",
+                emu::logf(emu::LogLevel::debug, "HOOK",
                     "VB#%u spd=%d(/%d) delta=%d rpm=%d torq=%d gear=%d drv=%d",
                     vblank, speed, speed/8, speed_delta, rpm, torque, (int)gear, drive_mode);
                 ctx->last_speed  = speed;
@@ -860,7 +829,7 @@ void UR3000EmuComponent::InitEmulator()
             }
         }, &s_phys);
 
-        emu::logf(emu::LogLevel::warn, "HOOK", "Physics watch on car 0x%08X (spd/rpm/torq/delta/gear/drv)", 0x80080194u);
+        emu::logf(emu::LogLevel::debug, "HOOK", "Physics watch on car 0x%08X (spd/rpm/torq/delta/gear/drv)", 0x80080194u);
     }
 
     // Optional run N steps immediately.
@@ -876,7 +845,7 @@ void UR3000EmuComponent::InitEmulator()
         const auto Res = Core_->step();
         if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
         {
-            UE_LOG(LogR3000Emu, Warning, TEXT("Stop stepping: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
+            UE_LOG(LogPSXEmu, Warning, TEXT("Stop stepping: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
             break;
         }
         ++InitSteps;
@@ -885,7 +854,7 @@ void UR3000EmuComponent::InitEmulator()
 
     // Find audio component on same actor and connect SPU callback.
     AActor* Owner = GetOwner();
-    AudioComp_ = Owner ? Owner->FindComponentByClass<UR3000AudioComponent>() : nullptr;
+    AudioComp_ = Owner ? Owner->FindComponentByClass<UPSXAudioComponent>() : nullptr;
     if (AudioComp_ && Core_)
     {
         // Ensure no stale audio from a previous run can replay (e.g. BIOS jingle when toggling fastboot).
@@ -895,60 +864,60 @@ void UR3000EmuComponent::InitEmulator()
         audio::Spu* Spu = Bus ? Bus->spu() : nullptr;
         if (Spu)
         {
-            UR3000AudioComponent* Audio = AudioComp_;
+            UPSXAudioComponent* Audio = AudioComp_;
             Spu->set_audio_callback([Audio](const int16_t* Samples, int Count) {
                 if (Audio)
                     Audio->PushSamples(Samples, Count * 2); // Count = stereo frames, *2 for individual int16 (L,R)
             });
             AudioComp_->Start();
-            UE_LOG(LogR3000Emu, Log, TEXT("SPU audio connected to UR3000AudioComponent."));
+            UE_LOG(LogPSXEmu, Log, TEXT("SPU audio connected to UPSXAudioComponent."));
             emu::logf(emu::LogLevel::info, "CORE", "UE audio connected: gain=%.3f muted=%d",
                 (double)AudioComp_->OutputGain, AudioComp_->IsMuted() ? 1 : 0);
         }
         else
         {
-            UE_LOG(LogR3000Emu, Warning, TEXT("SPU not available — audio callback not connected."));
-            emu::logf(emu::LogLevel::warn, "CORE", "UE audio NOT connected (SPU missing)");
+            UE_LOG(LogPSXEmu, Warning, TEXT("SPU not available — audio callback not connected."));
+            emu::logf(emu::LogLevel::info, "CORE", "UE audio not connected (SPU missing)");
         }
     }
     else
     {
-        emu::logf(emu::LogLevel::warn, "CORE", "UE audio NOT connected (AudioComp=%d Core=%d)",
+        emu::logf(emu::LogLevel::info, "CORE", "UE audio not connected (AudioComp=%d Core=%d)",
             AudioComp_ ? 1 : 0, Core_ ? 1 : 0);
     }
 
     // Find VramViewer component — owns the VRAM texture, shared with 2D + 3D components.
-    UR3000VramViewerComponent* VramComp = Owner ? Owner->FindComponentByClass<UR3000VramViewerComponent>() : nullptr;
+    UPSXVramViewerComponent* VramComp = Owner ? Owner->FindComponentByClass<UPSXVramViewerComponent>() : nullptr;
     r3000::Bus* Bus = Core_ ? Core_->bus() : nullptr;
     gpu::Gpu* Gpu = Bus ? Bus->gpu() : nullptr;
 
     if (VramComp && Gpu)
     {
         VramComp->BindGpu(Gpu);
-        UE_LOG(LogR3000Emu, Log, TEXT("VramViewer connected: texture=%p"), (void*)VramComp->GetVramTexture());
+        UE_LOG(LogPSXEmu, Log, TEXT("VramViewer connected: texture=%p"), (void*)VramComp->GetVramTexture());
         emu::logf(emu::LogLevel::info, "CORE", "VramViewer connected: texture=%p", (void*)VramComp->GetVramTexture());
     }
 
     // Find 2D GPU component and connect.
-    GpuComp_ = Owner ? Owner->FindComponentByClass<UR3000GpuComponent>() : nullptr;
+    GpuComp_ = Owner ? Owner->FindComponentByClass<UPSX2DRenderComponent>() : nullptr;
     if (GpuComp_ && Gpu)
     {
         GpuComp_->BindGpu(Gpu);
         // Pass shared VRAM texture from VramViewer
         if (VramComp)
             GpuComp_->SetVramTexture(VramComp->GetVramTexture());
-        UE_LOG(LogR3000Emu, Log, TEXT("GPU 2D connected. VramTex=%p"), (void*)GpuComp_->GetVramTexture());
+        UE_LOG(LogPSXEmu, Log, TEXT("GPU 2D connected. VramTex=%p"), (void*)GpuComp_->GetVramTexture());
         emu::logf(emu::LogLevel::info, "CORE", "UE GPU 2D connected: scale=%.2f zstep=%.4f",
             (double)GpuComp_->PixelScale, (double)GpuComp_->ZStep);
     }
     else
     {
-        emu::logf(emu::LogLevel::warn, "CORE", "UE GPU NOT connected (GpuComp=%d Gpu=%d)",
+        emu::logf(emu::LogLevel::info, "CORE", "UE GPU 2D not connected (GpuComp=%d Gpu=%d)",
             GpuComp_ ? 1 : 0, Gpu ? 1 : 0);
     }
 
     // Find 3D GPU component and connect (shadow GPU + shared VRAM texture).
-    Gpu3DComp_ = Owner ? Owner->FindComponentByClass<UR3000Gpu3DComponent>() : nullptr;
+    Gpu3DComp_ = Owner ? Owner->FindComponentByClass<UPSX3DRenderComponent>() : nullptr;
     if (Gpu3DComp_ && Core_)
     {
         if (Gpu)
@@ -963,27 +932,57 @@ void UR3000EmuComponent::InitEmulator()
         if (VramComp)
             Gpu3DComp_->SetVramTexture(VramComp->GetVramTexture());
 
-        UE_LOG(LogR3000Emu, Log, TEXT("GPU 3D connected. Shadow=%p VramTex=%p"),
+        UE_LOG(LogPSXEmu, Log, TEXT("GPU 3D connected. Shadow=%p VramTex=%p"),
             (void*)GpuShadow, Gpu3DComp_->GetMeshComponent() ? (void*)VramComp : nullptr);
         emu::logf(emu::LogLevel::info, "CORE", "GPU3D connected (shadow=%p)", (void*)GpuShadow);
     }
 
     // Video component — auto-detects 24-bit (MDEC FMV) mode and shows a video plane.
-    VideoComp_ = Owner ? Owner->FindComponentByClass<UR3000VideoComponent>() : nullptr;
+    VideoComp_ = Owner ? Owner->FindComponentByClass<UPSXVideoSurfaceComponent>() : nullptr;
     if (VideoComp_ && Gpu)
     {
+        emu::logf(emu::LogLevel::warn, "CORE", "Binding VideoComponent gpu=%p comp=%p", (void*)Gpu, (void*)VideoComp_);
         VideoComp_->BindGpu(Gpu);
-        UE_LOG(LogR3000Emu, Log, TEXT("Video component connected"));
-        emu::logf(emu::LogLevel::info, "CORE", "VideoComponent connected");
+        UE_LOG(LogPSXEmu, Log, TEXT("Video component connected"));
+        emu::logf(emu::LogLevel::warn, "CORE", "VideoComponent connected");
+    }
+    else
+    {
+        emu::logf(emu::LogLevel::warn, "CORE", "VideoComponent not connected video=%d gpu=%d",
+            VideoComp_ ? 1 : 0, Gpu ? 1 : 0);
     }
 
     // Image component — shows static CPU→VRAM images (logos, loading screens).
-    ImageComp_ = Owner ? Owner->FindComponentByClass<UR3000ImageComponent>() : nullptr;
+    ImageComp_ = Owner ? Owner->FindComponentByClass<UPSXImageSurfaceComponent>() : nullptr;
     if (ImageComp_ && Gpu)
     {
+        emu::logf(emu::LogLevel::warn, "CORE", "Binding ImageComponent gpu=%p comp=%p", (void*)Gpu, (void*)ImageComp_);
         ImageComp_->BindGpu(Gpu);
-        UE_LOG(LogR3000Emu, Log, TEXT("Image component connected"));
-        emu::logf(emu::LogLevel::info, "CORE", "ImageComponent connected");
+        UE_LOG(LogPSXEmu, Log, TEXT("Image component connected"));
+        emu::logf(emu::LogLevel::warn, "CORE", "ImageComponent connected");
+    }
+    else
+    {
+        emu::logf(emu::LogLevel::warn, "CORE", "ImageComponent not connected image=%d gpu=%d",
+            ImageComp_ ? 1 : 0, Gpu ? 1 : 0);
+    }
+
+    SurfaceComp_ = Owner ? Owner->FindComponentByClass<UPSXSurfaceComponent>() : nullptr;
+    if (SurfaceComp_ && Gpu)
+    {
+        emu::logf(emu::LogLevel::warn, "CORE", "Binding SurfaceComponent gpu=%p comp=%p", (void*)Gpu, (void*)SurfaceComp_);
+        SurfaceComp_->BindGpu(Gpu);
+        if (VramComp)
+            SurfaceComp_->SetSurfaceTexture(VramComp->GetVramTexture());
+        UE_LOG(LogPSXEmu, Log, TEXT("Surface component connected"));
+        emu::logf(emu::LogLevel::warn, "CORE", "SurfaceComponent connected");
+    }
+    else
+    {
+        UE_LOG(LogPSXEmu, Log, TEXT("Surface component not connected (Surface=%d Gpu=%d)"),
+            SurfaceComp_ ? 1 : 0, Gpu ? 1 : 0);
+        emu::logf(emu::LogLevel::warn, "CORE", "SurfaceComponent not connected surface=%d gpu=%d",
+            SurfaceComp_ ? 1 : 0, Gpu ? 1 : 0);
     }
 
     // Start worker thread if threaded mode is enabled.
@@ -992,32 +991,32 @@ void UR3000EmuComponent::InitEmulator()
         bWorkerShouldStop_.Store(false);
         bWorkerPaused_.Store(false);
 
-        EmuWorker_ = new FR3000EmuWorker(this);
+        EmuWorker_ = new FPSXEmuWorker(this);
         EmuThread_ = FRunnableThread::Create(
             EmuWorker_,
-            TEXT("R3000EmuWorker"),
+            TEXT("PSXEmuWorker"),
             0, // Default stack size
             TPri_AboveNormal, // Higher priority for accurate timing
             FPlatformAffinity::GetNoAffinityMask());
 
         if (EmuThread_)
         {
-            UE_LOG(LogR3000Emu, Log, TEXT("Threaded emulation mode: worker thread started."));
+            UE_LOG(LogPSXEmu, Log, TEXT("Threaded emulation mode: worker thread started."));
             emu::logf(emu::LogLevel::info, "CORE", "UE threaded mode: worker thread started");
         }
         else
         {
-            UE_LOG(LogR3000Emu, Error, TEXT("Failed to create emulation worker thread!"));
+            UE_LOG(LogPSXEmu, Error, TEXT("Failed to create emulation worker thread!"));
             delete EmuWorker_;
             EmuWorker_ = nullptr;
         }
     }
 
-    UE_LOG(LogR3000Emu, Log, TEXT("InitEmulator done. PC=0x%08X steps=%llu threaded=%d"),
+    UE_LOG(LogPSXEmu, Log, TEXT("InitEmulator done. PC=0x%08X steps=%llu threaded=%d"),
         Core_->pc(), StepsExecuted_.Load(), bThreadedMode ? 1 : 0);
 }
 
-void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UPSXEmulatorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
@@ -1074,10 +1073,35 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
                 NextAudioStatsTime_ = Now + FMath::Max((double)AudioStatsIntervalSec, 0.1);
             }
         }
+
+        {
+            static double NextSurfaceStatsTime = 0.0;
+            const double Now = FPlatformTime::Seconds();
+            if (Now >= NextSurfaceStatsTime)
+            {
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "CORE",
+                    "SurfaceState video_comp=%d video_active=%d video_tex=%p video_wh=%dx%d image_comp=%d image_active=%d image_tex=%p surface_comp=%d surface_visible=%d surface_tex=%p",
+                    VideoComp_ ? 1 : 0,
+                    (VideoComp_ && VideoComp_->IsVideoActive()) ? 1 : 0,
+                    VideoComp_ ? (void*)VideoComp_->GetVideoTexture() : nullptr,
+                    VideoComp_ ? VideoComp_->GetVideoWidth() : 0,
+                    VideoComp_ ? VideoComp_->GetVideoHeight() : 0,
+                    ImageComp_ ? 1 : 0,
+                    (ImageComp_ && ImageComp_->IsImageActive()) ? 1 : 0,
+                    ImageComp_ ? (void*)ImageComp_->GetImageTexture() : nullptr,
+                    SurfaceComp_ ? 1 : 0,
+                    (SurfaceComp_ && SurfaceComp_->IsSurfaceVisible()) ? 1 : 0,
+                    SurfaceComp_ ? (void*)SurfaceComp_->GetSurfaceTexture() : nullptr);
+
+                NextSurfaceStatsTime = Now + 1.0;
+            }
+        }
         return; // Worker thread handles all emulation
     }
 
-    // LEGACY MODE: Run emulation in main thread (original behavior)
+    // Non-threaded fallback.
     // Constants for audio-driven timing
     // PS1 CPU: 33.8688 MHz, Audio: 44100 Hz → 768 CPU cycles per audio sample
     constexpr uint32 kCyclesPerSampleLocal = 768;
@@ -1138,7 +1162,7 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
     }
 
     const double BudgetSeconds = FMath::Max(BudgetMs, 1.0f) * 0.001;
-    const double StartTimeLegacy = FPlatformTime::Seconds();
+    const double StartTimeNonThreaded = FPlatformTime::Seconds();
 
     // Run instructions, counting REAL cycles per instruction.
     uint64 CyclesRan = 0;
@@ -1150,7 +1174,7 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         const auto Res = Core_->step();
         if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
         {
-            UE_LOG(LogR3000Emu, Warning, TEXT("Emu stopped: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
+            UE_LOG(LogPSXEmu, Warning, TEXT("Emu stopped: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
             bRunning = false;
             CyclesLastFrame_.Store(static_cast<int32>(CyclesRan));
             return;
@@ -1164,7 +1188,7 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
         // Check wall-clock budget every 4096 instructions
         if ((LocalSteps & 0xFFF) == 0)
         {
-            if (FPlatformTime::Seconds() - StartTimeLegacy >= BudgetSeconds)
+            if (FPlatformTime::Seconds() - StartTimeNonThreaded >= BudgetSeconds)
                 break;
         }
 
@@ -1237,12 +1261,12 @@ void UR3000EmuComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
     }
 }
 
-bool UR3000EmuComponent::ResetBiosBoot()
+bool UPSXEmulatorComponent::ResetBiosBoot()
 {
     return BootBiosInternal();
 }
 
-int32 UR3000EmuComponent::StepInstructions(int32 Steps)
+int32 UPSXEmulatorComponent::StepInstructions(int32 Steps)
 {
     if (!Core_ || Steps <= 0)
         return 0;
@@ -1260,7 +1284,7 @@ int32 UR3000EmuComponent::StepInstructions(int32 Steps)
         const auto Res = Core_->step();
         if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
         {
-            UE_LOG(LogR3000Emu, Warning, TEXT("Stop stepping: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
+            UE_LOG(LogPSXEmu, Warning, TEXT("Stop stepping: kind=%d PC=0x%08X"), (int32)Res.kind, Res.pc);
             break;
         }
         ++Executed;
@@ -1270,18 +1294,18 @@ int32 UR3000EmuComponent::StepInstructions(int32 Steps)
     return Executed;
 }
 
-int32 UR3000EmuComponent::GetProgramCounter() const
+int32 UPSXEmulatorComponent::GetProgramCounter() const
 {
     return Core_ ? (int32)Core_->pc() : 0;
 }
 
-FString UR3000EmuComponent::GetProgramCounterString() const
+FString UPSXEmulatorComponent::GetProgramCounterString() const
 {
     return Core_ ? FString::Printf(TEXT("%08x"), (int32)Core_->pc()) : TEXT("error");
 }
 
 
-void UR3000EmuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void UPSXEmulatorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     // Stop worker thread FIRST (before touching Core_)
     StopWorkerThread();
@@ -1295,7 +1319,7 @@ void UR3000EmuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
             Spu->set_audio_callback(nullptr);
         delete Core_;
         Core_ = nullptr;
-        UE_LOG(LogR3000Emu, Log, TEXT("R3000 core destroyed."));
+        UE_LOG(LogPSXEmu, Log, TEXT("PSX core destroyed."));
     }
     if (AudioComp_)
     {
@@ -1345,9 +1369,9 @@ void UR3000EmuComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
-void UR3000EmuComponent::PutcharCB(char Ch, void* User)
+void UPSXEmulatorComponent::PutcharCB(char Ch, void* User)
 {
-    auto* Self = static_cast<UR3000EmuComponent*>(User);
+    auto* Self = static_cast<UPSXEmulatorComponent*>(User);
     if (!Self)
         return;
 
@@ -1372,7 +1396,7 @@ void UR3000EmuComponent::PutcharCB(char Ch, void* User)
 // ---------------------------------------------------------------------------
 // Setup Enhanced Input mapping context for PS1 controller
 // ---------------------------------------------------------------------------
-void UR3000EmuComponent::SetupPadInput()
+void UPSXEmulatorComponent::SetupPadInput()
 {
     if (bPadMappingAdded_ || !PadMappingContext) return;
 
@@ -1384,11 +1408,11 @@ void UR3000EmuComponent::SetupPadInput()
     if (EIS)
     {
         EIS->AddMappingContext(PadMappingContext, 0);
-        UE_LOG(LogR3000Emu, Log, TEXT("PS1 pad mapping context added via Enhanced Input"));
+        UE_LOG(LogPSXEmu, Log, TEXT("PS1 pad mapping context added via Enhanced Input"));
     }
     else
     {
-        UE_LOG(LogR3000Emu, Warning, TEXT("Enhanced Input subsystem not available, using direct IsInputKeyDown"));
+        UE_LOG(LogPSXEmu, Warning, TEXT("Enhanced Input subsystem not available, using direct IsInputKeyDown"));
     }
 
     bPadMappingAdded_ = true;
@@ -1399,7 +1423,7 @@ void UR3000EmuComponent::SetupPadInput()
 // Requires a GameMode with a DefaultPawn so PlayerController receives input.
 // Run scripts/ue5_create_psx_gamemode.py then set GameMode Override in World Settings.
 // ---------------------------------------------------------------------------
-void UR3000EmuComponent::PollPadInput()
+void UPSXEmulatorComponent::PollPadInput()
 {
     if (!Core_) { return; }
 
@@ -1412,7 +1436,7 @@ void UR3000EmuComponent::PollPadInput()
         static bool bWarnedNoPC = false;
         if (!bWarnedNoPC)
         {
-            UE_LOG(LogR3000Emu, Warning, TEXT("PadInput: No PlayerController found"));
+            UE_LOG(LogPSXEmu, Warning, TEXT("PadInput: No PlayerController found"));
             bWarnedNoPC = true;
         }
         return;
@@ -1426,7 +1450,7 @@ void UR3000EmuComponent::PollPadInput()
         {
             Pawn->DisableInput(PC);
             bPawnInputDisabled_ = true;
-            UE_LOG(LogR3000Emu, Log, TEXT("PadInput: Disabled default pawn input (gamepad goes to PS1 only)"));
+            UE_LOG(LogPSXEmu, Log, TEXT("PadInput: Disabled default pawn input (gamepad goes to PS1 only)"));
         }
     }
 
@@ -1463,7 +1487,7 @@ void UR3000EmuComponent::PollPadInput()
         const double Now = FPlatformTime::Seconds();
         if (Now - LastLogTime > 0.5)
         {
-            UE_LOG(LogR3000Emu, Log, TEXT("PadInput: buttons=0x%04X"), Buttons);
+            UE_LOG(LogPSXEmu, Log, TEXT("PadInput: buttons=0x%04X"), Buttons);
             LastLogTime = Now;
         }
     }

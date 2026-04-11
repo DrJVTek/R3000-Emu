@@ -3,7 +3,7 @@
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Engine/Texture2D.h"
-#include "R3000VramViewerComponent.generated.h"
+#include "PSXVramViewerComponent.generated.h"
 
 class UTexture2D;
 class UMaterialInterface;
@@ -17,13 +17,13 @@ namespace gpu { class Gpu; }
  * Other components (2D, 3D) receive the texture via GetVramTexture().
  * Optionally displays a debug quad showing the full VRAM content.
  */
-UCLASS(ClassGroup = (R3000Emu), meta = (BlueprintSpawnableComponent))
-class UR3000VramViewerComponent : public USceneComponent
+UCLASS(ClassGroup = (PSXEmu), meta = (BlueprintSpawnableComponent))
+class UPSXVramViewerComponent : public USceneComponent
 {
     GENERATED_BODY()
 
 public:
-    UR3000VramViewerComponent();
+    UPSXVramViewerComponent();
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -32,21 +32,21 @@ public:
     void BindGpu(gpu::Gpu* InGpu);
 
     /** Get the shared VRAM texture (1024x512 BGRA8). */
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram")
     UTexture2D* GetVramTexture() const { return VramTexture_; }
 
     /** Toggle the VRAM viewer at runtime. */
-    UFUNCTION(BlueprintCallable, Category = "R3000Emu|Vram|Viewer")
+    UFUNCTION(BlueprintCallable, Category = "PSXEmu|Vram|Viewer")
     void SetViewerVisible(bool bNewVisible);
 
     // ------- Viewer settings -------
 
     /** Show a debug plane displaying the full 1024x512 VRAM content. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Vram|Viewer")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Vram|Viewer")
     bool bShowViewer{false};
 
     /** Material for the VRAM viewer plane. Should be Unlit/Opaque with a "VramTexture" parameter. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "R3000Emu|Vram|Viewer")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Vram|Viewer")
     UMaterialInterface* ViewerMaterial{nullptr};
 
     /** Size of the VRAM viewer quad (1 UE unit = 1 VRAM pixel at scale 1.0).
@@ -54,19 +54,19 @@ public:
 
     // ------- PS1 VRAM Constants (for Material/Blueprint use) -------
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static int32 GetVramWidth() { return 1024; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static int32 GetVramHeight() { return 512; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static int32 GetTexturePageWidth() { return 256; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static int32 GetTexturePageHeight() { return 256; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static float GetVramScaleForDepth(int32 TexDepthMode)
     {
         switch (TexDepthMode)
@@ -78,13 +78,13 @@ public:
         }
     }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static int32 DecodeSemiMode(float UV3Y) { return static_cast<int32>(UV3Y) & 0x3; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static bool IsSemiTransparent(float UV3Y) { return (static_cast<int32>(UV3Y) & 0x4) != 0; }
 
-    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "R3000Emu|Vram|Constants")
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|Vram|Constants")
     static bool IsRawTexture(float UV3Y) { return (static_cast<int32>(UV3Y) & 0x8) != 0; }
 
 private:

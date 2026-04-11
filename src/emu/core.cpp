@@ -61,8 +61,7 @@ static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nul
 
 Core::Core(rlog::Logger* logger) : logger_(logger), cdrom_(logger), gpu_(logger)
 {
-    // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "CORE", "R3000-Emu core v7 (session_2026_03_22 cbset_jalr_2)");
+    emu::logf(emu::LogLevel::debug, "CORE", "Core created");
     psx3d_mode_mgr_.reset();
     provenance_profiler_.reset();
 }

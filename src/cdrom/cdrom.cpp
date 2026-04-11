@@ -1514,7 +1514,7 @@ void Cdrom::start_sector_thread()
     stop_sector_thread();
     sector_thread_running_.store(true, std::memory_order_release);
     sector_thread_ = std::thread([this]() {
-        emu::logf(emu::LogLevel::warn, "CD_THREAD", "Sector thread started");
+        emu::logf(emu::LogLevel::debug, "CD_THREAD", "Sector thread started");
 
         while (sector_thread_running_.load(std::memory_order_acquire))
         {
@@ -1545,7 +1545,7 @@ void Cdrom::start_sector_thread()
             }
         }
 
-        emu::logf(emu::LogLevel::warn, "CD_THREAD", "Sector thread stopped");
+        emu::logf(emu::LogLevel::debug, "CD_THREAD", "Sector thread stopped");
     });
 }
 

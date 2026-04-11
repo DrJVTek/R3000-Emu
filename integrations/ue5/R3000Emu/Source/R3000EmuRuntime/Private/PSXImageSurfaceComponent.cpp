@@ -1,5 +1,6 @@
-#include "R3000ImageComponent.h"
-#include "R3000GpuComponent.h"
+#include "PSXImageSurfaceComponent.h"
+#include "PSX2DRenderComponent.h"
+#include "PSXSurfaceComponent.h"
 
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -11,7 +12,7 @@
 #include "gpu/gpu.h"
 #include "log/emu_log.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogR3000Image, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogPSXImageSurface, Log, All);
 
 namespace
 {
@@ -28,22 +29,71 @@ static uint16 DisplayRowWords(const gpu::DisplayConfig& Disp)
 
     return static_cast<uint16>(((static_cast<uint32>(DisplayW) * 3u) + 1u) / 2u);
 }
+
+static bool IsBufferedDisplaySizedWrite(const gpu::CpuVramWriteInfo& Write, const gpu::DisplayConfig& Disp, uint32 CurrentFrame)
+{
+    if (Write.seq == 0 || !Disp.display_enabled)
+        return false;
+
+    const uint32 FrameDelta = (CurrentFrame >= Write.frame_count) ? (CurrentFrame - Write.frame_count) : 0u;
+    if (FrameDelta > 12u)
+        return false;
+
+    const uint16 ExpectedW = DisplayRowWords(Disp);
+    const uint16 ExpectedH = Disp.height();
+    const uint16 MinW = static_cast<uint16>(FMath::Max<int32>(64, (static_cast<int32>(ExpectedW) * 3) / 4));
+    const uint16 MinH = static_cast<uint16>(FMath::Max<int32>(64, (static_cast<int32>(ExpectedH) * 3) / 4));
+    return Write.w >= MinW && Write.h >= MinH;
 }
 
-UR3000ImageComponent::UR3000ImageComponent()
+static bool SelectBufferedImageWrite(
+    const std::vector<gpu::CpuVramWriteInfo>& Writes,
+    const gpu::DisplayConfig& Disp,
+    uint32 CurrentFrame,
+    gpu::CpuVramWriteInfo& OutWrite)
+{
+    bool bFound = false;
+    uint32 BestScore = 0;
+
+    for (const gpu::CpuVramWriteInfo& Write : Writes)
+    {
+        if (!IsBufferedDisplaySizedWrite(Write, Disp, CurrentFrame))
+            continue;
+
+        const uint32 FrameDelta = (CurrentFrame >= Write.frame_count) ? (CurrentFrame - Write.frame_count) : 0u;
+        const bool bExactDisplayOrigin =
+            (Write.x == Disp.display_x) && (Write.y == Disp.display_y);
+        const uint32 AreaScore = static_cast<uint32>(Write.w) * static_cast<uint32>(Write.h);
+        const uint32 Score =
+            (bExactDisplayOrigin ? 1u << 30 : 0u) +
+            ((12u - FMath::Min(FrameDelta, 12u)) << 24) +
+            FMath::Min(AreaScore, 0x00FFFFFFu);
+        if (!bFound || Score >= BestScore)
+        {
+            bFound = true;
+            BestScore = Score;
+            OutWrite = Write;
+        }
+    }
+
+    return bFound;
+}
+}
+
+UPSXImageSurfaceComponent::UPSXImageSurfaceComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
     SetMobility(EComponentMobility::Movable);
 }
 
-void UR3000ImageComponent::BeginPlay()
+void UPSXImageSurfaceComponent::BeginPlay()
 {
     Super::BeginPlay();
     SetComponentTickEnabled(true);
 }
 
-void UR3000ImageComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void UPSXImageSurfaceComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
     delete[] VramCopyBuffer_; VramCopyBuffer_ = nullptr;
@@ -52,17 +102,18 @@ void UR3000ImageComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
-void UR3000ImageComponent::BindGpu(gpu::Gpu* InGpu)
+void UPSXImageSurfaceComponent::BindGpu(gpu::Gpu* InGpu)
 {
     Gpu_ = InGpu;
-    Gpu2DComp_ = GetOwner() ? GetOwner()->FindComponentByClass<UR3000GpuComponent>() : nullptr;
+    Gpu2DComp_ = GetOwner() ? GetOwner()->FindComponentByClass<UPSX2DRenderComponent>() : nullptr;
+    SurfaceComp_ = GetOwner() ? GetOwner()->FindComponentByClass<UPSXSurfaceComponent>() : nullptr;
     if (!VramCopyBuffer_)
         VramCopyBuffer_ = new uint16[kVramW * kVramH];
 
-    emu::logf(emu::LogLevel::info, "IMAGE", "R3000ImageComponent bound to GPU");
+    emu::logf(emu::LogLevel::warn, "IMAGE", "PSXImageSurfaceComponent bound to GPU");
 }
 
-bool UR3000ImageComponent::IsWriteEligible(const gpu::CpuVramWriteInfo& Write) const
+bool UPSXImageSurfaceComponent::IsWriteEligible(const gpu::CpuVramWriteInfo& Write) const
 {
     if (Write.seq == 0)
         return false;
@@ -82,7 +133,7 @@ bool UR3000ImageComponent::IsWriteEligible(const gpu::CpuVramWriteInfo& Write) c
            Write.h == DisplayH;
 }
 
-bool UR3000ImageComponent::DoesCurrentDisplayMatchLatch() const
+bool UPSXImageSurfaceComponent::DoesCurrentDisplayMatchLatch() const
 {
     if (!Gpu_)
         return false;
@@ -96,7 +147,7 @@ bool UR3000ImageComponent::DoesCurrentDisplayMatchLatch() const
            Disp.display_enabled == LatchedDisplayEnabled_;
 }
 
-void UR3000ImageComponent::TickComponent(
+void UPSXImageSurfaceComponent::TickComponent(
     float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -115,20 +166,29 @@ void UR3000ImageComponent::TickComponent(
     // Hide image immediately if MDEC video takes over (VideoComponent handles it)
     if (bImageVisible_ && Gpu_->has_mdec_display_content())
     {
-        UE_LOG(LogR3000Image, Log, TEXT("ImageComponent: hiding — MDEC video active"));
+        UE_LOG(LogPSXImageSurface, Log, TEXT("Image surface hidden because MDEC video is active"));
         SetImageVisible(false);
         return;
     }
 
+    std::vector<gpu::CpuVramWriteInfo> RecentWrites;
+    Gpu_->copy_recent_cpu_vram_writes(RecentWrites);
+    gpu::CpuVramWriteInfo SelectedWrite{};
+    const uint32 CurrentFrame = Gpu_->vram_frame_count();
+    const bool bBufferedCandidate = SelectBufferedImageWrite(RecentWrites, Disp, CurrentFrame, SelectedWrite);
+
     if (bImageVisible_ && !DoesCurrentDisplayMatchLatch())
     {
-        UE_LOG(LogR3000Image, Log,
-            TEXT("ImageComponent: hiding latched image after display change old=(%u,%u %ux%u 24=%d en=%d) new=(%u,%u %ux%u 24=%d en=%d)"),
-            LatchedDisplayX_, LatchedDisplayY_, LatchedDisplayW_, LatchedDisplayH_,
-            LatchedDisplay24Bit_ ? 1 : 0, LatchedDisplayEnabled_ ? 1 : 0,
-            Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
-            Disp.color_24bit ? 1 : 0, Disp.display_enabled ? 1 : 0);
-        SetImageVisible(false);
+        if (!bBufferedCandidate)
+        {
+            UE_LOG(LogPSXImageSurface, Log,
+                TEXT("Image surface hidden after display change old=(%u,%u %ux%u 24=%d en=%d) new=(%u,%u %ux%u 24=%d en=%d)"),
+                LatchedDisplayX_, LatchedDisplayY_, LatchedDisplayW_, LatchedDisplayH_,
+                LatchedDisplay24Bit_ ? 1 : 0, LatchedDisplayEnabled_ ? 1 : 0,
+                Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
+                Disp.color_24bit ? 1 : 0, Disp.display_enabled ? 1 : 0);
+            SetImageVisible(false);
+        }
     }
 
     // Hide image when GPU draws primitives for multiple consecutive frames
@@ -142,8 +202,8 @@ void UR3000ImageComponent::TickComponent(
             const auto& Stats = Gpu_->frame_stats();
             if (Stats.triangles > 0 || Stats.quads > 0 || Stats.lines > 0)
             {
-                UE_LOG(LogR3000Image, Log,
-                    TEXT("ImageComponent: hiding image — GPU drawing primitives (tri=%u quad=%u line=%u after %u frames)"),
+                UE_LOG(LogPSXImageSurface, Log,
+                TEXT("Image surface hidden because GPU primitives resumed (tri=%u quad=%u line=%u after %u frames)"),
                     Stats.triangles, Stats.quads, Stats.lines, ImageVisibleFrames_);
                 SetImageVisible(false);
             }
@@ -155,8 +215,8 @@ void UR3000ImageComponent::TickComponent(
         const uint32 CurrentVramSeq = Gpu_->vram_write_seq_locked();
         if (CurrentVramSeq != 0 && CurrentVramSeq != LastUploadedVramSeq_)
         {
-            UE_LOG(LogR3000Image, Warning,
-                TEXT("ImageComponent: refresh visible image vram_seq %u -> %u disp=(%u,%u %ux%u 24=%d)"),
+            UE_LOG(LogPSXImageSurface, Verbose,
+                TEXT("Image surface refresh vram_seq %u -> %u disp=(%u,%u %ux%u 24=%d)"),
                 LastUploadedVramSeq_, CurrentVramSeq,
                 Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
                 Disp.color_24bit ? 1 : 0);
@@ -170,34 +230,23 @@ void UR3000ImageComponent::TickComponent(
     if (Gpu_->has_mdec_display_content())
         return;
 
-    gpu::CpuVramWriteInfo Write{};
-    Gpu_->copy_last_cpu_vram_write(Write);
-    if (Write.seq == 0 || Write.seq == LastSeenCpuWriteSeq_)
+    if (!bBufferedCandidate)
+        return;
+
+    const gpu::CpuVramWriteInfo& Write = SelectedWrite;
+    if (Write.seq == LastSeenCpuWriteSeq_ && bImageVisible_ && DoesCurrentDisplayMatchLatch())
         return;
 
     LastSeenCpuWriteSeq_ = Write.seq;
-    UE_LOG(LogR3000Image, Warning,
-        TEXT("ImageComponent: cpu->vram write seq=%u vram_seq=%u frame=%u dma=(%u,%u %ux%u) disp=(%u,%u %ux%u 24=%d en=%d) eligible=%d"),
+    UE_LOG(LogPSXImageSurface, VeryVerbose,
+        TEXT("Image surface cpu->vram write seq=%u vram_seq=%u frame=%u dma=(%u,%u %ux%u) disp=(%u,%u %ux%u 24=%d en=%d) eligible=%d"),
         Write.seq, Write.vram_write_seq, Write.frame_count,
         Write.x, Write.y, Write.w, Write.h,
         Write.display.display_x, Write.display.display_y,
         Write.display.width(), Write.display.height(),
         Write.display.color_24bit ? 1 : 0,
         Write.display.display_enabled ? 1 : 0,
-        IsWriteEligible(Write) ? 1 : 0);
-
-    if (!IsWriteEligible(Write))
-        return;
-
-    if (Write.display.display_x != Disp.display_x ||
-        Write.display.display_y != Disp.display_y ||
-        Write.display.width() != Disp.width() ||
-        Write.display.height() != Disp.height() ||
-        Write.display.color_24bit != Disp.color_24bit ||
-        Write.display.display_enabled != Disp.display_enabled)
-    {
-        return;
-    }
+        IsBufferedDisplaySizedWrite(Write, Disp, CurrentFrame) ? 1 : 0);
 
     const int32 W = Disp.width();
     const int32 H = Disp.height();
@@ -207,6 +256,13 @@ void UR3000ImageComponent::TickComponent(
         RebuildPlaneMesh(W, H);
     }
 
+    LatchedDisplayX_ = Write.x;
+    LatchedDisplayY_ = Write.y;
+    LatchedDisplayW_ = static_cast<uint16>(W);
+    LatchedDisplayH_ = static_cast<uint16>(H);
+    LatchedDisplay24Bit_ = Disp.color_24bit;
+    LatchedDisplayEnabled_ = Disp.display_enabled;
+
     UploadImageFrame(W, H);
 
     // Don't show if content is mostly black (VRAM not ready or empty MDEC init)
@@ -214,15 +270,9 @@ void UR3000ImageComponent::TickComponent(
         return;
 
     LastUploadedVramSeq_ = Write.vram_write_seq;
-    LatchedDisplayX_ = Disp.display_x;
-    LatchedDisplayY_ = Disp.display_y;
-    LatchedDisplayW_ = static_cast<uint16>(W);
-    LatchedDisplayH_ = static_cast<uint16>(H);
-    LatchedDisplay24Bit_ = Disp.color_24bit;
-    LatchedDisplayEnabled_ = Disp.display_enabled;
 
-    UE_LOG(LogR3000Image, Warning,
-        TEXT("ImageComponent: IMAGE DETECTED write_seq=%u vram_seq=%u frame=%u dma_xy=(%u,%u) dma_wh=%ux%u disp_xy=(%u,%u) w=%u h=%u depth=%d"),
+    UE_LOG(LogPSXImageSurface, Log,
+        TEXT("Image surface detected write_seq=%u vram_seq=%u frame=%u dma_xy=(%u,%u) dma_wh=%ux%u disp_xy=(%u,%u) w=%u h=%u depth=%d"),
         Write.seq, Write.vram_write_seq, Write.frame_count,
         Write.x, Write.y, Write.w, Write.h,
         Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
@@ -232,7 +282,7 @@ void UR3000ImageComponent::TickComponent(
         SetImageVisible(true);
 }
 
-void UR3000ImageComponent::CreateOrResizeTexture(int32 W, int32 H)
+void UPSXImageSurfaceComponent::CreateOrResizeTexture(int32 W, int32 H)
 {
     delete[] PixelBuffer_; PixelBuffer_ = nullptr;
     delete UpdateRegion_; UpdateRegion_ = nullptr;
@@ -243,7 +293,7 @@ void UR3000ImageComponent::CreateOrResizeTexture(int32 W, int32 H)
     ImageTexture_ = UTexture2D::CreateTransient(W, H, PF_R8G8B8A8, TEXT("PS1_Image"));
     if (!ImageTexture_)
     {
-        UE_LOG(LogR3000Image, Error, TEXT("ImageComponent: failed to create texture %dx%d"), W, H);
+        UE_LOG(LogPSXImageSurface, Error, TEXT("Image surface failed to create texture %dx%d"), W, H);
         return;
     }
 
@@ -273,14 +323,17 @@ void UR3000ImageComponent::CreateOrResizeTexture(int32 W, int32 H)
             ImageMesh_->SetMaterial(0, ImageMatInst_);
     }
 
-    UE_LOG(LogR3000Image, Log, TEXT("ImageComponent: texture %dx%d created"), W, H);
-    UE_LOG(LogR3000Image, Log, TEXT("ImageComponent: material=%d matinst=%d mesh=%d"),
+    UE_LOG(LogPSXImageSurface, Log, TEXT("Image surface texture %dx%d created"), W, H);
+    UE_LOG(LogPSXImageSurface, Log, TEXT("Image surface material=%d matinst=%d mesh=%d"),
         ImageMaterial ? 1 : 0,
         ImageMatInst_ ? 1 : 0,
         ImageMesh_ ? 1 : 0);
+
+    if (bImageVisible_)
+        SyncUnifiedSurface(true);
 }
 
-void UR3000ImageComponent::UploadImageFrame(int32 W, int32 H)
+void UPSXImageSurfaceComponent::UploadImageFrame(int32 W, int32 H)
 {
     if (!ImageTexture_ || !PixelBuffer_ || !UpdateRegion_)
         return;
@@ -289,6 +342,8 @@ void UR3000ImageComponent::UploadImageFrame(int32 W, int32 H)
     Gpu_->copy_vram(VramCopyBuffer_, CopySeq);
 
     const gpu::DisplayConfig& Disp = Gpu_->display_config();
+    const uint16 SrcX = LatchedDisplayX_;
+    const uint16 SrcY = LatchedDisplayY_;
     uint8* Dst = PixelBuffer_;
     uint32 NonBlackPixels = 0;
     uint8 MinR = 255, MinG = 255, MinB = 255;
@@ -297,8 +352,8 @@ void UR3000ImageComponent::UploadImageFrame(int32 W, int32 H)
     {
         const uint8* VramBytes = reinterpret_cast<const uint8*>(VramCopyBuffer_);
         constexpr uint32 kRowStrideBytes = kVramW * 2u;
-        const uint32 BaseOff = static_cast<uint32>(Disp.display_y) * kRowStrideBytes
-                             + static_cast<uint32>(Disp.display_x) * 2u;
+        const uint32 BaseOff = static_cast<uint32>(SrcY) * kRowStrideBytes
+                             + static_cast<uint32>(SrcX) * 2u;
 
         for (int32 y = 0; y < H; ++y)
         {
@@ -326,10 +381,10 @@ void UR3000ImageComponent::UploadImageFrame(int32 W, int32 H)
     {
         for (int32 y = 0; y < H; ++y)
         {
-            const uint32_t Vy = (static_cast<uint32_t>(Disp.display_y) + static_cast<uint32_t>(y)) % kVramH;
-            for (int32 x = 0; x < W; ++x)
-            {
-                const uint32_t Vx = (static_cast<uint32_t>(Disp.display_x) + static_cast<uint32_t>(x)) % kVramW;
+                const uint32_t Vy = (static_cast<uint32_t>(SrcY) + static_cast<uint32_t>(y)) % kVramH;
+                for (int32 x = 0; x < W; ++x)
+                {
+                const uint32_t Vx = (static_cast<uint32_t>(SrcX) + static_cast<uint32_t>(x)) % kVramW;
                 const uint16 Pixel = VramCopyBuffer_[Vy * kVramW + Vx];
                 Dst[0] = Expand5To8(static_cast<uint8>(Pixel & 0x1F));
                 Dst[1] = Expand5To8(static_cast<uint8>((Pixel >> 5) & 0x1F));
@@ -390,8 +445,8 @@ void UR3000ImageComponent::UploadImageFrame(int32 W, int32 H)
         const int32 CenterX = FMath::Clamp(W / 2, 0, W - 1);
         const int32 CenterY = FMath::Clamp(H / 2, 0, H - 1);
         const uint8* Center = PixelBuffer_ + ((CenterY * W) + CenterX) * 4;
-        UE_LOG(LogR3000Image, Warning,
-            TEXT("ImageComponent: upload seq=%u disp=(%u,%u %ux%u 24=%d) nonblack=%u/%d rgb_min=(%u,%u,%u) rgb_max=(%u,%u,%u) center=(%u,%u,%u) matinst=%d bulk=%d"),
+        UE_LOG(LogPSXImageSurface, VeryVerbose,
+        TEXT("Image surface upload seq=%u disp=(%u,%u %ux%u 24=%d) nonblack=%u/%d rgb_min=(%u,%u,%u) rgb_max=(%u,%u,%u) center=(%u,%u,%u) matinst=%d bulk=%d"),
             CopySeq,
             Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
             Disp.color_24bit ? 1 : 0,
@@ -410,7 +465,7 @@ void UR3000ImageComponent::UploadImageFrame(int32 W, int32 H)
     }
 }
 
-void UR3000ImageComponent::DumpImageFrameToPpm(int32 W, int32 H, uint32 VramSeq)
+void UPSXImageSurfaceComponent::DumpImageFrameToPpm(int32 W, int32 H, uint32 VramSeq)
 {
     if (!PixelBuffer_ || W <= 0 || H <= 0)
         return;
@@ -447,17 +502,17 @@ void UR3000ImageComponent::DumpImageFrameToPpm(int32 W, int32 H, uint32 VramSeq)
 
     if (FFileHelper::SaveArrayToFile(Out, *Path))
     {
-        UE_LOG(LogR3000Image, Warning, TEXT("ImageComponent: dumped frame to %s"), *Path);
+        UE_LOG(LogPSXImageSurface, Verbose, TEXT("Image surface dumped frame to %s"), *Path);
     }
     else
     {
-        UE_LOG(LogR3000Image, Error, TEXT("ImageComponent: failed to dump frame to %s"), *Path);
+        UE_LOG(LogPSXImageSurface, Error, TEXT("Image surface failed to dump frame to %s"), *Path);
     }
 }
 
-void UR3000ImageComponent::SetGpu2DVisible(bool bGpuVisible)
+void UPSXImageSurfaceComponent::SetGpu2DVisible(bool bGpuVisible)
 {
-    UR3000GpuComponent* Gpu2D = Gpu2DComp_.Get();
+    UPSX2DRenderComponent* Gpu2D = Gpu2DComp_.Get();
     if (!Gpu2D)
         return;
 
@@ -469,7 +524,7 @@ void UR3000ImageComponent::SetGpu2DVisible(bool bGpuVisible)
     }
 }
 
-void UR3000ImageComponent::RebuildPlaneMesh(int32 W, int32 H)
+void UPSXImageSurfaceComponent::RebuildPlaneMesh(int32 W, int32 H)
 {
     if (!ImageMesh_)
     {
@@ -523,19 +578,20 @@ void UR3000ImageComponent::RebuildPlaneMesh(int32 W, int32 H)
 
     ImageMesh_->SetTranslucentSortPriority(100);
 
-    UE_LOG(LogR3000Image, Log, TEXT("ImageComponent: plane rebuilt %.0fx%.0f UE units (%dx%d px)"), Pw, Ph, W, H);
+    UE_LOG(LogPSXImageSurface, Log, TEXT("Image surface plane rebuilt %.0fx%.0f UE units (%dx%d px)"), Pw, Ph, W, H);
 }
 
-void UR3000ImageComponent::SetImageVisible(bool bShow)
+void UPSXImageSurfaceComponent::SetImageVisible(bool bShow)
 {
     bImageVisible_ = bShow;
     ImageVisibleFrames_ = 0;
+    const bool bShowLegacyMesh = bShow && !ShouldUseUnifiedSurfacePresenter();
     if (ImageMesh_)
     {
-        ImageMesh_->SetVisibility(bShow, false);
-        ImageMesh_->SetHiddenInGame(!bShow, false);
+        ImageMesh_->SetVisibility(bShowLegacyMesh, false);
+        ImageMesh_->SetHiddenInGame(!bShowLegacyMesh, false);
         ImageMesh_->SetTranslucentSortPriority(100);
-        if (bShow && ImageMatInst_)
+        if (bShowLegacyMesh && ImageMatInst_)
             ImageMesh_->SetMaterial(0, ImageMatInst_);
     }
 
@@ -544,12 +600,49 @@ void UR3000ImageComponent::SetImageVisible(bool bShow)
 
     if (bShow)
     {
-        UE_LOG(LogR3000Image, Log, TEXT("ImageComponent: plane shown (%dx%d 15-bit)"), ImageTexW_, ImageTexH_);
+        UE_LOG(LogPSXImageSurface, Log, TEXT("Image surface shown (%dx%d 15-bit)"), ImageTexW_, ImageTexH_);
         emu::logf(emu::LogLevel::info, "IMAGE", "image plane shown %dx%d", ImageTexW_, ImageTexH_);
     }
     else
     {
-        UE_LOG(LogR3000Image, Log, TEXT("ImageComponent: plane hidden"));
+        UE_LOG(LogPSXImageSurface, Log, TEXT("Image surface hidden"));
         emu::logf(emu::LogLevel::debug, "IMAGE", "image plane hidden");
     }
+
+    SyncUnifiedSurface(bShow);
+}
+
+void UPSXImageSurfaceComponent::SyncUnifiedSurface(bool bSurfaceVisible)
+{
+    if (!bMirrorToUnifiedSurface)
+        return;
+
+    UPSXSurfaceComponent* Surface = SurfaceComp_.Get();
+    if (!Surface)
+    {
+        Surface = GetOwner() ? GetOwner()->FindComponentByClass<UPSXSurfaceComponent>() : nullptr;
+        SurfaceComp_ = Surface;
+    }
+
+    if (!Surface)
+        return;
+
+    FPSXSurfaceDecision Decision;
+    Decision.bVisible = bSurfaceVisible && ImageTexture_ != nullptr;
+    Decision.Mode = bSurfaceVisible ? EPSXSurfaceMode::StaticImage : EPSXSurfaceMode::None;
+    Decision.Shape = EPSXSurfaceShape::Plane;
+    Decision.Buffering = EPSXSurfaceBufferingMode::AutoDetect;
+    Decision.PhysicalWidth = FMath::Max(PlaneWidth, 1.0f);
+    Decision.AspectRatio = (ImageTexW_ > 0 && ImageTexH_ > 0)
+        ? static_cast<float>(ImageTexW_) / static_cast<float>(ImageTexH_)
+        : (4.0f / 3.0f);
+    Decision.Distance = Surface->Distance;
+
+    Surface->SetSurfaceTexture(Decision.bVisible ? ImageTexture_ : nullptr);
+    Surface->ApplyDecision(Decision);
+}
+
+bool UPSXImageSurfaceComponent::ShouldUseUnifiedSurfacePresenter() const
+{
+    return bMirrorToUnifiedSurface && bPreferUnifiedSurfacePresenter && SurfaceComp_.IsValid();
 }

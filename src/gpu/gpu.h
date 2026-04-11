@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -53,7 +54,7 @@ struct DisplayConfig
     }
 };
 
-// Info about the last CPU→VRAM DMA write (for R3000ImageComponent)
+// Info about the last CPU→VRAM DMA write (for PSXImageSurfaceComponent)
 struct CpuVramWriteInfo
 {
     uint32_t seq{0};              // Monotonic sequence number (0 = no write yet)
@@ -226,11 +227,24 @@ class Gpu
     const uint16_t* vram() const { return vram_.get(); }
     const DisplayConfig& display_config() const { return display_; }
 
-    // CPU→VRAM write tracking for R3000ImageComponent
+    // CPU→VRAM write tracking for PSXImageSurfaceComponent
     void copy_last_cpu_vram_write(CpuVramWriteInfo& out) const
     {
         std::lock_guard<std::mutex> lock(draw_list_mutex_);
         out = last_cpu_vram_write_;
+    }
+    void copy_recent_cpu_vram_writes(std::vector<CpuVramWriteInfo>& out) const
+    {
+        std::lock_guard<std::mutex> lock(draw_list_mutex_);
+        out.clear();
+        out.reserve(recent_cpu_vram_write_count_);
+        for (uint32_t i = 0; i < recent_cpu_vram_write_count_; ++i)
+        {
+            const uint32_t index =
+                (recent_cpu_vram_write_head_ + kRecentCpuVramWriteHistory - recent_cpu_vram_write_count_ + i)
+                % kRecentCpuVramWriteHistory;
+            out.push_back(recent_cpu_vram_writes_[index]);
+        }
     }
     // Called internally when CPU→VRAM DMA write completes
     void record_cpu_vram_write(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
@@ -247,6 +261,11 @@ class Gpu
         last_cpu_vram_write_.h = h;
         last_cpu_vram_write_.display = display_;
 
+        recent_cpu_vram_writes_[recent_cpu_vram_write_head_] = last_cpu_vram_write_;
+        recent_cpu_vram_write_head_ = (recent_cpu_vram_write_head_ + 1u) % kRecentCpuVramWriteHistory;
+        if (recent_cpu_vram_write_count_ < kRecentCpuVramWriteHistory)
+            ++recent_cpu_vram_write_count_;
+
         // Check if this write overlaps the current display area
         if (display_.display_enabled && display_.width() > 0 && display_.height() > 0)
         {
@@ -262,6 +281,9 @@ class Gpu
 
     // MDEC activity: called from bus when DMA1 (MDEC out) completes
     void notify_mdec_output() { mdec_active_ = true; }
+
+    // Query: has MDEC produced output since last reset?
+    bool has_mdec_activity() const { return mdec_active_; }
 
     // Query: has MDEC decoded AND a write touched the display area since last reset?
     bool has_mdec_display_content() const { return mdec_active_ && display_area_written_; }
@@ -416,6 +438,10 @@ class Gpu
 
     // CPU→VRAM write tracking
     CpuVramWriteInfo last_cpu_vram_write_{};
+    static constexpr uint32_t kRecentCpuVramWriteHistory = 8;
+    std::array<CpuVramWriteInfo, kRecentCpuVramWriteHistory> recent_cpu_vram_writes_{};
+    uint32_t recent_cpu_vram_write_head_{0};
+    uint32_t recent_cpu_vram_write_count_{0};
     uint32_t vram_write_seq_{0};
     uint32_t cpu_vram_write_seq_{0};
     bool mdec_active_{false};        // MDEC has produced output since last reset

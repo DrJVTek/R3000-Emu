@@ -155,8 +155,7 @@ Gpu::Gpu(rlog::Logger* logger)
     : logger_(logger)
     , vram_(std::make_unique<uint16_t[]>(kVramPixels))
 {
-    // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "GPU", "GPU source v14 (session_2026_03_22)");
+    emu::logf(emu::LogLevel::debug, "GPU", "GPU created");
     status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
     vblank_div_ = 0;
@@ -1292,8 +1291,8 @@ void Gpu::gp0_rect()
     // UV: Don't wrap here! Let the shader do fmod(uv, 256) to avoid
     // interpolation artifacts when UV crosses 255/0 boundary.
     // Store as full range values (can exceed 255).
-    uint8_t u1 = static_cast<uint8_t>(std::min((int32_t)u0 + w, 255));
-    uint8_t v1 = static_cast<uint8_t>(std::min((int32_t)v0 + h, 255));
+    uint8_t u1 = static_cast<uint8_t>((std::min)((int32_t)u0 + w, 255));
+    uint8_t v1 = static_cast<uint8_t>((std::min)((int32_t)v0 + h, 255));
 
     // Triangle 1: top-left, top-right, bottom-left
     push_triangle(

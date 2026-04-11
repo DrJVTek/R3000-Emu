@@ -1,15 +1,15 @@
-#include "R3000Gpu3DTrackingController.h"
+#include "PSX3DTrackingController.h"
 
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
 #include "ProceduralMeshComponent.h"
 
-FR3000Gpu3DTrackingController::FR3000Gpu3DTrackingController(UR3000Gpu3DComponent& InOwner)
+FPSX3DTrackingController::FPSX3DTrackingController(UPSX3DRenderComponent& InOwner)
     : Owner_(InOwner)
 {
 }
 
-void FR3000Gpu3DTrackingController::Update(
+void FPSX3DTrackingController::Update(
     UProceduralMeshComponent* MeshComp,
     EGpu3DTrackingMode TrackingMode,
     bool bAutoRecenterVrOnModeEnter,
@@ -40,7 +40,7 @@ void FR3000Gpu3DTrackingController::Update(
     LastMode_ = TrackingMode;
 }
 
-void FR3000Gpu3DTrackingController::RecenterToPlayerView(
+void FPSX3DTrackingController::RecenterToPlayerView(
     UProceduralMeshComponent* MeshComp,
     const FVector& VrViewOffset,
     bool& bMeshDetachedForWorldLock)
@@ -68,7 +68,7 @@ void FR3000Gpu3DTrackingController::RecenterToPlayerView(
     MeshComp->SetWorldTransform(MeshWorld);
 }
 
-void FR3000Gpu3DTrackingController::EnsureDetached(
+void FPSX3DTrackingController::EnsureDetached(
     UProceduralMeshComponent* MeshComp,
     bool& bMeshDetachedForWorldLock) const
 {
@@ -79,7 +79,7 @@ void FR3000Gpu3DTrackingController::EnsureDetached(
     }
 }
 
-void FR3000Gpu3DTrackingController::EnsureAttached(
+void FPSX3DTrackingController::EnsureAttached(
     UProceduralMeshComponent* MeshComp,
     bool& bMeshDetachedForWorldLock) const
 {

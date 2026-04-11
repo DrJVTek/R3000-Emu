@@ -1,19 +1,19 @@
-#include "R3000AudioComponent.h"
+#include "PSXAudioComponent.h"
 
-UR3000AudioComponent::UR3000AudioComponent(const FObjectInitializer& ObjectInitializer)
+UPSXAudioComponent::UPSXAudioComponent(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
     NumChannels = 2;
 }
 
-bool UR3000AudioComponent::Init(int32& SampleRate)
+bool UPSXAudioComponent::Init(int32& SampleRate)
 {
     SampleRate = 44100;
     ResetBuffer(false);
     return true;
 }
 
-void UR3000AudioComponent::ResetBuffer(bool bZeroMemory)
+void UPSXAudioComponent::ResetBuffer(bool bZeroMemory)
 {
     // Stop read-side first, then drop any written data.
     const uint64_t W = WritePos_.load(std::memory_order_acquire);
@@ -28,7 +28,7 @@ void UR3000AudioComponent::ResetBuffer(bool bZeroMemory)
     TotalSilenceSamples_.store(0, std::memory_order_relaxed);
 }
 
-void UR3000AudioComponent::PushSamples(const int16_t* Samples, int32 Count)
+void UPSXAudioComponent::PushSamples(const int16_t* Samples, int32 Count)
 {
     // Count = number of int16 values (L,R,L,R,...).
     if (!Samples || Count <= 0)
@@ -67,7 +67,7 @@ void UR3000AudioComponent::PushSamples(const int16_t* Samples, int32 Count)
     TotalPushedSamples_.fetch_add((uint64_t)Count, std::memory_order_relaxed);
 }
 
-int32 UR3000AudioComponent::OnGenerateAudio(float* OutAudio, int32 NumSamples)
+int32 UPSXAudioComponent::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 {
     // NumSamples = number of float frames × NumChannels already accounted for by UE5.
     // Actually UE5 passes total float count = frames * channels.
@@ -105,7 +105,7 @@ int32 UR3000AudioComponent::OnGenerateAudio(float* OutAudio, int32 NumSamples)
     return NumSamples;
 }
 
-void UR3000AudioComponent::SetMuted(bool bMute)
+void UPSXAudioComponent::SetMuted(bool bMute)
 {
     bMuted_ = bMute;
 }

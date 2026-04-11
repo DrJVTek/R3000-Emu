@@ -1,5 +1,5 @@
-#include "R3000Gpu3DComponent.h"
-#include "R3000Gpu3DTrackingController.h"
+#include "PSX3DRenderComponent.h"
+#include "PSX3DTrackingController.h"
 
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -27,7 +27,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogR3000Gpu3D, Log, All);
 // ===================================================================
 // Constructor
 // ===================================================================
-UR3000Gpu3DComponent::UR3000Gpu3DComponent()
+UPSX3DRenderComponent::UPSX3DRenderComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
@@ -37,18 +37,18 @@ UR3000Gpu3DComponent::UR3000Gpu3DComponent()
 // ===================================================================
 // BeginPlay
 // ===================================================================
-void UR3000Gpu3DComponent::BeginPlay()
+void UPSX3DRenderComponent::BeginPlay()
 {
     Super::BeginPlay();
     SetComponentTickEnabled(true);
     if (!TrackingController_)
-        TrackingController_ = new FR3000Gpu3DTrackingController(*this);
+        TrackingController_ = new FPSX3DTrackingController(*this);
 }
 
 // ===================================================================
 // EndPlay
 // ===================================================================
-void UR3000Gpu3DComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void UPSX3DRenderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
     Gpu3D_ = nullptr;
@@ -60,7 +60,7 @@ void UR3000Gpu3DComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 // ===================================================================
 // BindGpu
 // ===================================================================
-void UR3000Gpu3DComponent::BindGpu(gpu::Gpu* InGpu)
+void UPSX3DRenderComponent::BindGpu(gpu::Gpu* InGpu)
 {
     GPU3D_NOISE_UELOG(Log, TEXT("GPU3D v2 BindGpu called. InGpu=%p WorldScale=%.3f bSkip2D=%d"),
         InGpu, WorldScale, bSkip2DElements ? 1 : 0);
@@ -93,7 +93,7 @@ void UR3000Gpu3DComponent::BindGpu(gpu::Gpu* InGpu)
 // ===================================================================
 // BindGpu3D — shadow GPU for 3D reconstruction
 // ===================================================================
-void UR3000Gpu3DComponent::BindGpu3D(gpu::Gpu3D* InGpu3D)
+void UPSX3DRenderComponent::BindGpu3D(gpu::Gpu3D* InGpu3D)
 {
     Gpu3D_ = InGpu3D;
     GPU3D_NOISE_UELOG(Log, TEXT("GPU3D BindGpu3D: shadow=%p"), InGpu3D);
@@ -102,7 +102,7 @@ void UR3000Gpu3DComponent::BindGpu3D(gpu::Gpu3D* InGpu3D)
 // ===================================================================
 // SetVramTexture — receive shared texture from 2D component
 // ===================================================================
-void UR3000Gpu3DComponent::SetVramTexture(UTexture2D* InTexture)
+void UPSX3DRenderComponent::SetVramTexture(UTexture2D* InTexture)
 {
     VramTexture_ = InTexture;
 
@@ -116,7 +116,7 @@ void UR3000Gpu3DComponent::SetVramTexture(UTexture2D* InTexture)
     GPU3D_NOISE_UELOG(Log, TEXT("SetVramTexture: %p"), InTexture);
 }
 
-void UR3000Gpu3DComponent::RecenterToPlayerView()
+void UPSX3DRenderComponent::RecenterToPlayerView()
 {
     if (!TrackingController_ || !MeshComp_)
         return;
@@ -127,7 +127,7 @@ void UR3000Gpu3DComponent::RecenterToPlayerView()
 // ===================================================================
 // Material instance management
 // ===================================================================
-void UR3000Gpu3DComponent::EnsureMaterialInstances()
+void UPSX3DRenderComponent::EnsureMaterialInstances()
 {
     UMaterialInterface* Wanted[kNumSections] = {
         // 2D sections 0-4
@@ -172,7 +172,7 @@ void UR3000Gpu3DComponent::EnsureMaterialInstances()
 // ===================================================================
 // TickComponent
 // ===================================================================
-void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UPSX3DRenderComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
@@ -226,7 +226,7 @@ void UR3000Gpu3DComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 // For 2D triangles: screen coords in cmds[].v are valid
 //   (shadow GPU applies sign_extend_11 + draw offset for non-3D)
 // ===================================================================
-void UR3000Gpu3DComponent::RebuildMesh3D()
+void UPSX3DRenderComponent::RebuildMesh3D()
 {
     if (!Gpu3D_ || !MeshComp_)
         return;

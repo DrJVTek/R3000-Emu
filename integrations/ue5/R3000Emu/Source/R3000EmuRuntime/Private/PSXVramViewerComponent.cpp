@@ -1,4 +1,4 @@
-#include "R3000VramViewerComponent.h"
+#include "PSXVramViewerComponent.h"
 
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -12,7 +12,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogR3000Vram, Log, All);
 // ===================================================================
 // Constructor
 // ===================================================================
-UR3000VramViewerComponent::UR3000VramViewerComponent()
+UPSXVramViewerComponent::UPSXVramViewerComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
@@ -22,7 +22,7 @@ UR3000VramViewerComponent::UR3000VramViewerComponent()
 // ===================================================================
 // BeginPlay
 // ===================================================================
-void UR3000VramViewerComponent::BeginPlay()
+void UPSXVramViewerComponent::BeginPlay()
 {
     Super::BeginPlay();
     SetComponentTickEnabled(true);
@@ -31,7 +31,7 @@ void UR3000VramViewerComponent::BeginPlay()
 // ===================================================================
 // EndPlay
 // ===================================================================
-void UR3000VramViewerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void UPSXVramViewerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
     delete[] PixelBuffer_;
@@ -44,9 +44,9 @@ void UR3000VramViewerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason
 }
 
 // ===================================================================
-// BindGpu — called by R3000EmuComponent after core init
+// BindGpu — called by PSXEmulatorComponent after core init
 // ===================================================================
-void UR3000VramViewerComponent::BindGpu(gpu::Gpu* InGpu)
+void UPSXVramViewerComponent::BindGpu(gpu::Gpu* InGpu)
 {
     UE_LOG(LogR3000Vram, Log, TEXT("VramViewer: BindGpu(%p)"), InGpu);
     emu::logf(emu::LogLevel::info, "VRAM", "VramViewerComponent bound to GPU");
@@ -63,7 +63,7 @@ void UR3000VramViewerComponent::BindGpu(gpu::Gpu* InGpu)
 // ===================================================================
 // VRAM Texture creation
 // ===================================================================
-void UR3000VramViewerComponent::CreateVramTexture()
+void UPSXVramViewerComponent::CreateVramTexture()
 {
     VramTexture_ = UTexture2D::CreateTransient(kVramW, kVramH, PF_B8G8R8A8);
     if (!VramTexture_)
@@ -94,7 +94,7 @@ void UR3000VramViewerComponent::CreateVramTexture()
 // ===================================================================
 // VRAM Texture upload (16-bit → BGRA8) - only when dirty
 // ===================================================================
-void UR3000VramViewerComponent::UpdateVramTexture()
+void UPSXVramViewerComponent::UpdateVramTexture()
 {
     if (!Gpu_ || !VramTexture_ || !PixelBuffer_ || !VramCopyBuffer_)
         return;
@@ -150,7 +150,7 @@ void UR3000VramViewerComponent::UpdateVramTexture()
 // ===================================================================
 // Debug viewer quad
 // ===================================================================
-void UR3000VramViewerComponent::CreateOrUpdateViewer()
+void UPSXVramViewerComponent::CreateOrUpdateViewer()
 {
     if (!VramTexture_)
         return;
@@ -222,7 +222,7 @@ void UR3000VramViewerComponent::CreateOrUpdateViewer()
     ViewerMesh_->SetVisibility(true);
 }
 
-void UR3000VramViewerComponent::DestroyViewer()
+void UPSXVramViewerComponent::DestroyViewer()
 {
     if (ViewerMesh_)
     {
@@ -232,7 +232,7 @@ void UR3000VramViewerComponent::DestroyViewer()
     bViewerCreated_ = false;
 }
 
-void UR3000VramViewerComponent::SetViewerVisible(bool bNewVisible)
+void UPSXVramViewerComponent::SetViewerVisible(bool bNewVisible)
 {
     bShowViewer = bNewVisible;
     if (bNewVisible && Gpu_)
@@ -244,7 +244,7 @@ void UR3000VramViewerComponent::SetViewerVisible(bool bNewVisible)
 // ===================================================================
 // TickComponent — update VRAM texture + viewer toggle/transform
 // ===================================================================
-void UR3000VramViewerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UPSXVramViewerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
