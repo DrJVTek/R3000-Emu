@@ -92,6 +92,9 @@ class Cpu
 
     // Debug/HLE: active des trampolines sécurisés (vecteurs A0/B0/C0 et exception vector RAM).
     void set_hle_vectors(int enabled);
+    // Mode intermédiaire: intercepte uniquement les sorties texte BIOS/SDK
+    // (A(3Fh)=printf, B(3Dh)=putchar) tout en laissant le reste en non-HLE.
+    void set_text_hle(int enabled);
     void set_hle_tcb_addr(uint32_t phys) { hle_tcb_addr_ = phys; }
 
     // Disable HLE pseudo-vblank when GPU generates real VBlanks.
@@ -145,9 +148,9 @@ class Cpu
         text_out_ = f;
     }
 
-    // Callback for BIOS putchar (B(3Dh)). Called for each character.
-    // Signature: void(char ch, void* user)
-    using PutcharCallback = void(*)(char ch, void* user);
+    // Callback for BIOS text output. Called for each character.
+    // bFromPrintf=true for A(3Fh) printf, false for B(3Dh) putchar.
+    using PutcharCallback = void(*)(char ch, bool bFromPrintf, void* user);
     void set_putchar_callback(PutcharCallback cb, void* user)
     {
         putchar_cb_ = cb;
@@ -389,9 +392,20 @@ class Cpu
     int stop_on_pc_{0};
     int stopped_on_pc_{0};
     uint32_t stop_pc_{0};
+
+    // IFETCH ADEL repeat detector. When the BIOS exception handler can't
+    // recover from a misaligned PC (the bad PC is permanent, not a transient
+    // ISR glitch), the CPU loops forever between the bad PC and the handler.
+    // We count consecutive ADEL faults at the same PC and halt the CPU once
+    // a threshold is reached, so the worker thread / CLI can stop cleanly
+    // instead of spinning and flooding logs.
+    uint32_t ifetch_adel_last_pc_{0};
+    uint32_t ifetch_adel_repeat_{0};
+    static constexpr uint32_t kIfetchAdelHaltThreshold = 16;
     int trace_io_{0};
     uint32_t trace_io_critical_count_{0};
     int hle_vectors_{0};
+    int text_hle_{0};
     std::FILE* text_out_{nullptr};
     PutcharCallback putchar_cb_{nullptr};
     void* putchar_cb_user_{nullptr};

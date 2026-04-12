@@ -220,6 +220,29 @@ class Gte
     const RtptDiag& rtpt_diag() const { return rtpt_diag_; }
     void rtpt_diag_reset() { rtpt_diag_.reset(); }
 
+    // Per-game render quirk: force GTE OFX/OFY (cop2 control 24/25) to be
+    // treated as zero inside RTPS/RTPT projection math.
+    //
+    // Some libgs games (e.g. SCEE Demo One TREX) implement their double-buffer
+    // Y shift via SetGeomOffset(x, y) which writes to OFX/OFY. RTPS adds those
+    // values to the projected SXY *before* the game emits any GP0 polygon
+    // command, so the back/front buffers receive the same model rendered at
+    // different Y positions. The front-end (UE5 render component) sees this
+    // as the model jumping between two Y positions every frame.
+    //
+    // Setting this flag makes RTPS/RTPT pretend OFX==OFY==0 *for projection
+    // purposes only* — the game's own writes to ctrl_[24]/[25] still go
+    // through write_ctrl() and the registers can still be read back correctly
+    // (so games that read OFX/OFY for other reasons aren't broken). Only the
+    // projection arithmetic in rtps_internal ignores them.
+    //
+    // Default OFF — turning it on globally would corrupt games that
+    // legitimately use OFX/OFY for non-buffer effects (centring, viewport
+    // shifts). Per-game opt-in via psx3dprof QUIRK + UE5 UPROPERTY +
+    // CLI flag.
+    void set_force_geom_offset_zero(bool enabled) { force_geom_offset_zero_ = enabled; }
+    bool force_geom_offset_zero() const { return force_geom_offset_zero_; }
+
   private:
     RtptDiag rtpt_diag_{};
 
@@ -227,6 +250,9 @@ class Gte
 
     uint32_t data_[32]{};
     uint32_t ctrl_[32]{};
+
+    // See set_force_geom_offset_zero() above.
+    bool force_geom_offset_zero_{false};
 };
 
 } // namespace gte

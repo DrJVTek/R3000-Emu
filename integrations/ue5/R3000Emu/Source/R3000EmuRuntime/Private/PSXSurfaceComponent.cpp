@@ -134,7 +134,12 @@ void UPSXSurfaceComponent::RebuildGeneratedMesh(float AspectRatio)
 
     const float Width = FMath::Max(PhysicalWidth, 1.0f);
     const float Height = Width / FMath::Max(AspectRatio, 0.1f);
-    const float HalfW = Width * 0.5f;
+    const float HalfW = Width  * 0.5f;
+    const float HalfH = Height * 0.5f;
+    // Pivot is always at the geometric centre of the surface — same convention
+    // as PSX2DRenderComponent and PSX3DRenderComponent. Placing a PSXEmuActor
+    // in the world puts the screen centre at the actor origin so the 2D, 3D
+    // and surface layers all overlap pixel-for-pixel without extra offsets.
 
     if (ResolvedShape_ == EPSXSurfaceShape::CustomMesh)
         return;
@@ -162,8 +167,8 @@ void UPSXSurfaceComponent::RebuildGeneratedMesh(float AspectRatio)
             ? 0.0f
             : -(1.0f - (Normalized * Normalized)) * ArcDepth;
 
-        Verts.Add(FVector(X, Y, Height));
-        Verts.Add(FVector(X, Y, 0.0f));
+        Verts.Add(FVector(X, Y,  HalfH));
+        Verts.Add(FVector(X, Y, -HalfH));
 
         const FVector Normal = FVector(1.0f, 0.0f, 0.0f).GetSafeNormal();
         Normals.Add(Normal);

@@ -1330,6 +1330,7 @@ static void print_usage(void)
         "  --load=<file>         Load ELF or PS-X EXE directly (skips BIOS)\n"
         "  --pretty              Pretty print instructions\n"
         "  --trace-io            Verbose MMIO logging\n"
+        "  --text-hle            Intercept BIOS/SDK printf+putchar only (keeps non-HLE execution)\n"
         "  --pc-sample=N         Print PC every N steps\n"
         "  --bus-tick-batch=N    Tick HW every N CPU steps (1=accurate, 32=fast)\n"
         "  --cd-timing=MODE      CD seek/spin-up timing: realistic|compat\n"
@@ -1339,6 +1340,10 @@ static void print_usage(void)
         "  --watch-range=S:E     Watch RAM write range (physical, hex ok) -> logs/watch_range.log\n"
         "  --watch-writes        Also log every write to watched address (verbose!)\n"
         "  --3d-diag             Log 3D reconstruction stats each VBlank to logs/3d_diag.log\n"
+        "  --force-gte-geom-offset-zero  Force GTE OFX/OFY to 0 in RTPS projection\n"
+        "                        (per-game quirk, e.g. SCEE Demo One TREX double-buffer)\n"
+        "  --psxparam=A,B,...    Pass int params to PSX EXE ($a1 -> scratchpad)\n"
+        "                        Example: --psxparam=1,30 (TREX attract, 30s)\n"
         "  --reg-trace=START:END[:WATCH]  Trace registers in PC range, optionally watch for value\n"
         "                        Example: --reg-trace=0x8004AB00:0x8004AC00:0x35096\n"
         "  --gte-trace=START:END Log GTE commands executed in a CPU PC range\n"
@@ -1705,6 +1710,11 @@ int main(int argc, char** argv)
             emu::logf(emu::LogLevel::error, "MAIN", "Load failed: %s", err[0] ? err : "unknown error");
             return 1;
         }
+        // Devkit mode: derive psx3dprof identity from the EXE path so any
+        // per-game quirks (e.g. force_gte_geom_offset_zero for TREX) are
+        // auto-applied. Mirrors what Core::fast_boot_from_exe() does for the
+        // UE5 path.
+        core.load_psx3d_profile_for_exe(load_path);
     }
 
     if (boot_bios)
@@ -1756,6 +1766,7 @@ int main(int argc, char** argv)
     core_opt.pretty = has_flag(argc, argv, "--pretty") ? 1 : 0;
     core_opt.trace_io = trace_io ? 1 : 0;
     core_opt.hle_vectors = has_flag(argc, argv, "--hle") ? 1 : 0;
+    core_opt.text_hle = has_flag(argc, argv, "--text-hle") ? 1 : 0;
     core_opt.cd_timing_mode = cd_timing_mode;
     if (bus_tick_batch != 0)
         core_opt.bus_tick_batch = bus_tick_batch;
@@ -1786,7 +1797,7 @@ int main(int argc, char** argv)
         static TtyCtx tty{};
         tty.len = 0;
         core.set_putchar_callback(
-            [](char ch, void* user) {
+            [](char ch, bool /*bFromPrintf*/, void* user) {
                 TtyCtx* ctx = static_cast<TtyCtx*>(user);
                 if (ch == '\n' || ch == '\r' || ctx->len >= (int)sizeof(ctx->buf) - 1)
                 {
@@ -1895,6 +1906,44 @@ int main(int argc, char** argv)
                 emu::logf(emu::LogLevel::info, "HOOK",
                     "Write range watch on phys 0x%08X..0x%08X -> logs/watch_range.log",
                     start, end);
+            }
+        }
+    }
+
+    // --- Game-specific render quirks (manual override) ---
+    // See gte::Gte::set_force_geom_offset_zero() for the policy comment.
+    // The psx3dprof per-game profile is the canonical place to enable this;
+    // this CLI flag is a manual override useful for testing without a profile.
+    if (has_flag(argc, argv, "--force-gte-geom-offset-zero"))
+    {
+        if (auto* gte = core.gte())
+        {
+            gte->set_force_geom_offset_zero(true);
+            emu::logf(emu::LogLevel::warn, "MAIN",
+                "Quirk enabled: force_gte_geom_offset_zero (GTE OFX/OFY → 0 in RTPS)");
+        }
+        if (auto* gte3d = core.gte_3d())
+            gte3d->set_force_geom_offset_zero(true);
+    }
+
+    // --- PSX EXE params (devkit mode) ---
+    {
+        const char* psxparam = arg_value(argc, argv, "--psxparam=");
+        if (psxparam && *psxparam)
+        {
+            int32_t params[32];
+            int count = 0;
+            const char* p = psxparam;
+            while (*p && count < 32)
+            {
+                params[count++] = (int32_t)std::strtol(p, nullptr, 0);
+                while (*p && *p != ',') ++p;
+                if (*p == ',') ++p;
+            }
+            if (count > 0)
+            {
+                core.set_psx_params(params, (uint32_t)count);
+                emu::logf(emu::LogLevel::info, "MAIN", "PSX params: %d ints from '%s'", count, psxparam);
             }
         }
     }

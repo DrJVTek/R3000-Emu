@@ -238,6 +238,20 @@ bool Psx3dProfileStore::load(const std::string& path, Psx3dProfileData& out)
             continue;
         }
 
+        // QUIRK <name> <int_value>
+        // Game-specific render quirks. Unknown names are silently ignored
+        // (forward compat: a profile from a newer build with extra quirks
+        // can still be parsed by an older build).
+        char quirk_name[64]{};
+        int quirk_value = 0;
+        if (std::sscanf(line, "QUIRK %63s %d", quirk_name, &quirk_value) == 2)
+        {
+            if (std::strcmp(quirk_name, "force_gte_geom_offset_zero") == 0)
+                out.quirks.force_gte_geom_offset_zero = (quirk_value != 0);
+            // Add new quirks here as they're introduced.
+            continue;
+        }
+
         Psx3dProfileData::CameraCandidate cam{};
         unsigned int cam_addr = 0;
         unsigned int cam_hits = 0;
@@ -287,6 +301,12 @@ bool Psx3dProfileStore::save(const std::string& path, const Psx3dProfileData& da
 
     std::fprintf(f, "PSX3D_PROFILE_V2\n");
     std::fprintf(f, "GAME %s\n", sanitize_id(data.game_id).c_str());
+
+    // Quirks: only emit non-default values to keep files lean. The reader
+    // ignores unknown quirk names, so adding new quirks here is forward-safe.
+    if (data.quirks.force_gte_geom_offset_zero)
+        std::fprintf(f, "QUIRK force_gte_geom_offset_zero 1\n");
+
     for (const auto& rule : data.mode_rules)
     {
         if (rule.mode == Psx3dProfileData::ModeKind::unknown)

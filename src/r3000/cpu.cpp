@@ -291,6 +291,11 @@ void Cpu::set_hle_vectors(int enabled)
     hle_vectors_ = enabled ? 1 : 0;
 }
 
+void Cpu::set_text_hle(int enabled)
+{
+    text_hle_ = enabled ? 1 : 0;
+}
+
 void Cpu::reset(uint32_t reset_pc)
 {
     // Reset minimal: on met tout à zéro et on positionne PC sur l'adresse de reset.
@@ -1280,14 +1285,17 @@ Cpu::StepResult Cpu::step()
     // de vrais stubs à 0xA0/0xB0/0xC0, on doit exécuter le code RAM normal, sinon on bloque des
     // init (dont le boot CD).
     //
+    const int is_bios_vector_pc = (pc_ == 0x0000'00A0u || pc_ == 0x0000'00B0u || pc_ == 0x0000'00C0u) ? 1 : 0;
+    const int text_hle_gate = (text_hle_ && is_bios_vector_pc) ? 1 : 0;
+
     int hle_vec_gate = 0;
-    if (hle_vectors_ && (pc_ == 0x0000'00A0u || pc_ == 0x0000'00B0u || pc_ == 0x0000'00C0u))
+    if (hle_vectors_ && is_bios_vector_pc)
     {
         // Passive hook: capture B(3Dh) putchar even when BIOS stubs are installed.
-        if (pc_ == 0x0000'00B0u && (gpr_[9] & 0xFFu) == 0x3Du && putchar_cb_)
+        if (!text_hle_ && pc_ == 0x0000'00B0u && (gpr_[9] & 0xFFu) == 0x3Du && putchar_cb_)
         {
             const char ch = (char)(gpr_[4] & 0xFFu);
-            putchar_cb_(ch, putchar_cb_user_);
+            putchar_cb_(ch, false, putchar_cb_user_);
         }
 
         // Only intercept if vector location is empty (zeros).
@@ -1299,13 +1307,8 @@ Cpu::StepResult Cpu::step()
         hle_vec_gate = (ok0 && ok1 && w0 == 0 && w1 == 0) ? 1 : 0;
     }
 
-    if (hle_vec_gate)
+    if (hle_vec_gate || text_hle_gate)
     {
-        const uint32_t fn = gpr_[9] & 0xFFu; // t1
-        const uint32_t a0 = gpr_[4];
-        const uint32_t a1 = gpr_[5];
-        const uint32_t a2 = gpr_[6];
-        const uint32_t a3 = gpr_[7];
         auto read_u8_guest = [&](uint32_t vaddr, uint8_t& out) -> int
         {
             Bus::MemFault f{};
@@ -1593,14 +1596,180 @@ Cpu::StepResult Cpu::step()
             return fd;
         };
 
+        const uint32_t fn = gpr_[9] & 0xFFu; // t1
+        const uint32_t a0 = gpr_[4];
+        const uint32_t a1 = gpr_[5];
+        const uint32_t a2 = gpr_[6];
+        const uint32_t a3 = gpr_[7];
+
+        auto emit_text_chars = [&](const char* s) -> void
+        {
+            if (!s)
+                return;
+            for (uint32_t i = 0; s[i] != 0; ++i)
+            {
+                const uint8_t ch = (uint8_t)s[i];
+                std::fputc((int)ch, stderr);
+                if (text_out_)
+                    std::fputc((int)ch, text_out_);
+                text_push_char(text_io_, text_clock_, text_has_clock_, text_line_, (uint32_t)sizeof(text_line_), text_pos_, ch);
+            }
+            std::fflush(stderr);
+            if (text_out_)
+                std::fflush(text_out_);
+        };
+        auto format_guest_printf = [&](uint32_t fmt_ptr, char* dst, uint32_t cap) -> void
+        {
+            if (!dst || cap == 0)
+                return;
+
+            char fmt[512];
+            read_cstr_guest(fmt_ptr, fmt, (uint32_t)sizeof(fmt));
+
+            uint32_t reg_arg_idx = 0;
+            uint32_t stack_arg_idx = 0;
+            const uint32_t stack_base = gpr_[29] + 16u;
+
+            auto next_arg_u32 = [&]() -> uint32_t
+            {
+                if (reg_arg_idx == 0u) { reg_arg_idx++; return a1; }
+                if (reg_arg_idx == 1u) { reg_arg_idx++; return a2; }
+                if (reg_arg_idx == 2u) { reg_arg_idx++; return a3; }
+                uint32_t v = 0;
+                (void)read_u32_guest(stack_base + stack_arg_idx * 4u, v);
+                stack_arg_idx++;
+                return v;
+            };
+
+            uint32_t out = 0;
+            auto push_ch = [&](char ch) -> void
+            {
+                if (out + 1u < cap)
+                    dst[out++] = ch;
+            };
+            auto push_str = [&](const char* s) -> void
+            {
+                if (!s)
+                    return;
+                for (uint32_t i = 0; s[i] != 0; ++i)
+                    push_ch(s[i]);
+            };
+
+            for (uint32_t i = 0; fmt[i] != 0 && out + 1u < cap; ++i)
+            {
+                if (fmt[i] != '%')
+                {
+                    push_ch(fmt[i]);
+                    continue;
+                }
+
+                ++i;
+                if (fmt[i] == 0)
+                    break;
+                if (fmt[i] == '%')
+                {
+                    push_ch('%');
+                    continue;
+                }
+
+                while (fmt[i] == 'l' || fmt[i] == 'h' || fmt[i] == '-' || fmt[i] == '+' || fmt[i] == ' ' ||
+                       fmt[i] == '#' || fmt[i] == '0' || (fmt[i] >= '0' && fmt[i] <= '9') || fmt[i] == '.')
+                {
+                    ++i;
+                    if (fmt[i] == 0)
+                        break;
+                }
+                if (fmt[i] == 0)
+                    break;
+
+                char tmp[128];
+                tmp[0] = 0;
+                switch (fmt[i])
+                {
+                case 's':
+                {
+                    char str[256];
+                    read_cstr_guest(next_arg_u32(), str, (uint32_t)sizeof(str));
+                    push_str(str);
+                    break;
+                }
+                case 'd':
+                case 'i':
+                    std::snprintf(tmp, sizeof(tmp), "%d", (int32_t)next_arg_u32());
+                    push_str(tmp);
+                    break;
+                case 'u':
+                    std::snprintf(tmp, sizeof(tmp), "%u", next_arg_u32());
+                    push_str(tmp);
+                    break;
+                case 'x':
+                    std::snprintf(tmp, sizeof(tmp), "%x", next_arg_u32());
+                    push_str(tmp);
+                    break;
+                case 'X':
+                    std::snprintf(tmp, sizeof(tmp), "%X", next_arg_u32());
+                    push_str(tmp);
+                    break;
+                case 'c':
+                    push_ch((char)(next_arg_u32() & 0xFFu));
+                    break;
+                default:
+                    push_ch('%');
+                    push_ch(fmt[i]);
+                    break;
+                }
+            }
+
+            dst[out] = 0;
+        };
+
         // Default: succès "neutre".
         uint32_t ret_v0 = 0;
         int handled = 1;
 
-        if (pc_ == 0x0000'00A0u)
+        if (!hle_vec_gate && text_hle_gate)
         {
-            switch (fn)
+            if (pc_ == 0x0000'00A0u && fn == 0x3Fu)
             {
+                char buf[512];
+                format_guest_printf(a0, buf, (uint32_t)sizeof(buf));
+                for (uint32_t i = 0; buf[i] != 0; ++i)
+                {
+                    if (putchar_cb_)
+                        putchar_cb_(buf[i], true, putchar_cb_user_);
+                }
+                emit_text_chars(buf);
+            }
+            else if (pc_ == 0x0000'00B0u && fn == 0x3Du)
+            {
+                const uint8_t ch = (uint8_t)(a0 & 0xFFu);
+                char buf[2] = {(char)ch, 0};
+                if (putchar_cb_)
+                    putchar_cb_((char)ch, false, putchar_cb_user_);
+                emit_text_chars(buf);
+                ret_v0 = 1;
+            }
+            else
+            {
+                handled = 0;
+            }
+
+            if (handled)
+            {
+                gpr_[2] = ret_v0;
+                pc_ = gpr_[31]; // ra
+                r.kind = StepResult::Kind::ok;
+                r.instr = 0;
+                return r;
+            }
+        }
+
+        if (hle_vec_gate)
+        {
+            if (pc_ == 0x0000'00A0u)
+            {
+                switch (fn)
+                {
                 case 0x00u: // A(00h) FileOpen(filename, accessmode)
                     ret_v0 = (uint32_t)hle_file_open(a0, a1);
                     break;
@@ -1634,20 +1803,13 @@ Cpu::StepResult Cpu::step()
                 case 0x3Fu: // A(3Fh) printf(txt, ...)
                     {
                         char buf[512];
-                        read_cstr_guest(a0, buf, (uint32_t)sizeof(buf));
+                        format_guest_printf(a0, buf, (uint32_t)sizeof(buf));
                         for (uint32_t i = 0; buf[i] != 0; ++i)
                         {
-                            const uint8_t ch = (uint8_t)buf[i];
-                            std::fputc((int)ch, stderr);
-                            if (text_out_)
-                                std::fputc((int)ch, text_out_);
-                            text_push_char(
-                                text_io_, text_clock_, text_has_clock_, text_line_, (uint32_t)sizeof(text_line_), text_pos_, ch
-                            );
+                            if (putchar_cb_)
+                                putchar_cb_(buf[i], true, putchar_cb_user_);
                         }
-                        std::fflush(stderr);
-                        if (text_out_)
-                            std::fflush(text_out_);
+                        emit_text_chars(buf);
                         ret_v0 = 0;
                     }
                     break;
@@ -1852,24 +2014,18 @@ Cpu::StepResult Cpu::step()
                 default:
                     handled = 0;
                     break;
+                }
             }
-        }
-        else if (pc_ == 0x0000'00B0u)
-        {
+            else if (pc_ == 0x0000'00B0u)
+            {
             // B0:0x3D = putchar(char) (souvent utilisé pendant le boot)
             if (fn == 0x3Du)
             {
                 const uint8_t ch = (uint8_t)(a0 & 0xFFu);
-                std::fputc((int)ch, stderr);
-                std::fflush(stderr);
                 if (putchar_cb_)
-                    putchar_cb_((char)ch, putchar_cb_user_);
-                if (text_out_)
-                {
-                    std::fputc((int)ch, text_out_);
-                    std::fflush(text_out_);
-                }
-                text_push_char(text_io_, text_clock_, text_has_clock_, text_line_, (uint32_t)sizeof(text_line_), text_pos_, ch);
+                    putchar_cb_((char)ch, false, putchar_cb_user_);
+                char buf[2] = {(char)ch, 0};
+                emit_text_chars(buf);
                 ret_v0 = 1;
             }
             else
@@ -2368,9 +2524,9 @@ Cpu::StepResult Cpu::step()
                         break;
                 }
             }
-        }
-        else
-        {
+            }
+            else
+            {
             // C0
             switch (fn)
             {
@@ -2479,55 +2635,59 @@ Cpu::StepResult Cpu::step()
                     break;
             }
         }
+        }
 
-        if (!handled)
+        if (hle_vec_gate)
         {
-            const char* vec_name = (pc_ == 0xA0u) ? "A" : (pc_ == 0xB0u) ? "B" : "C";
-            emu::logf(emu::LogLevel::debug, "HLE", "Unhandled %s(0x%02X) a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X",
-                vec_name, fn, a0, a1, a2, a3, gpr_[31]);
-            if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exc))
+            if (!handled)
             {
-                rlog::logger_logf(
-                    logger_,
-                    rlog::Level::debug,
-                    rlog::Category::exc,
-                    "HLE BIOS vector PC=0x%08X fn=0x%02X a0=0x%08X a1=0x%08X a2=0x%08X (unhandled, fallback v0=0)",
-                    pc_,
-                    fn,
-                    a0,
-                    a1,
-                    a2
-                );
-            }
-            if (sys_has_clock_)
-            {
-                flog::logf(sys_io_, sys_clock_, flog::Level::warn, "CPU",
-                    "HLE UNHANDLED %s(0x%02X) a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X",
+                const char* vec_name = (pc_ == 0xA0u) ? "A" : (pc_ == 0xB0u) ? "B" : "C";
+                emu::logf(emu::LogLevel::debug, "HLE", "Unhandled %s(0x%02X) a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X",
                     vec_name, fn, a0, a1, a2, a3, gpr_[31]);
+                if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exc))
+                {
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::debug,
+                        rlog::Category::exc,
+                        "HLE BIOS vector PC=0x%08X fn=0x%02X a0=0x%08X a1=0x%08X a2=0x%08X (unhandled, fallback v0=0)",
+                        pc_,
+                        fn,
+                        a0,
+                        a1,
+                        a2
+                    );
+                }
+                if (sys_has_clock_)
+                {
+                    flog::logf(sys_io_, sys_clock_, flog::Level::warn, "CPU",
+                        "HLE UNHANDLED %s(0x%02X) a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X",
+                        vec_name, fn, a0, a1, a2, a3, gpr_[31]);
+                }
+                ret_v0 = 0;
             }
-            ret_v0 = 0;
-        }
-        else
-        {
-            if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exc))
+            else
             {
-                rlog::logger_logf(
-                    logger_,
-                    rlog::Level::debug,
-                    rlog::Category::exc,
-                    "HLE BIOS vector PC=0x%08X fn=0x%02X -> v0=0x%08X",
-                    pc_,
-                    fn,
-                    ret_v0
-                );
+                if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exc))
+                {
+                    rlog::logger_logf(
+                        logger_,
+                        rlog::Level::debug,
+                        rlog::Category::exc,
+                        "HLE BIOS vector PC=0x%08X fn=0x%02X -> v0=0x%08X",
+                        pc_,
+                        fn,
+                        ret_v0
+                    );
+                }
             }
-        }
 
-        gpr_[2] = ret_v0;
-        pc_ = gpr_[31]; // ra
-        r.kind = StepResult::Kind::ok;
-        r.instr = 0;
-        return r;
+            gpr_[2] = ret_v0;
+            pc_ = gpr_[31]; // ra
+            r.kind = StepResult::Kind::ok;
+            r.instr = 0;
+            return r;
+        }
     }
 
     // Exception vector en RAM (BEV=0): 0x80000080.
@@ -2797,6 +2957,24 @@ Cpu::StepResult Cpu::step()
         // a clear diagnostic signal for hardware-missing bugs.
         if (fault.kind == Bus::MemFault::Kind::unaligned)
         {
+            // Repeat detector: if the BIOS handler keeps returning to the same
+            // bad PC, no recovery is going to happen — halt instead of spinning.
+            if (pc_ == ifetch_adel_last_pc_)
+                ++ifetch_adel_repeat_;
+            else
+            {
+                ifetch_adel_last_pc_ = pc_;
+                ifetch_adel_repeat_ = 1;
+            }
+            if (ifetch_adel_repeat_ >= kIfetchAdelHaltThreshold)
+            {
+                emu::logf(emu::LogLevel::error, "CPU",
+                    "IFETCH ADEL repeated %u times at pc=0x%08X — halting CPU "
+                    "(BIOS handler cannot recover)",
+                    ifetch_adel_repeat_, pc_);
+                r.kind = StepResult::Kind::halted;
+                return r;
+            }
             raise_exception(EXC_ADEL, pc_, pc_);
             r.kind = StepResult::Kind::ok;
         }
@@ -2808,6 +2986,13 @@ Cpu::StepResult Cpu::step()
         return r;
     }
     r.instr = instr;
+    // Successful fetch — clear the ADEL repeat counter so a future transient
+    // glitch doesn't accumulate against an unrelated past one.
+    if (ifetch_adel_repeat_)
+    {
+        ifetch_adel_last_pc_ = 0;
+        ifetch_adel_repeat_ = 0;
+    }
 
     // Ring buffer: on capture après un fetch réussi.
     const uint32_t prev_pos = (recent_pos_ - 1) & 255u;

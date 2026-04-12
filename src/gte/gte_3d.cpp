@@ -269,9 +269,29 @@ int32_t Gte3D::vz(uint32_t n) const
 
 void Gte3D::push_sxy(int32_t sx, int32_t sy)
 {
-    // 3D shadow: NO clamping to [-1024,1023]. Keep raw projected coords.
-    // UE5 handles its own frustum culling — we want ALL geometry.
-    // pack16 truncates to int16 range [-32768,32767] which is sufficient.
+    // CORRELATION INVARIANT: must saturate to [-1024..1023] exactly like the
+    // primary GTE (gte.cpp::Gte::push_sxy).
+    //
+    // The primary GTE clamps SXY to the PS1 GPU 11-bit signed vertex range
+    // and the game reads those clamped values via mfc2/swc2 to pack its GP0
+    // polygon commands. Our gpu::push_triangle then stores those CLAMPED
+    // values in cmds[i].v[].x/y, and uses them as the correlation lookup key.
+    //
+    // If the shadow GTE stored UNCLAMPED values here, its snapshot record
+    // would not match the lookup key for any vertex that overflowed in the
+    // primary (i.e. vertices very close to the camera). The correlation would
+    // miss → triangle classified as origin_2d_hud → PSX3DRenderComponent
+    // skips it → visible holes in the 3D mesh on close-up models.
+    //
+    // The earlier "no clamping, UE5 handles its own culling" approach was
+    // wrong: the saturation here is not a culling decision, it's a hardware
+    // mirror. UE5's frustum culling happens MUCH later in its own pipeline,
+    // long after gte_correlation has been built.
+    if (sx < -1024) sx = -1024;
+    else if (sx > 1023) sx = 1023;
+    if (sy < -1024) sy = -1024;
+    else if (sy > 1023) sy = 1023;
+
     const uint32_t val = pack16(sx, sy);
     data_[D_SXY0] = data_[D_SXY1];
     data_[D_SXY1] = data_[D_SXY2];
@@ -495,8 +515,12 @@ void Gte3D::rtps_internal(const int32_t V[3], int sf, int lm, bool last)
     const uint32_t sz3 = data_[D_SZ3];
     const uint32_t quotient = gte_divide_raw(h, sz3);
 
-    const int64_t ofx = (int32_t)ctrl_[C_OFX];
-    const int64_t ofy = (int32_t)ctrl_[C_OFY];
+    // Quirk: force_geom_offset_zero (see set_force_geom_offset_zero in gte.h
+    // and the mirror flag on Gte3D in gte_3d.h). When enabled, RTPS pretends
+    // OFX==OFY==0 for projection — keeps the shadow GTE in sync with the
+    // primary GTE so 3D reconstruction stays consistent.
+    const int64_t ofx = force_geom_offset_zero_ ? (int64_t)0 : (int64_t)(int32_t)ctrl_[C_OFX];
+    const int64_t ofy = force_geom_offset_zero_ ? (int64_t)0 : (int64_t)(int32_t)ctrl_[C_OFY];
     const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
     const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
 

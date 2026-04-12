@@ -28,7 +28,7 @@ class Core;
 
 class FPSXEmuWorker;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBiosPrint, const FString&, Line);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBiosPrint, const FString&, Line, bool, bFromPrintf);
 
 UENUM(BlueprintType)
 enum class EPsx3dRefreshReason : uint8
@@ -103,6 +103,23 @@ class UPSXEmulatorComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
     FString ExePath;
 
+    /** Comma-separated int params passed to the PSX EXE at boot via scratchpad RAM.
+     *  $a1 points to the int array, $a0 = count. Example: "1,30" for TREX attract
+     *  mode (mode=1, timeout=30s). Leave empty for interactive. Only when bDevKitMode. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
+    FString PsxParam;
+
+    /** Override for the psx3dprof root directory.
+     *
+     *  Leave empty (default) to use <Project>/Saved/PSXProfiles/. The
+     *  emulator will load <root>/<game_id>.psx3dprof at boot and save edits
+     *  back to the same path on shutdown.
+     *
+     *  Set explicitly to use a different directory (e.g. shared network
+     *  drive, alternate test profiles). NO fallback search — the override
+     *  is the single source of truth. If the file doesn't exist at the
+     *  resolved path, the log shows "profile load miss path=..." and no
+     *  profile is loaded. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|PSX3D")
     FString Psx3dProfilePath;
 
@@ -120,6 +137,26 @@ class UPSXEmulatorComponent : public UActorComponent
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|PSX3D", meta = (EditCondition = "bPsx3dRefreshOnInit"))
     EPsx3dRefreshScope Psx3dRefreshScope{EPsx3dRefreshScope::Global};
+
+    /** Force the GTE OFX/OFY (cop2 control 24/25) to be treated as zero in
+     *  RTPS/RTPT projection math.
+     *
+     *  Some libgs games (e.g. SCEE Demo One TREX) bake their double-buffer Y
+     *  shift into the GTE via SetGeomOffset, instead of using GP0(0xE5)
+     *  draw_offset. Without this quirk, the GTE projects vertices at two
+     *  different Y positions on alternate frames and the front-end sees the
+     *  model jumping between top and bottom of the screen.
+     *
+     *  Default OFF — turning it on globally would corrupt games that
+     *  legitimately use OFX/OFY for non-buffer effects. This is the manual
+     *  override; the canonical place to enable it is the per-game psx3dprof
+     *  QUIRK entry, which is auto-applied at boot. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|PSX3D")
+    bool bForceGteGeomOffsetZero{false};
+
+    /** Live setter — propagates to the running emulator immediately. */
+    UFUNCTION(BlueprintCallable, Category = "PSXEmu|PSX3D")
+    void SetForceGteGeomOffsetZero(bool bEnabled);
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
     int32 StepsToRunOnBeginPlay{0};
@@ -159,6 +196,9 @@ class UPSXEmulatorComponent : public UActorComponent
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
     bool bHleVectors{false};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
+    bool bTextHle{false};
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu", meta = (ClampMin = "1", ClampMax = "128"))
     int32 BusTickBatch{1};
@@ -320,10 +360,17 @@ class UPSXEmulatorComponent : public UActorComponent
 
     // BIOS putchar line buffer → fires OnBiosPrint on newline.
     // PutcharCB runs on worker thread, so we queue lines and broadcast from game thread.
+    struct FPendingBiosLine
+    {
+        FString Line{};
+        bool bFromPrintf{false};
+    };
+
     FString PutcharLineBuf_{};
-    TArray<FString> PutcharPendingLines_{};
+    bool PutcharLineFromPrintf_{false};
+    TArray<FPendingBiosLine> PutcharPendingLines_{};
     FCriticalSection PutcharLock_{};
-    static void PutcharCB(char Ch, void* User);
+    static void PutcharCB(char Ch, bool bFromPrintf, void* User);
 
     uint64 NextPcSampleAt_{0};
     double NextAudioStatsTime_{0.0};

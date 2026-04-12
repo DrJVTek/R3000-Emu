@@ -62,6 +62,19 @@ static const TCHAR* LexToString(ECDTimingMode Mode)
     }
 }
 
+static flog::Level ToFileLogLevel(emu::LogLevel Level)
+{
+    switch (Level)
+    {
+    case emu::LogLevel::error: return flog::Level::error;
+    case emu::LogLevel::warn: return flog::Level::warn;
+    case emu::LogLevel::info: return flog::Level::info;
+    case emu::LogLevel::debug: return flog::Level::debug;
+    case emu::LogLevel::trace: return flog::Level::trace;
+    default: return flog::Level::info;
+    }
+}
+
 class FPSXEmuWorker : public FRunnable
 {
 public:
@@ -446,6 +459,20 @@ void UPSXEmulatorComponent::StopWorkerThread()
 
 // fopen_utf8 now provided by util/file_util.h
 
+void UPSXEmulatorComponent::SetForceGteGeomOffsetZero(bool bEnabled)
+{
+    bForceGteGeomOffsetZero = bEnabled;
+    if (Core_)
+    {
+        if (auto* Gte = Core_->gte())
+            Gte->set_force_geom_offset_zero(bEnabled);
+        if (auto* Gte3D = Core_->gte_3d())
+            Gte3D->set_force_geom_offset_zero(bEnabled);
+        emu::logf(emu::LogLevel::warn, "CORE",
+            "Quirk live toggle: force_gte_geom_offset_zero = %d", bEnabled ? 1 : 0);
+    }
+}
+
 bool UPSXEmulatorComponent::BootBiosInternal()
 {
     if (!Core_)
@@ -480,6 +507,7 @@ bool UPSXEmulatorComponent::BootBiosInternal()
     // When OFF, the real BIOS exception handler runs (requires accurate HW emulation).
     // User can toggle via bHleVectors property in Blueprint.
     Opt.hle_vectors = bHleVectors ? 1 : 0;
+    Opt.text_hle = bTextHle ? 1 : 0;
     Opt.loop_detectors = bLoopDetectors ? 1 : 0;
     Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
     Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
@@ -496,8 +524,8 @@ bool UPSXEmulatorComponent::BootBiosInternal()
     UE_LOG(LogPSXEmu, Log, TEXT("BIOS boot initialized. PC=0x%08X CycleMult=%d Timing=WallClock CDTiming=%s"),
         Core_->pc(), CycleMultiplier, LexToString(CDTimingMode));
     emu::logf(emu::LogLevel::info, "CORE",
-        "UE BIOS init OK pc=0x%08X hle_vectors=%d bus_tick_batch=%u cycle_mult=%u threaded=%d timing=wallclock cd_timing=%s",
-        (unsigned)Core_->pc(), Opt.hle_vectors, (unsigned)Opt.bus_tick_batch, (unsigned)CycleMultiplier, bThreadedMode ? 1 : 0,
+        "UE BIOS init OK pc=0x%08X hle_vectors=%d text_hle=%d bus_tick_batch=%u cycle_mult=%u threaded=%d timing=wallclock cd_timing=%s",
+        (unsigned)Core_->pc(), Opt.hle_vectors, Opt.text_hle, (unsigned)Opt.bus_tick_batch, (unsigned)CycleMultiplier, bThreadedMode ? 1 : 0,
         (CDTimingMode == ECDTimingMode::Realistic) ? "realistic" : "compatibility-fast");
     StepsExecuted_.Store(0);
     TotalCyclesExecuted_.Store(0);
@@ -546,9 +574,10 @@ void UPSXEmulatorComponent::InitEmulator()
     // File pointers are valid until async_log_shutdown() in EndPlay.
     EmuLogFiles_.spu = SpuLogFile_;
     EmuLogFiles_.sys = SysLogFile_;
+    emu::LogLevel EmuLevel = emu::LogLevel::info;
     {
         const FTCHARToUTF8 EmuLvlUtf8(*EmuLogLevel);
-        const emu::LogLevel EmuLevel = emu::log_parse_level(EmuLvlUtf8.Get());
+        EmuLevel = emu::log_parse_level(EmuLvlUtf8.Get());
         emu::async_log_init(EmuLevel, 14, UEAsyncLogOutput, &EmuLogFiles_);
     }
 
@@ -574,10 +603,45 @@ void UPSXEmulatorComponent::InitEmulator()
         Core_->set_psx3d_analysis_enabled(bPsx3dAnalysisEnabled);
         Core_->set_psx3d_mode(bPsx3dAnalysisMode ? emu::Psx3dRunMode::analysis : emu::Psx3dRunMode::game);
     }
-    if (Core_ && !Psx3dProfilePath.IsEmpty())
+    // ─────────────────────────────────────────────────────────────────────
+    // psx3dprof root directory resolution.
+    //
+    // Default location: <Project>/Saved/PSXProfiles/
+    //   - Saved/ is the standard UE5 convention for runtime-mutable data
+    //     (save games, configs, logs, profile snapshots that the user can
+    //     edit live in devkit mode).
+    //   - It is writable in BOTH editor (PIE) AND packaged builds, unlike
+    //     Content/ which is read-only at runtime in shipped builds.
+    //   - It is NOT versioned by default — that's a feature here, since
+    //     profiles are per-machine devkit data, not project assets.
+    //
+    // Override: Psx3dProfilePath UPROPERTY. If non-empty, replaces the
+    // default entirely. Used for advanced cases (shared network drive,
+    // alternate test profiles). NO fallback search — the override is the
+    // single source of truth, take it or leave it.
+    //
+    // Round-trip: load and save both go to the same root directory.
+    // Live edits made via SetForceGteGeomOffsetZero() (or any future
+    // devkit toggle) get persisted on Core shutdown via try_save_psx3d_profile.
+    // ─────────────────────────────────────────────────────────────────────
+    if (Core_)
     {
-        FTCHARToUTF8 ProfileUtf8(*Psx3dProfilePath);
+        FString ResolvedProfileRoot;
+        if (!Psx3dProfilePath.IsEmpty())
+        {
+            ResolvedProfileRoot = Psx3dProfilePath;
+        }
+        else
+        {
+            ResolvedProfileRoot = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("PSXProfiles"));
+            ResolvedProfileRoot = FPaths::ConvertRelativePathToFull(ResolvedProfileRoot);
+        }
+        FTCHARToUTF8 ProfileUtf8(*ResolvedProfileRoot);
         Core_->set_psx3d_profile_path_override(ProfileUtf8.Get());
+        emu::logf(emu::LogLevel::warn, "CORE",
+            "psx3dprof root resolved: %s (%s)",
+            ProfileUtf8.Get(),
+            Psx3dProfilePath.IsEmpty() ? "default Saved/PSXProfiles" : "UPROPERTY override");
     }
     if (Core_ && bPsx3dRefreshOnInit)
     {
@@ -599,16 +663,17 @@ void UPSXEmulatorComponent::InitEmulator()
     if (CdLogFile_ || GpuLogFile_ || SysLogFile_ || IoLogFile_)
     {
         const flog::Clock Clock = flog::clock_start();
-        const flog::Sink CdSink{CdLogFile_, flog::Level::info};
-        const flog::Sink GpuSink{GpuLogFile_, flog::Level::info};
-        const flog::Sink SysSink{SysLogFile_, flog::Level::info};
-        const flog::Sink IoSink{IoLogFile_, flog::Level::info};
+        const flog::Level FileLevel = ToFileLogLevel(EmuLevel);
+        const flog::Sink CdSink{CdLogFile_, FileLevel};
+        const flog::Sink GpuSink{GpuLogFile_, FileLevel};
+        const flog::Sink SysSink{SysLogFile_, FileLevel};
+        const flog::Sink IoSink{IoLogFile_, FileLevel};
         Core_->set_log_sinks(CdSink, GpuSink, SysSink, IoSink, Clock);
 
         if (TextLogFile_)
         {
             Core_->set_text_out(TextLogFile_);
-            const flog::Sink TextSink{TextLogFile_, flog::Level::info};
+            const flog::Sink TextSink{TextLogFile_, FileLevel};
             Core_->set_text_io_sink(TextSink, Clock);
         }
     }
@@ -635,10 +700,11 @@ void UPSXEmulatorComponent::InitEmulator()
         Img.has_sp = 1;
         Img.sp = 0x801FFFF0u;
 
-        emu::Core::InitOptions Opt{};
-        Opt.pretty = bTraceASM ? 1 : 0;
-        Opt.trace_io = bTraceIO ? 1 : 0;
-        Opt.hle_vectors = 1; // Dev kit always uses HLE
+    emu::Core::InitOptions Opt{};
+    Opt.pretty = bTraceASM ? 1 : 0;
+    Opt.trace_io = bTraceIO ? 1 : 0;
+    Opt.hle_vectors = 1; // Dev kit always uses HLE
+    Opt.text_hle = bTextHle ? 1 : 0;
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
         Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
@@ -658,6 +724,24 @@ void UPSXEmulatorComponent::InitEmulator()
             {
                 Core_->set_bios_copy(BiosBytes_.GetData(), (uint32)BiosBytes_.Num(), err, sizeof(err));
                 UE_LOG(LogPSXEmu, Log, TEXT("DevKit: BIOS ROM loaded for font data (%d bytes)"), BiosBytes_.Num());
+            }
+        }
+
+        // Parse and inject PSX EXE params (e.g. "1,30" for TREX attract mode)
+        if (!PsxParam.IsEmpty())
+        {
+            TArray<FString> Tokens;
+            PsxParam.ParseIntoArray(Tokens, TEXT(","), true);
+            TArray<int32> Ints;
+            for (const FString& T : Tokens)
+            {
+                Ints.Add(FCString::Atoi(*T.TrimStartAndEnd()));
+            }
+            if (Ints.Num() > 0)
+            {
+                Core_->set_psx_params(Ints.GetData(), (uint32)Ints.Num());
+                emu::logf(emu::LogLevel::info, "CORE", "PsxParam parsed: %d ints from \"%s\"",
+                    Ints.Num(), TCHAR_TO_UTF8(*PsxParam));
             }
         }
 
@@ -681,10 +765,11 @@ void UPSXEmulatorComponent::InitEmulator()
         Img.has_sp = 1;
         Img.sp = 0x801FFFF0u;
 
-        emu::Core::InitOptions Opt{};
-        Opt.pretty = bTraceASM ? 1 : 0;
-        Opt.trace_io = bTraceIO ? 1 : 0;
-        Opt.hle_vectors = 0; // fastboot will enable HLE vectors internally after loading EXE
+    emu::Core::InitOptions Opt{};
+    Opt.pretty = bTraceASM ? 1 : 0;
+    Opt.trace_io = bTraceIO ? 1 : 0;
+    Opt.hle_vectors = 0; // fastboot will enable HLE vectors internally after loading EXE
+    Opt.text_hle = bTextHle ? 1 : 0;
         Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
         Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
@@ -910,6 +995,23 @@ void UPSXEmulatorComponent::InitEmulator()
         emu::logf(emu::LogLevel::info, "CORE", "UE GPU 2D connected: scale=%.2f zstep=%.4f",
             (double)GpuComp_->PixelScale, (double)GpuComp_->ZStep);
     }
+
+    // Apply per-game render quirks via UPROPERTY override.
+    // See gte::Gte::set_force_geom_offset_zero() in src/gte/gte.h for the
+    // full policy comment. The psx3dprof profile is the canonical place to
+    // enable this; the UPROPERTY is a manual override useful for testing.
+    if (bForceGteGeomOffsetZero)
+    {
+        if (Core_)
+        {
+            if (auto* Gte = Core_->gte())
+                Gte->set_force_geom_offset_zero(true);
+            if (auto* Gte3D = Core_->gte_3d())
+                Gte3D->set_force_geom_offset_zero(true);
+        }
+        emu::logf(emu::LogLevel::warn, "CORE",
+            "Quirk enabled at init: force_gte_geom_offset_zero (GTE OFX/OFY → 0 in RTPS)");
+    }
     else
     {
         emu::logf(emu::LogLevel::info, "CORE", "UE GPU 2D not connected (GpuComp=%d Gpu=%d)",
@@ -1022,15 +1124,15 @@ void UPSXEmulatorComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
     // Process pending putchar lines from worker thread (must broadcast on game thread)
     {
-        TArray<FString> LinesToBroadcast;
+        TArray<UPSXEmulatorComponent::FPendingBiosLine> LinesToBroadcast;
         {
             FScopeLock Lock(&PutcharLock_);
             LinesToBroadcast = MoveTemp(PutcharPendingLines_);
             PutcharPendingLines_.Reset();
         }
-        for (const FString& Line : LinesToBroadcast)
+        for (const UPSXEmulatorComponent::FPendingBiosLine& Line : LinesToBroadcast)
         {
-            OnBiosPrint.Broadcast(Line);
+            OnBiosPrint.Broadcast(Line.Line, Line.bFromPrintf);
         }
     }
 
@@ -1369,7 +1471,7 @@ void UPSXEmulatorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
-void UPSXEmulatorComponent::PutcharCB(char Ch, void* User)
+void UPSXEmulatorComponent::PutcharCB(char Ch, bool bFromPrintf, void* User)
 {
     auto* Self = static_cast<UPSXEmulatorComponent*>(User);
     if (!Self)
@@ -1378,17 +1480,26 @@ void UPSXEmulatorComponent::PutcharCB(char Ch, void* User)
     // NOTE: This callback runs on the WORKER THREAD during Core::step().
     // UE5 delegates are NOT thread-safe, so we queue completed lines here
     // and broadcast them from TickComponent (game thread).
+    if (!Self->PutcharLineBuf_.IsEmpty() && Self->PutcharLineFromPrintf_ != bFromPrintf)
+    {
+        FScopeLock Lock(&Self->PutcharLock_);
+        Self->PutcharPendingLines_.Add({Self->PutcharLineBuf_, Self->PutcharLineFromPrintf_});
+        Self->PutcharLineBuf_.Reset();
+    }
+
     if (Ch == '\n' || Ch == '\r')
     {
         if (!Self->PutcharLineBuf_.IsEmpty())
         {
             FScopeLock Lock(&Self->PutcharLock_);
-            Self->PutcharPendingLines_.Add(Self->PutcharLineBuf_);
+            Self->PutcharPendingLines_.Add({Self->PutcharLineBuf_, Self->PutcharLineFromPrintf_});
             Self->PutcharLineBuf_.Reset();
         }
     }
     else
     {
+        if (Self->PutcharLineBuf_.IsEmpty())
+            Self->PutcharLineFromPrintf_ = bFromPrintf;
         Self->PutcharLineBuf_.AppendChar(static_cast<TCHAR>(Ch));
     }
 }

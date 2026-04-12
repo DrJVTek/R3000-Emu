@@ -140,10 +140,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
     FVector2D DisplayOffset{FVector2D::ZeroVector};
 
-    /** Center the PS1 display in UE5 space. Uses display rect center (GP1(05)+wh/2). Disable if using custom layout. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU")
-    bool bCenterDisplay{true};
-
     /** Get the effective pixel scale (computed from target size if bUniformHdScale, else manual PixelScale). */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu|GPU")
     float GetEffectivePixelScale() const;

@@ -1,0 +1,18 @@
+PSX3D_PROFILE_V2
+GAME TREX
+# SCEE Demo One TREX dino demo (loaded via --load TREX.EXE).
+#
+# This game uses the GTE GeomOffset (cop2 OFX/OFY = ctrl regs 24/25) to bake
+# its double-buffer Y shift directly into the projected screen coords. The
+# back buffer at VRAM y=256 is rendered by setting OFY=256 before the RTPS
+# pass — RTPS adds OFY to the projected SXY before the game emits any GP0
+# polygon command.
+#
+# Without compensation, the front-end sees the dino jumping between Y=0 and
+# Y=256 every frame ("two dinos blinking top and bottom" symptom).
+#
+# The fix is to make the GTE pretend OFX==OFY==0 inside the RTPS projection
+# math (the registers themselves are still writable and readable, only the
+# projection arithmetic ignores them). See gte::Gte::set_force_geom_offset_zero()
+# in src/gte/gte.h for the full policy comment.
+QUIRK force_gte_geom_offset_zero 1

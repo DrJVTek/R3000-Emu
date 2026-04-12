@@ -50,11 +50,35 @@ struct Psx3dProfileData
         std::vector<PcRange> ot_fill_pc_ranges{};
     };
 
+    // Game-specific render quirks. These describe non-portable corner cases
+    // that we cannot reliably auto-detect from the binary, and that need to be
+    // toggled per-game. Each quirk has a stable string name used in the
+    // .psx3dprof file format ("QUIRK <name> <value>") and a corresponding
+    // bool field here. Default false → no behaviour change for existing games.
+    //
+    // Adding a new quirk:
+    //   1. Add a bool field below
+    //   2. Wire its parse/serialize in psx3d_profile_store.cpp (Quirks
+    //      handling block in load() and save())
+    //   3. Propagate it to the relevant subsystem in Core::try_load_psx3d_profile()
+    struct Quirks
+    {
+        // GTE GeomOffset double-buffer compensation. Used by libgs games like
+        // SCEE Demo One TREX that shift their back buffer via SetGeomOffset
+        // (cop2 OFX/OFY) instead of GP0(0xE5) draw_offset. When set, the GTE
+        // RTPS/RTPT projection math pretends OFX==OFY==0, so the SXY values
+        // computed by the GTE land at the same logical screen position
+        // regardless of which back buffer the game is currently writing to.
+        // See gte::Gte::set_force_geom_offset_zero() for the full policy.
+        bool force_gte_geom_offset_zero{false};
+    };
+
     std::string game_id{};
     std::vector<ProvenanceHotspotProfiler::PcSnapshot> hotspots{};
     std::vector<uint32_t> analyzed_pcs{};
     std::vector<CameraCandidate> camera_candidates{};
     std::vector<ModeRule> mode_rules{};
+    Quirks quirks{};
 };
 
 class Psx3dProfileStore

@@ -54,6 +54,50 @@ static uint8_t color8(uint8_t v)
     return v;
 }
 
+static void log_draw_list_summary(const FrameDrawList& dl, uint32_t frame_id)
+{
+    const size_t ncmds = dl.cmds.size();
+    if (ncmds == 0)
+        return;
+
+    int16_t raw_min_x = INT16_MAX, raw_max_x = INT16_MIN;
+    int16_t raw_min_y = INT16_MAX, raw_max_y = INT16_MIN;
+    int16_t ras_min_x = INT16_MAX, ras_max_x = INT16_MIN;
+    int16_t ras_min_y = INT16_MAX, ras_max_y = INT16_MIN;
+    uint32_t raw_y_lo = 0, raw_y_hi = 0;
+    uint32_t ras_y_lo = 0, ras_y_hi = 0;
+
+    for (const DrawCmd& cmd : dl.cmds)
+    {
+        for (const DrawVertex& v : cmd.v)
+        {
+            raw_min_x = (std::min)(raw_min_x, v.x);
+            raw_max_x = (std::max)(raw_max_x, v.x);
+            raw_min_y = (std::min)(raw_min_y, v.y);
+            raw_max_y = (std::max)(raw_max_y, v.y);
+            if (v.y < 240) ++raw_y_lo; else ++raw_y_hi;
+
+            const int16_t rx = (int16_t)(v.x + dl.draw_env.offset_x);
+            const int16_t ry = (int16_t)(v.y + dl.draw_env.offset_y);
+            ras_min_x = (std::min)(ras_min_x, rx);
+            ras_max_x = (std::max)(ras_max_x, rx);
+            ras_min_y = (std::min)(ras_min_y, ry);
+            ras_max_y = (std::max)(ras_max_y, ry);
+            if (ry < 240) ++ras_y_lo; else ++ras_y_hi;
+        }
+    }
+
+    emu::logf(emu::LogLevel::warn, "GPU",
+        "DRAWLIST_SUMMARY f=%u cmds=%u raw_xy=[%d..%d,%d..%d] raster_xy=[%d..%d,%d..%d] "
+        "raw_y(lo=%u hi=%u) raster_y(lo=%u hi=%u) ofs=(%d,%d) disp=(%u,%u)+(%u,%u)",
+        frame_id, (unsigned)ncmds,
+        (int)raw_min_x, (int)raw_max_x, (int)raw_min_y, (int)raw_max_y,
+        (int)ras_min_x, (int)ras_max_x, (int)ras_min_y, (int)ras_max_y,
+        raw_y_lo, raw_y_hi, ras_y_lo, ras_y_hi,
+        (int)dl.draw_env.offset_x, (int)dl.draw_env.offset_y,
+        dl.display.display_x, dl.display.display_y, dl.display.width(), dl.display.height());
+}
+
 // ---------------------------------------------------------------------------
 // GP0 parameter count lookup
 // Returns number of ADDITIONAL words after the command word (0 = single word cmd)
@@ -171,38 +215,56 @@ void Gpu::push_triangle(
     int16_t x2, int16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
     uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth)
 {
-    // Triangle bounding box (always computed for large-primitive rejection)
-    const int16_t min_x = (std::min)({x0, x1, x2});
-    const int16_t max_x = (std::max)({x0, x1, x2});
-    const int16_t min_y = (std::min)({y0, y1, y2});
-    const int16_t max_y = (std::max)({y0, y1, y2});
+    // No bounding-box span rejection here.
+    //
+    // The previous version rejected triangles whose bbox span exceeded 1023
+    // pixels on either axis, with the rationale "PS1 rejects too-large
+    // primitives, defends against GTE overflow". This was wrong on both
+    // counts:
+    //
+    //   1. PS1 hardware does NOT outright reject all spans > 1023 — PSX-spx
+    //      says "drawn distorted, or not at all", and DuckStation's
+    //      BeginPolygonDraw confirms it: the only general rejection is
+    //      "bbox doesn't intersect the drawing area at all". The
+    //      MAX_PRIMITIVE_WIDTH/HEIGHT constants in DuckStation are only
+    //      checked inside the FF8 vertex-truncation fallback path, not on
+    //      regular triangles.
+    //
+    //   2. Our shadow GTE saturates SXY to [-1024..+1023] (matching primary),
+    //      so the maximum possible span is 2047 — finite and bounded. There
+    //      is no risk of runaway garbage from a GTE overflow path.
+    //
+    // The previous check was the cause of the SCEE Demo One TREX dino "hole
+    // in the head" bug: when the dino is close to the camera, several
+    // triangles have one vertex saturated to -1024 and another to +1023 (or
+    // similar wide spans). The hardware/DuckStation accepts these and
+    // rasterises them clipped to the drawing area. Our check dropped them
+    // entirely, leaving visible holes.
+    //
+    // We now trust the saturation in push_sxy and let every triangle through
+    // to the draw list. The front-end (PSX2DRenderComponent / 3D component /
+    // UE5 rasteriser) handles its own clipping naturally.
 
-    // PS1 rejects "too large" primitives (>1023 pixels span in any axis).
-    // Always active — prevents degenerate triangles from GTE overflow.
-    if ((max_x - min_x) > 1023 || (max_y - min_y) > 1023)
-        return;
+    // TODO: draw-area clipping (GP0 E3h/E4h) is intentionally NOT applied here.
+    // The clip rect is in raster space and changes in lock-step with
+    // draw_env.offset as part of the same double-buffer scheme. We don't need
+    // draw-area clipping at our current rendering stage, so we skip it
+    // entirely. Revisit when we hit a real render-to-texture case.
 
-    // Draw area clipping (GP0 E3h/E4h). Skipped in VR mode so that
-    // off-screen polygons are available for full 3D reconstruction.
-    if (clip_to_draw_area_)
-    {
-        const int16_t cx1 = (int16_t)draw_env_.clip_x1;
-        const int16_t cy1 = (int16_t)draw_env_.clip_y1;
-        const int16_t cx2 = (int16_t)draw_env_.clip_x2;
-        const int16_t cy2 = (int16_t)draw_env_.clip_y2;
-        if (max_x < cx1 || min_x > cx2 || max_y < cy1 || min_y > cy2)
-            return;
-    }
-
-    // Subtract draw_offset: vertices arrive with VRAM-absolute coords (offset baked in).
-    // We convert to screen-relative coords so both double-buffer halves
-    // (Y=0 and Y=240) map to the same position. We render 3D, not VRAM.
-    const int16_t ox = draw_env_.offset_x;
-    const int16_t oy = draw_env_.offset_y;
+    // Store the raw GP0 polygon coords (logical screen space, no draw_env
+    // offset applied) in the draw list. See the contract on gpu::DrawVertex
+    // in gpu.h. Front-ends consume cmd.v[].x/y as logical screen-space.
+    //
+    // Note on GTE GeomOffset: some libgs games (e.g. SCEE Demo One TREX) use
+    // SetGeomOffset to bake a buffer-Y shift into the GTE projection. That is
+    // handled inside the GTE itself (gte::Gte::set_force_geom_offset_zero) —
+    // NOT here. Trying to undo it post-RTPS in the GPU would be racy and
+    // semantically wrong: the offset is part of the projection math, not a
+    // pixel-time transform.
     DrawCmd cmd{};
-    cmd.v[0] = {(int16_t)(x0 - ox), (int16_t)(y0 - oy), r0, g0, b0, u0, v0};
-    cmd.v[1] = {(int16_t)(x1 - ox), (int16_t)(y1 - oy), r1, g1, b1, u1, v1};
-    cmd.v[2] = {(int16_t)(x2 - ox), (int16_t)(y2 - oy), r2, g2, b2, u2, v2};
+    cmd.v[0] = {x0, y0, r0, g0, b0, u0, v0};
+    cmd.v[1] = {x1, y1, r1, g1, b1, u1, v1};
+    cmd.v[2] = {x2, y2, r2, g2, b2, u2, v2};
     cmd.clut = clut;
     cmd.texpage = texpage;
     cmd.flags = flags;
@@ -211,10 +273,7 @@ void Gpu::push_triangle(
     draw_lists_[draw_active_].push(cmd);
 
     // 3D reconstruction: correlate with GTE snapshot
-    // GTE records SXY = raw screen coords (no draw offset).
-    // gp0_polygon adds draw offset before calling push_triangle, then
-    // push_triangle subtracts it again (cmd.v = vertex - offset).
-    // So cmd.v == original GTE SXY == the key recorded by GTE. Match!
+    // GTE records SXY as raw screen coords (no draw offset), so DrawCmd matches it directly.
     if (gte_corr_)
     {
         GteSxyKey key{};
@@ -368,8 +427,9 @@ int Gpu::tick_vblank(uint32_t cycles)
             status_ ^= (1u << 13);
 
         // Swap draw lists every VBlank. Simple and reliable.
-        // Vertices are stored with draw_offset subtracted (screen-relative),
-        // so both double-buffer halves overlap at the same coords.
+        // Vertices are stored as raw GP0 coords (no draw_offset applied),
+        // so both double-buffer halves overlap at the same logical screen
+        // coords — see the DrawVertex contract in gpu.h.
         {
             std::lock_guard<std::mutex> lock(draw_list_mutex_);
             draw_lists_[draw_active_].frame_id = frame_count_.load(std::memory_order_relaxed);
@@ -411,6 +471,12 @@ int Gpu::tick_vblank(uint32_t cycles)
                         frame_count_.load(std::memory_order_relaxed), (unsigned)ncmds, cnt_3d, pct, cnt_2d_hud,
                         cnt_2d_rect, cnt_2d_line, rec, hit, (unsigned)sz);
                     ++corr_log;
+                }
+                if (ncmds > 0 && (frame_count_.load(std::memory_order_relaxed) < 120
+                    || dl.display.display_y != 0
+                    || dl.draw_env.offset_y != 0))
+                {
+                    log_draw_list_summary(dl, frame_count_.load(std::memory_order_relaxed));
                 }
                 // Double-buffered swap: write→read, clear new write.
                 // Games DMA previous frame's OT first, then GTE computes new frame.
@@ -507,6 +573,13 @@ void Gpu::tick_vblank_swap_only()
         draw_lists_[draw_active_].draw_env = draw_env_;
         draw_lists_[draw_active_].display = display_;
         draw_active_ = 1 - draw_active_;
+        const auto& ready = draw_lists_[1 - draw_active_];
+        if (!ready.cmds.empty() && (frame_count_.load(std::memory_order_relaxed) < 120
+            || ready.display.display_y != 0
+            || ready.draw_env.offset_y != 0))
+        {
+            log_draw_list_summary(ready, frame_count_.load(std::memory_order_relaxed));
+        }
         draw_lists_[draw_active_].clear();
         if (gte_corr_) gte_corr_->swap_frame();
         vram_frame_++;
@@ -757,10 +830,6 @@ void Gpu::gp0_write(uint32_t v)
         // Expecting XY word
         cur_x = sign_extend_11(v);
         cur_y = sign_extend_11((int32_t)(v >> 16));
-
-        // Apply drawing offset
-        cur_x = (int16_t)(cur_x + draw_env_.offset_x);
-        cur_y = (int16_t)(cur_y + draw_env_.offset_y);
 
         // If we have a previous vertex, draw a line segment
         if (polyline_has_prev_)
@@ -1069,13 +1138,6 @@ void Gpu::gp0_polygon()
         }
     }
 
-    // Apply drawing offset
-    for (int i = 0; i < nverts; ++i)
-    {
-        vx[i] = (int16_t)(vx[i] + draw_env_.offset_x);
-        vy[i] = (int16_t)(vy[i] + draw_env_.offset_y);
-    }
-
     // Determine texpage (from polygon attribute if textured, else from draw env)
     uint16_t tp = textured ? texpage_attr : (uint16_t)(draw_env_.texpage_raw & 0xFFFF);
     uint8_t semi_mode = (uint8_t)((tp >> 5) & 3);
@@ -1171,12 +1233,6 @@ void Gpu::gp0_line()
     int16_t x1 = (idx < cmd_buf_pos_) ? sign_extend_11(cmd_buf_[idx]) : x0;
     int16_t y1 = (idx < cmd_buf_pos_) ? sign_extend_11((int32_t)(cmd_buf_[idx] >> 16)) : y0;
 
-    // Apply drawing offset
-    x0 = (int16_t)(x0 + draw_env_.offset_x);
-    y0 = (int16_t)(y0 + draw_env_.offset_y);
-    x1 = (int16_t)(x1 + draw_env_.offset_x);
-    y1 = (int16_t)(y1 + draw_env_.offset_y);
-
     // Expand line to a thin quad (1px wide) for mesh rendering
     // Compute perpendicular offset
     int16_t dx = (int16_t)(x1 - x0);
@@ -1260,10 +1316,6 @@ void Gpu::gp0_rect()
 
     if (w <= 0 || h <= 0)
         return; // degenerate rect
-
-    // Apply drawing offset
-    x = (int16_t)(x + draw_env_.offset_x);
-    y = (int16_t)(y + draw_env_.offset_y);
 
     uint16_t tp = (uint16_t)(draw_env_.texpage_raw & 0xFFFF);
     uint8_t semi_mode = (uint8_t)((tp >> 5) & 3);

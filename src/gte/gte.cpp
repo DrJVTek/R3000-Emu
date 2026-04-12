@@ -56,6 +56,24 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3, uint32_t& flag_out)
     if (sz3 * 2 <= h)
     {
         flag_out |= Gte::FLAG_DIV_OFLOW;
+        // INSTRUMENTATION (temporary, near-clip dino debug):
+        // Count how often the divide-overflow path is hit. Log a burst at the
+        // start, then a periodic summary, so we know whether close-up vertices
+        // routinely trigger this on TREX.
+        static uint32_t div_oflow_count = 0;
+        static uint32_t div_oflow_total = 0;
+        ++div_oflow_total;
+        if (div_oflow_count < 5)
+        {
+            ++div_oflow_count;
+            emu::logf(emu::LogLevel::warn, "GTE",
+                "DIV_OFLOW #%u total=%u h=%u sz3=%u", div_oflow_count, div_oflow_total, h, sz3);
+        }
+        else if ((div_oflow_total % 200) == 0)
+        {
+            emu::logf(emu::LogLevel::warn, "GTE",
+                "DIV_OFLOW total=%u (last h=%u sz3=%u)", div_oflow_total, h, sz3);
+        }
         return 0x1FFFF;
     }
 
@@ -78,7 +96,7 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3, uint32_t& flag_out)
 
 Gte::Gte()
 {
-    emu::logf(emu::LogLevel::debug, "GTE", "GTE created");
+    emu::logf(emu::LogLevel::warn, "GTE", "GTE v3 (AVSZ3 error-level instrumented)");
     reset();
 }
 
@@ -450,6 +468,35 @@ void Gte::cmd_nclip(uint32_t)
 
     const int64_t n = (int64_t)x0 * (y1 - y2) + (int64_t)x1 * (y2 - y0) + (int64_t)x2 * (y0 - y1);
     set_mac(0, n);
+
+    // INSTRUMENTATION (temporary, near-clip dino debug):
+    // Log when NCLIP returns ≤ 0 (game culls) AND any vertex looks saturated
+    // (= reaches the [-1024..1023] bound). Rate-limited to ~10 / frame to
+    // avoid spam. The static counter resets every ~1000 calls; in practice
+    // this means a small burst per frame which is enough to spot the pattern.
+    static uint32_t nclip_cull_log_count = 0;
+    static uint32_t nclip_cull_log_total = 0;
+    if (n <= 0)
+    {
+        const bool sat0 = (x0 == -1024 || x0 == 1023 || y0 == -1024 || y0 == 1023);
+        const bool sat1 = (x1 == -1024 || x1 == 1023 || y1 == -1024 || y1 == 1023);
+        const bool sat2 = (x2 == -1024 || x2 == 1023 || y2 == -1024 || y2 == 1023);
+        if ((sat0 || sat1 || sat2) && nclip_cull_log_count < 10)
+        {
+            ++nclip_cull_log_count;
+            ++nclip_cull_log_total;
+            emu::logf(emu::LogLevel::warn, "GTE",
+                "NCLIP cull #%u (sat) MAC0=%lld v0=(%d,%d) v1=(%d,%d) v2=(%d,%d)",
+                nclip_cull_log_total, (long long)n, x0, y0, x1, y1, x2, y2);
+        }
+    }
+    // Periodic reset so each "burst" of frames produces fresh logs.
+    static uint32_t nclip_call_count = 0;
+    if (++nclip_call_count >= 1000)
+    {
+        nclip_call_count = 0;
+        nclip_cull_log_count = 0;
+    }
 }
 
 void Gte::cmd_mvmva(uint32_t cmd)
@@ -581,8 +628,11 @@ void Gte::rtps_internal(const int32_t V[3], int sf, int lm, bool last)
     const uint32_t sz3 = data_[D_SZ3];
     const uint32_t quotient = gte_divide(h, sz3, flag_);
 
-    const int64_t ofx = (int32_t)ctrl_[C_OFX];
-    const int64_t ofy = (int32_t)ctrl_[C_OFY];
+    // Quirk: force_geom_offset_zero (see set_force_geom_offset_zero in gte.h).
+    // When enabled, RTPS pretends OFX==OFY==0 for projection purposes — used
+    // by games that bake double-buffer Y shifts into the GTE GeomOffset.
+    const int64_t ofx = force_geom_offset_zero_ ? (int64_t)0 : (int64_t)(int32_t)ctrl_[C_OFX];
+    const int64_t ofy = force_geom_offset_zero_ ? (int64_t)0 : (int64_t)(int32_t)ctrl_[C_OFY];
     const int32_t ir1 = (int32_t)(int16_t)(data_[D_IR1] & 0xFFFFu);
     const int32_t ir2 = (int32_t)(int16_t)(data_[D_IR2] & 0xFFFFu);
 
@@ -720,7 +770,6 @@ void Gte::cmd_rtpt(uint32_t cmd)
 void Gte::cmd_avsz3(uint32_t)
 {
     // AVSZ3: OTZ = ZSF3 * (SZ1+SZ2+SZ3) >> 12
-    // (approx. dans cette version; OTZ est 16-bit en pratique)
     const uint32_t sz1 = data_[D_SZ1] & 0xFFFFu;
     const uint32_t sz2 = data_[D_SZ2] & 0xFFFFu;
     const uint32_t sz3 = data_[D_SZ3] & 0xFFFFu;
@@ -729,7 +778,29 @@ void Gte::cmd_avsz3(uint32_t)
     const int64_t sum = (int64_t)sz1 + (int64_t)sz2 + (int64_t)sz3;
     const int64_t mac0 = (int64_t)zsf3 * sum;
     set_mac(0, mac0);
-    data_[D_OTZ] = clamp_u16((int32_t)(mac0 >> 12));
+    const uint32_t otz = clamp_u16((int32_t)(mac0 >> 12));
+    data_[D_OTZ] = otz;
+
+    // INSTRUMENTATION (temporary): log AVSZ3 results at ERROR level
+    static uint32_t avsz3_log_count = 0;
+    static uint32_t avsz3_zero_count = 0;
+    if (otz == 0)
+    {
+        ++avsz3_zero_count;
+        if (avsz3_zero_count <= 20)
+            emu::logf(emu::LogLevel::error, "GTE",
+                "AVSZ3 OTZ=0 #%u! zsf3=%d sz=(%u,%u,%u) sum=%lld mac0=%lld mac0>>12=%d",
+                avsz3_zero_count, zsf3, sz1, sz2, sz3,
+                (long long)sum, (long long)mac0, (int)(int32_t)(mac0 >> 12));
+    }
+    if (avsz3_log_count < 5)
+    {
+        ++avsz3_log_count;
+        emu::logf(emu::LogLevel::error, "GTE",
+            "AVSZ3 #%u: zsf3=%d sz=(%u,%u,%u) sum=%lld mac0=%lld otz=%u",
+            avsz3_log_count, zsf3, sz1, sz2, sz3,
+            (long long)sum, (long long)mac0, otz);
+    }
 }
 
 void Gte::cmd_avsz4(uint32_t)
@@ -1315,6 +1386,27 @@ int Gte::execute(uint32_t cop2_instruction)
     // Reset FLAG at start of every GTE command (DuckStation behavior)
     flag_ = 0;
 
+    // INSTRUMENTATION: fire once to PROVE execute() is reached
+    static uint32_t exec_count = 0;
+    ++exec_count;
+    if (exec_count == 1)
+        emu::logf(emu::LogLevel::error, "GTE", "execute() FIRST CALL funct=0x%02X", funct);
+    if (exec_count == 100)
+        emu::logf(emu::LogLevel::error, "GTE", "execute() 100th call funct=0x%02X total=%u", funct, exec_count);
+    if (funct == 0x2D)
+    {
+        static uint32_t avsz3_exec = 0;
+        ++avsz3_exec;
+        // Read AVSZ3 inputs BEFORE the command runs (SZ values are already set by prior RTPT)
+        const uint32_t pre_sz1 = data_[D_SZ1] & 0xFFFFu;
+        const uint32_t pre_sz2 = data_[D_SZ2] & 0xFFFFu;
+        const uint32_t pre_sz3 = data_[D_SZ3] & 0xFFFFu;
+        const int32_t pre_zsf3 = s16(ctrl_[C_ZSF3]);
+        if (avsz3_exec <= 10)
+            emu::logf(emu::LogLevel::error, "GTE",
+                "AVSZ3_PRE #%u zsf3=%d sz=(%u,%u,%u)", avsz3_exec, pre_zsf3, pre_sz1, pre_sz2, pre_sz3);
+    }
+
     // Debug: count GTE command usage (log summary after 1000 calls)
     static uint32_t gte_cmd_counts[64] = {};
     static int light_log_count = 0;
@@ -1326,11 +1418,11 @@ int Gte::execute(uint32_t cop2_instruction)
     if (total == 1000 && !gte_summary_logged)
     {
         gte_summary_logged = true;
-        emu::logf(emu::LogLevel::warn, "GTE", "=== GTE command usage after 1000 calls ===");
+        emu::logf(emu::LogLevel::error, "GTE", "=== GTE command usage after 1000 calls ===");
         for (int i = 0; i < 64; i++)
         {
             if (gte_cmd_counts[i] > 0)
-                emu::logf(emu::LogLevel::warn, "GTE", "  cmd 0x%02X: %u calls", i, gte_cmd_counts[i]);
+                emu::logf(emu::LogLevel::error, "GTE", "  cmd 0x%02X: %u calls", i, gte_cmd_counts[i]);
         }
     }
 
@@ -1411,6 +1503,29 @@ int Gte::execute(uint32_t cop2_instruction)
     if (flag_ & FLAG_ERROR_BITS)
         flag_ |= (1u << 31);
     ctrl_[C_FLAG] = flag_;
+
+    // POST-command log for AVSZ3: capture OTZ result + FLAG
+    if (funct == 0x2D)
+    {
+        static uint32_t avsz3_post = 0;
+        static uint32_t avsz3_otz0 = 0;
+        ++avsz3_post;
+        const uint32_t otz = data_[D_OTZ];
+        if (otz == 0)
+        {
+            ++avsz3_otz0;
+            if (avsz3_otz0 <= 20)
+                emu::logf(emu::LogLevel::error, "GTE",
+                    "AVSZ3_POST OTZ=0! #%u/%u flag=0x%08X mac0=%d",
+                    avsz3_otz0, avsz3_post, flag_, (int32_t)data_[D_MAC0]);
+        }
+        else if (avsz3_post <= 10)
+        {
+            emu::logf(emu::LogLevel::error, "GTE",
+                "AVSZ3_POST #%u otz=%u flag=0x%08X mac0=%d",
+                avsz3_post, otz, flag_, (int32_t)data_[D_MAC0]);
+        }
+    }
 
     return cycles;
 }

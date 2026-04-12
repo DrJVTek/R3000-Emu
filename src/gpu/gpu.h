@@ -80,10 +80,20 @@ struct Stage67GpuDebug
     uint32_t frame_count{0};
 };
 
-// Draw command vertex for UE5 rendering bridge
+// Draw command vertex for UE5 rendering bridge.
+//
+// CONTRACT: x,y are raw GP0 polygon coordinates — i.e. the logical screen-space
+// values the game submitted to GP0, *without* draw_env.offset applied.
+//
+// To obtain VRAM/raster coordinates (needed e.g. for clipping against the draw
+// area), add draw_env.offset_x/y. To obtain scan-out coordinates, subtract
+// display.display_x/y afterwards. Front-ends that just want to display the
+// logical screen space (UE5 render components) can consume x,y directly and
+// should NOT mix in display_x/y — doing so re-injects the VRAM buffer flip
+// and causes double-buffered games to jump between buffer halves.
 struct DrawVertex
 {
-    int16_t x, y;          // PS1 screen coords (after draw offset)
+    int16_t x, y;          // raw GP0 polygon coords (pre-offset, logical screen space)
     uint8_t r, g, b;       // vertex color
     uint8_t u, v;           // texture coords (0-255)
 };
@@ -456,7 +466,12 @@ class Gpu
     GteCorrelationTable* gte_corr_{nullptr};
 
     // Draw area clipping toggle (default: on = standard PS1; off = VR mode)
-    bool clip_to_draw_area_{true};
+    // Default OFF: draw-area clipping conflicts with the DOUBLE-BUFFER COLLAPSE
+    // policy used by the front-end render components (clip rect lives in raster
+    // space and flips with the buffer, same as draw_offset). Revisit together
+    // with render-to-texture support. See push_triangle() and the policy block
+    // in PSX2DRenderComponent.cpp.
+    bool clip_to_draw_area_{false};
     bool skip_fill_rect_{false};
 
     uint32_t vblank_div_{0};

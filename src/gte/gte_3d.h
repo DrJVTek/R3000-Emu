@@ -216,6 +216,16 @@ class Gte3D : public IGte
     uint32_t data_[32]{};
     uint32_t ctrl_[32]{};
 
+    // Per-game render quirk: force OFX/OFY to zero in projection math.
+    // See gte::Gte::set_force_geom_offset_zero() in gte.h for the full
+    // policy comment. The shadow GTE must mirror the primary GTE for the
+    // 3D reconstruction path to stay consistent.
+    bool force_geom_offset_zero_{false};
+  public:
+    void set_force_geom_offset_zero(bool enabled) { force_geom_offset_zero_ = enabled; }
+    bool force_geom_offset_zero() const { return force_geom_offset_zero_; }
+  private:
+
     // Vertex cache + SXY lookup tables (double-buffered)
     uint32_t vertex_index_{0};
     int16_t last_normal_[3]{0, 0, 0};

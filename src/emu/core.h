@@ -36,6 +36,7 @@ class Core
         int pretty{0};
         int trace_io{0};
         int hle_vectors{0}; // opt-in only
+        int text_hle{0}; // text-only BIOS/SDK interception (printf/putchar)
 
         int stop_on_high_ram{0};
         int stop_on_bios_to_ram_nop{0};
@@ -72,8 +73,9 @@ class Core
     void set_text_out(std::FILE* f);
     void set_text_io_sink(const flog::Sink& s, const flog::Clock& c);
 
-    // Callback for BIOS putchar (B(3Dh)). Called for each character.
-    using PutcharCallback = void(*)(char ch, void* user);
+    // Callback for BIOS text output. Called for each character.
+    // bFromPrintf=true for A(3Fh) printf, false for B(3Dh) putchar.
+    using PutcharCallback = void(*)(char ch, bool bFromPrintf, void* user);
     void set_putchar_callback(PutcharCallback cb, void* user);
 
     // Insert disc and GPU dump configuration (optional).
@@ -97,6 +99,12 @@ class Core
 
     // Dev kit boot: load PS-EXE from file, set PC/GP/SP, init HLE kernel. Requires init_from_image() first.
     bool fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap);
+
+    // Set PSX EXE parameters (injected into scratchpad RAM before the EXE starts).
+    // The ints are written at 0x1F800200 and $a1 is pointed there at boot.
+    // Used for devkit mode to pass args to PSX demos (e.g. TREX attract mode).
+    void set_psx_params(const int32_t* params, uint32_t count);
+    const std::vector<int32_t>& psx_params() const { return psx_params_; }
 
     // Step execution (1 instruction). Valid after init_from_image().
     r3000::Cpu::StepResult step();
@@ -134,6 +142,17 @@ class Core
     bool psx3d_analysis_active() const { return psx3d_mode_mgr_.analysis_active(); }
     uint32_t request_psx3d_analysis_refresh(const char* reason, const char* scope);
     void set_psx3d_profile_path_override(const char* path);
+
+    // Public devkit helper: derive the psx3dprof game_id from an EXE path
+    // and load the corresponding profile (if any). Used by CLI --load and
+    // can be reused by any host that loads an EXE manually without going
+    // through Core::fast_boot_from_exe(). Idempotent if already loaded.
+    void load_psx3d_profile_for_exe(const char* exe_path)
+    {
+        set_psx3d_profile_identity_from_path(exe_path);
+        try_load_psx3d_profile();
+    }
+
     Psx3dModeManager& psx3d_mode_manager() { return psx3d_mode_mgr_; }
     const std::string& psx3d_profile_path() const { return psx3d_profile_path_; }
     const std::string& psx3d_profile_game_id() const { return psx3d_profile_game_id_; }
@@ -212,6 +231,10 @@ class Core
     std::string psx3d_profile_game_id_{};
     std::string psx3d_profile_path_{};
     std::string psx3d_profile_root_dir_{};
+    // Last loaded profile data — kept so live edits (devkit mode) can mutate
+    // it and try_save_psx3d_profile() can serialize the full state back to
+    // disk without re-deriving fields.
+    Psx3dProfileData psx3d_profile_data_{};
     bool psx3d_profile_loaded_{false};
     bool psx3d_profile_dirty_{false};
     bool psx3d_profile_override_{false};
@@ -220,6 +243,9 @@ class Core
     uint64_t psx3d_cam_serial_seen_{0};
     std::vector<uint32_t> psx3d_last_nohint_top_pcs_{};
     std::vector<uint32_t> psx3d_step_hook_pcs_{};
+
+    // PSX EXE params (devkit mode, written to scratchpad at boot)
+    std::vector<int32_t> psx_params_{};
 };
 
 } // namespace emu

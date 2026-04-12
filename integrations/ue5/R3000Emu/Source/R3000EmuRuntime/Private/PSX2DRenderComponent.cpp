@@ -309,7 +309,46 @@ void UPSX2DRenderComponent::RebuildMesh()
     const FVector FaceNormal(-1.0f, 0.0f, 0.0f);
     const FProcMeshTangent FaceTangent(0.0f, 1.0f, 0.0f);
 
-    // PS1→UE5 coordinate transform
+    // ─────────────────────────────────────────────────────────────────────
+    // PS1 → UE5 coordinate transform — DOUBLE-BUFFER COLLAPSE POLICY
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // We DELIBERATELY ignore the two pieces of state that drive PS1
+    // double-buffering and render-targets:
+    //
+    //   1. draw_env.offset_x / offset_y  (where the GPU writes in VRAM)
+    //   2. display.display_x / display_y (where the CRTC scans out from VRAM)
+    //
+    // The core already stores DrawCmd.v[].x/y as raw GP0 polygon coords (see
+    // the contract on gpu::DrawVertex in src/gpu/gpu.h), so we just feed those
+    // straight through. Concretely this means:
+    //
+    //   • Both halves of a double-buffered game (the typical pattern: draw to
+    //     VRAM(0,0) one frame, draw to VRAM(0,256) the next, flip display_y in
+    //     sync) collapse onto the SAME logical frame in UE world space. The
+    //     mesh becomes stable across the buffer flip — visually you only ever
+    //     see "one screen".
+    //
+    //   • Pivot is *always* at the centre of the logical screen
+    //     (width/2, height/2). The component origin maps to the screen centre
+    //     so the 2D layer can be placed inside a 3D world (billboards,
+    //     spatial UI, etc.) without any extra offset. There is no flag — the
+    //     same convention applies to the 3D component and to PSXSurface.
+    //
+    // ── KNOWN LIMITATION: render-to-texture (RTT) ────────────────────────
+    // A game that renders into a sub-region of VRAM that is NOT the current
+    // display window (e.g. a reflection map, a UI sub-texture, a mini-map
+    // baked into a texture page) will have its draw_offset point OUTSIDE
+    // (display_x..display_x+width, display_y..display_y+height). With the
+    // current policy that RTT geometry will get smashed onto the main frame.
+    // This is a known TODO — once we hit a real RTT case, we'll detect it by
+    // comparing (offset + bbox) against the display window and route those
+    // draws to a separate render section.
+    //
+    // DO NOT ADD display_x/y or offset_x/y BACK INTO THIS TRANSFORM.
+    // If you think you need them, you almost certainly want to handle the
+    // RTT case explicitly upstream instead.
+    // ─────────────────────────────────────────────────────────────────────
     const gpu::DisplayConfig& Disp = DrawList.display;
     const float OriginX = 0.5f * static_cast<float>(Disp.width());
     const float OriginY = 0.5f * static_cast<float>(Disp.height());
@@ -319,7 +358,7 @@ void UPSX2DRenderComponent::RebuildMesh()
     {
         const char* HdNames[] = {"720p", "1080p", "1440p", "4K", "Custom"};
         const char* HdName = (static_cast<int>(HdDefinition) < 5) ? HdNames[static_cast<int>(HdDefinition)] : "?";
-        emu::logf(emu::LogLevel::info, "GPU", "MeshRebuild: %d tris | disp=(%u,%u)+(%ux%u) | EffScale=%.3f (HD=%s) Origin=(%.1f,%.1f)",
+        emu::logf(emu::LogLevel::info, "GPU", "MeshRebuild: %d tris | disp=(%u,%u)derecated+(%ux%u) | EffScale=%.3f (HD=%s) Origin=(%.1f,%.1f)",
             NumCmds, Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
             EffScale, HdName, OriginX, OriginY);
     }

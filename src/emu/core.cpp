@@ -104,6 +104,34 @@ static std::string psx3d_normalize_boot_game_id(const char* boot_name)
     while (!stem.empty() && (stem.back() == '.' || stem.back() == ' '))
         stem.pop_back();
 
+    // Strip well-known PS-X executable file extensions for devkit / --load
+    // mode. We do this AFTER the trailing-dot strip and BEFORE the canonical
+    // SCUS detection so that:
+    //   - TREX.EXE   → TREX        (devkit)
+    //   - SLES_004.69 → SLES-004.69 (CD boot, kept by canonical match below)
+    // The canonical SCUS form has digits after the dot, never letters, so
+    // there is no risk of accidentally matching the extension strip.
+    auto ends_with_ci = [](const std::string& haystack, const char* suffix) -> bool {
+        const size_t hl = haystack.size();
+        const size_t sl = std::strlen(suffix);
+        if (sl > hl) return false;
+        for (size_t i = 0; i < sl; ++i)
+            if (haystack[hl - sl + i] != suffix[i])  // both already upper-case
+                return false;
+        return true;
+    };
+    static const char* const kExeExtensions[] = { ".EXE", ".PSX", ".PS-X", ".PS1", ".PSEXE" };
+    for (const char* ext : kExeExtensions)
+    {
+        if (ends_with_ci(stem, ext))
+        {
+            stem.resize(stem.size() - std::strlen(ext));
+            break;
+        }
+    }
+    while (!stem.empty() && (stem.back() == '.' || stem.back() == ' '))
+        stem.pop_back();
+
     // Canonical PSX executable codes are typically of the form:
     //   SCUS_943.00  -> SCUS-943.00
     //   SLUS_000.00  -> SLUS-000.00
@@ -364,6 +392,7 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     cpu_->set_pretty(opt.pretty ? 1 : 0);
     cpu_->set_trace_io(opt.trace_io ? 1 : 0);
     cpu_->set_hle_vectors(opt.hle_vectors ? 1 : 0);
+    cpu_->set_text_hle(opt.text_hle ? 1 : 0);
 
     // GPU generates real VBlanks at ~50Hz. Disable HLE pseudo-vblank (~333Hz).
     cpu_->set_use_gpu_vblank(1);
@@ -1086,6 +1115,24 @@ void Core::try_load_psx3d_profile()
         cpu_->restore_camera_candidates(cams);
         psx3d_cam_serial_seen_ = cpu_->camera_candidates_serial();
     }
+
+    // Propagate render quirks to the GTE. Each quirk is set unconditionally
+    // (true OR false) so that loading a profile with the quirk explicitly
+    // disabled overrides any previous toggle that may have been left on
+    // (e.g. via CLI flag or UE5 UPROPERTY at boot).
+    if (cpu_)
+        cpu_->gte().set_force_geom_offset_zero(data.quirks.force_gte_geom_offset_zero);
+    gte_3d_.set_force_geom_offset_zero(data.quirks.force_gte_geom_offset_zero);
+    if (data.quirks.force_gte_geom_offset_zero)
+    {
+        emu::logf(
+            emu::LogLevel::warn,
+            "PSX3D",
+            "profile quirk applied: force_gte_geom_offset_zero=1 (game=%s)",
+            data.game_id.empty() ? "(none)" : data.game_id.c_str());
+    }
+
+    psx3d_profile_data_ = data;  // keep for live edit + save round-trip
     psx3d_profile_loaded_ = true;
     psx3d_profile_dirty_ = false;
     emu::logf(
@@ -1113,6 +1160,9 @@ void Core::try_save_psx3d_profile()
     Psx3dProfileStore::load(psx3d_profile_path_, data);
     data.game_id = psx3d_profile_game_id_.empty() ? "unknown" : psx3d_profile_game_id_;
     data.hotspots = provenance_profiler_.snapshot();
+    // Quirks: prefer the in-memory version (which may have been mutated via
+    // devkit live-edit) over the freshly-reloaded disk values.
+    data.quirks = psx3d_profile_data_.quirks;
     data.analyzed_pcs.reserve(psx3d_analyzed_pcs_.size());
     for (uint32_t pc : psx3d_analyzed_pcs_)
         data.analyzed_pcs.push_back(pc);
@@ -1375,6 +1425,16 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
     return true;
 }
 
+void Core::set_psx_params(const int32_t* params, uint32_t count)
+{
+    psx_params_.clear();
+    if (params && count > 0)
+    {
+        psx_params_.assign(params, params + count);
+        emu::logf(emu::LogLevel::info, "CORE", "PSX params set: %u ints", count);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dev kit boot: load PS-EXE from file + HLE kernel init
 // ---------------------------------------------------------------------------
@@ -1437,6 +1497,27 @@ bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
         w32(0x108, 0x80000000u | kPcbAddr);
 
         cpu_->set_hle_tcb_addr(kTcbAddr);
+    }
+
+    // Inject PSX params into scratchpad RAM if set.
+    // The params are written as int32 values at physical address 0x1F800200
+    // (scratchpad RAM, 1KB, always mapped). $a1 is pointed at 0x1F800200
+    // so the EXE's main() receives them as its second argument.
+    // TREX expects: param[0]=mode (1=attract), param[1]=timeout_sec.
+    if (!psx_params_.empty() && bus_)
+    {
+        constexpr uint32_t kScratchpadBase = 0x1F80'0200u;
+        r3000::Bus::MemFault mf{};
+        for (uint32_t i = 0; i < (uint32_t)psx_params_.size() && i < 32; ++i)
+        {
+            bus_->write_u32(kScratchpadBase + i * 4, (uint32_t)psx_params_[i], mf);
+        }
+        cpu_->set_gpr(4, (uint32_t)psx_params_.size());  // $a0 = count
+        cpu_->set_gpr(5, kScratchpadBase);                // $a1 = pointer to params
+        emu::logf(emu::LogLevel::info, "CORE",
+            "PSX params injected: %u ints at 0x%08X ($a0=%u $a1=0x%08X)",
+            (unsigned)psx_params_.size(), kScratchpadBase,
+            (unsigned)psx_params_.size(), kScratchpadBase);
     }
 
     emu::logf(emu::LogLevel::info, "CORE", "Dev kit boot: %s PC=0x%08X SP=0x%08X",
