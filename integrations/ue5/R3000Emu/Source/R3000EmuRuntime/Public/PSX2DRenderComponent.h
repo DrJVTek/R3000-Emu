@@ -7,8 +7,9 @@
 class UTexture2D;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class AActor;
 
-namespace gpu { class Gpu; }
+namespace gpu { class Gpu; struct DisplayConfig; }
 
 /** HD output resolution presets for uniform scaling. */
 UENUM(BlueprintType)
@@ -153,6 +154,22 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Debug")
     bool bDebugMeshLog{false};
 
+    /** Show a UE-world camera actor representing how the PSX 2D plane is being viewed. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Debug")
+    bool bShowPsxCameraDebug{false};
+
+    /** Optional existing actor to reuse as the 2D debug camera. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Debug")
+    TSoftObjectPtr<AActor> PsxCameraDebugActor;
+
+    /** Auto-spawn a debug actor when no explicit actor is assigned. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Debug")
+    bool bAutoSpawnPsxCameraDebugActor{true};
+
+    /** Draw the logical screen frame in UE world space for camera/alignment debugging. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU|Debug")
+    bool bShowPsxScreenFrameDebug{false};
+
     /**
      * PS1 GPU materials — 5 slots for opaque + 4 semi-transparency blend modes.
      * All materials share the same HLSL/vertex data layout (see UV docs below).
@@ -253,6 +270,10 @@ public:
 private:
     void RebuildMesh();
     void EnsureMaterialInstances();
+    void UpdatePsxCameraDebugActor();
+    void DrawPsxScreenFrameDebug() const;
+    AActor* ResolvePsxCameraDebugActor();
+    float GetEffectivePixelScaleForDisplay(const gpu::DisplayConfig* Disp) const;
 
     gpu::Gpu* Gpu_{nullptr};
 
@@ -278,4 +299,6 @@ private:
     float GpuFps_{0.0f};
     double LastGpuFpsTime_{0.0};
     uint32 LastGpuFpsFrame_{0};
+    UPROPERTY(Transient)
+    AActor* SpawnedPsxCameraDebugActor_{nullptr};
 };

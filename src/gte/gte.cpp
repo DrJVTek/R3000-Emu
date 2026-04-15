@@ -332,7 +332,6 @@ void Gte::push_sxy(int32_t sx, int32_t sy)
     data_[D_SXY0] = data_[D_SXY1];
     data_[D_SXY1] = data_[D_SXY2];
     data_[D_SXY2] = val;
-    data_[D_SXYP] = val;
 }
 
 void Gte::push_sz(int32_t sz)
@@ -639,6 +638,29 @@ void Gte::rtps_internal(const int32_t V[3], int sf, int lm, bool last)
     const int64_t Sx = (int64_t)quotient * (int64_t)ir1 + ofx;
     const int64_t Sy = (int64_t)quotient * (int64_t)ir2 + ofy;
 
+    if (rtps_trace_count_ < 3)
+    {
+        RtpsTraceVertex& trace = rtps_trace_[rtps_trace_count_++];
+        trace.vx = V[0];
+        trace.vy = V[1];
+        trace.vz = V[2];
+        trace.mac1_raw = x;
+        trace.mac2_raw = y;
+        trace.mac3_raw = z;
+        trace.ir1 = ir1;
+        trace.ir2 = ir2;
+        trace.ir3_z = (int32_t)(int16_t)(data_[D_IR3] & 0xFFFFu);
+        trace.sz3 = sz3;
+        trace.h = h;
+        trace.quotient = quotient;
+        trace.sx_accum = Sx;
+        trace.sy_accum = Sy;
+        trace.sx_preclamp = (int32_t)(Sx >> 16);
+        trace.sy_preclamp = (int32_t)(Sy >> 16);
+        trace.flag_before_push = flag_;
+        trace.last = last;
+    }
+
     // Check MAC0 overflow on Sx and Sy (DuckStation: CheckMACOverflow<0>)
     // FLAG bit 13 (MAC0_OFLOW_POS) is in error bits → sets bit 31.
     // Games checking FLAG after RTPS use this to reject overflowed vertices.
@@ -726,6 +748,7 @@ void Gte::cmd_rtps(uint32_t cmd)
 {
     const int sf = (cmd >> 19) & 1;
     const int lm = (cmd >> 10) & 1;
+    rtps_trace_count_ = 0;
     const int32_t V[3] = { vx(0), vy(0), vz(0) };
     rtps_internal(V, sf, lm, true);
 
@@ -739,6 +762,7 @@ void Gte::cmd_rtpt(uint32_t cmd)
     // Uses push_sxy shift register naturally (3 pushes → SXY0=V0, SXY1=V1, SXY2=V2).
     const int sf = (cmd >> 19) & 1;
     const int lm = (cmd >> 10) & 1;
+    rtps_trace_count_ = 0;
 
     const int32_t V0[3] = { vx(0), vy(0), vz(0) };
     const int32_t V1[3] = { vx(1), vy(1), vz(1) };
@@ -1503,6 +1527,68 @@ int Gte::execute(uint32_t cop2_instruction)
     if (flag_ & FLAG_ERROR_BITS)
         flag_ |= (1u << 31);
     ctrl_[C_FLAG] = flag_;
+
+    // Targeted debug for TREX-style exploding polys:
+    // capture projected vertices that hit screen saturation without tripping
+    // the "fatal" FLAG sign bit that PsyQ checks before emitting a packet.
+    if (funct == 0x01 || funct == 0x30)
+    {
+        const auto unpack_sxy = [](uint32_t packed, int32_t& sx, int32_t& sy) {
+            sx = (int16_t)(packed & 0xFFFFu);
+            sy = (int16_t)((packed >> 16) & 0xFFFFu);
+        };
+        int32_t sx0, sy0, sx1, sy1, sx2, sy2;
+        unpack_sxy(data_[D_SXY0], sx0, sy0);
+        unpack_sxy(data_[D_SXY1], sx1, sy1);
+        unpack_sxy(data_[D_SXY2], sx2, sy2);
+        const bool extreme =
+            (std::abs(sx0) >= 900 || std::abs(sy0) >= 900 ||
+             std::abs(sx1) >= 900 || std::abs(sy1) >= 900 ||
+             std::abs(sx2) >= 900 || std::abs(sy2) >= 900);
+        const bool sxy_sat = (flag_ & (FLAG_SX2_SAT | FLAG_SY2_SAT)) != 0;
+        const bool fatal = (flag_ & (1u << 31)) != 0;
+        if (extreme && (!fatal || sxy_sat))
+        {
+            static uint32_t extreme_proj_logs = 0;
+            if (extreme_proj_logs < 200)
+            {
+                ++extreme_proj_logs;
+                emu::logf(emu::LogLevel::warn, "GTE",
+                    "EXTREME_%s #%u flag=0x%08X fatal=%u sxy_sat=%u sxy0=(%d,%d) sxy1=(%d,%d) sxy2=(%d,%d) "
+                    "sz=(%u,%u,%u) of=(%d,%d) h=%u",
+                    (funct == 0x30) ? "RTPT" : "RTPS",
+                    extreme_proj_logs,
+                    flag_, fatal ? 1u : 0u, sxy_sat ? 1u : 0u,
+                    sx0, sy0, sx1, sy1, sx2, sy2,
+                    data_[D_SZ1], data_[D_SZ2], data_[D_SZ3],
+                    (int32_t)ctrl_[C_OFX], (int32_t)ctrl_[C_OFY],
+                    ctrl_[C_H] & 0xFFFFu);
+
+                for (int i = 0; i < rtps_trace_count_ && i < 3; ++i)
+                {
+                    const RtpsTraceVertex& trace = rtps_trace_[i];
+                    emu::logf(emu::LogLevel::warn, "GTE",
+                        "EXTREME_%s_V%d #%u in=(%d,%d,%d) mac=(%lld,%lld,%lld) ir=(%d,%d,%d) "
+                        "sz3=%u h=%u q=0x%05X sxy_accum=(%lld,%lld) sxy_preclamp=(%d,%d) "
+                        "flag_before_push=0x%08X last=%u",
+                        (funct == 0x30) ? "RTPT" : "RTPS",
+                        i,
+                        extreme_proj_logs,
+                        trace.vx, trace.vy, trace.vz,
+                        (long long)trace.mac1_raw,
+                        (long long)trace.mac2_raw,
+                        (long long)trace.mac3_raw,
+                        trace.ir1, trace.ir2, trace.ir3_z,
+                        trace.sz3, trace.h, trace.quotient,
+                        (long long)trace.sx_accum,
+                        (long long)trace.sy_accum,
+                        trace.sx_preclamp, trace.sy_preclamp,
+                        trace.flag_before_push,
+                        trace.last ? 1u : 0u);
+                }
+            }
+        }
+    }
 
     // POST-command log for AVSZ3: capture OTZ result + FLAG
     if (funct == 0x2D)

@@ -126,6 +126,28 @@ class Bus
         watch_ram_u32_read_seen_ = 0;
     }
 
+    void set_watch_ram_range(uint32_t phys_addr, uint32_t size, int enabled)
+    {
+        watch_ram_range_phys_ = phys_addr;
+        watch_ram_range_size_ = size;
+        watch_ram_range_enabled_ = (enabled && size) ? 1 : 0;
+    }
+
+    void set_stack_watch(uint32_t phys_addr, uint32_t size, int enabled, int target_value_enabled, uint32_t target_value)
+    {
+        stack_watch_phys_ = phys_addr;
+        stack_watch_size_ = size;
+        stack_watch_enabled_ = (enabled && size) ? 1 : 0;
+        stack_watch_target_enabled_ = (target_value_enabled && size) ? 1 : 0;
+        stack_watch_target_value_ = target_value;
+        stack_watch_log_count_ = 0;
+        stack_watch_last_writer_valid_ = 0;
+    }
+
+    void dump_stack_watch_context(const char* reason) const;
+
+    void request_gpu_dma_dump(const char* reason);
+
     // PS1 interrupt controller (I_STAT/I_MASK): bits pending & mask.
     // Retourne (I_STAT & I_MASK).
     uint32_t irq_pending_masked() const;
@@ -233,9 +255,11 @@ class Bus
 
   private:
     void dma_finish(int ch);
+    void tick_dma_latencies(uint32_t cycles);
     // Execute the DMA3 (CDROM→RAM) transfer using current dma_[3].madr/bcr.
     // Called directly when FIFO is ready, or deferred when FIFO was empty at trigger time.
     void exec_dma3_transfer();
+    void dump_last_gpu_dma_linked_list(const char* reason);
     bool is_in_ram(uint32_t addr, uint32_t size) const;
     bool is_in_range(uint32_t addr, uint32_t base, uint32_t size, uint32_t access_size) const;
     void log_mem(const char* op, uint32_t addr, uint32_t v) const;
@@ -327,6 +351,10 @@ class Bus
     void timer_update_counting(int ch);
     // timer_compute_count declared above in public section
     void log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size);
+    void log_watch_ram_range(const char* op, uint32_t addr, uint32_t phys, uint32_t value, uint32_t size);
+    void log_stack_watch(const char* op, uint32_t addr, uint32_t phys, uint32_t size, uint32_t old_word, uint32_t new_word);
+    bool stack_watch_overlaps(uint32_t phys, uint32_t size, uint32_t& watched_word_addr) const;
+    uint32_t read_ram_word_debug(uint32_t phys) const;
 
     uint8_t scratch_[kScratchSize]{};
     uint8_t io_[kIoSize]{};
@@ -410,6 +438,8 @@ class Bus
     };
 
     DmaChannel dma_[7]{};
+    uint32_t dma_finish_delay_[7]{};
+    uint8_t dma_finish_pending_[7]{};
     uint32_t dpcr_{0};
     uint32_t dicr_{0};
     uint8_t dma_irq_prev_{0};
@@ -486,6 +516,31 @@ class Bus
     uint32_t cpu_pc_{0};
     uint32_t cpu_epc_{0};
     uint32_t cpu_cause_{0};
+    uint32_t watch_ram_range_phys_{0};
+    uint32_t watch_ram_range_size_{0};
+    int watch_ram_range_enabled_{0};
+    uint32_t last_dma2_ll_start_node_{0};
+    uint32_t gpu_dma_dump_count_{0};
+    uint32_t watch_ram_range_log_count_{0};
+    uint32_t stack_watch_phys_{0};
+    uint32_t stack_watch_size_{0};
+    int stack_watch_enabled_{0};
+    int stack_watch_target_enabled_{0};
+    uint32_t stack_watch_target_value_{0};
+    uint32_t stack_watch_log_count_{0};
+    struct StackWatchLastWriter
+    {
+        uint32_t addr{0};
+        uint32_t phys{0};
+        uint32_t size{0};
+        uint32_t pc{0};
+        uint32_t old_word{0};
+        uint32_t new_word{0};
+        uint32_t hit_count{0};
+        uint8_t matched_target{0};
+        char op[8]{};
+    } stack_watch_last_writer_{};
+    int stack_watch_last_writer_valid_{0};
     uint32_t watch_ram_u32_phys_{0};
     int watch_ram_u32_enabled_{0};
     uint32_t watch_ram_u32_last_{0};
@@ -502,6 +557,7 @@ class Bus
     uint8_t bios_post_60643_exit_logged_{0};
     uint32_t stage67_watch_log_count_{0};
     uint32_t stage67_mmio_log_count_{0};
+    uint32_t trex_gpu_wait_log_count_{0};
     uint32_t code_overlay_log_count_{0};
     uint32_t code_stage54_log_count_{0};
     uint32_t code_stage67win_log_count_{0};

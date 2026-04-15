@@ -296,7 +296,6 @@ void Gte3D::push_sxy(int32_t sx, int32_t sy)
     data_[D_SXY0] = data_[D_SXY1];
     data_[D_SXY1] = data_[D_SXY2];
     data_[D_SXY2] = val;
-    data_[D_SXYP] = val;
 }
 
 void Gte3D::push_sz(int32_t sz)

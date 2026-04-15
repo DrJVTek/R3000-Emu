@@ -7,6 +7,7 @@
 class UTexture2D;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class AActor;
 
 namespace gpu { class Gpu; class Gpu3D; }
 
@@ -140,6 +141,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU3D|Debug")
     bool bDebug3DLog{false};
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU3D|Debug")
+    bool bShowPsxCameraDebug{false};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU3D|Debug")
+    TSoftObjectPtr<AActor> PsxCameraDebugActor;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GPU3D|Debug")
+    bool bAutoSpawnPsxCameraDebugActor{true};
+
     // ------- 2D Materials (sections 0-4: HUD/UI rendered in 3D space) -------
 
     /** 2D opaque material (section 0). Must have "VramTexture" parameter. */
@@ -187,6 +197,8 @@ public:
 private:
     void RebuildMesh3D();
     void EnsureMaterialInstances();
+    void UpdatePsxCameraDebugActor();
+    AActor* ResolvePsxCameraDebugActor();
 
     gpu::Gpu* Gpu_{nullptr};
     gpu::Gpu3D* Gpu3D_{nullptr}; // Shadow GPU (preferred source for 3D data)
@@ -217,4 +229,6 @@ private:
 
     bool bMeshDetachedForWorldLock_{false};
     FPSX3DTrackingController* TrackingController_{nullptr};
+    UPROPERTY(Transient)
+    AActor* SpawnedPsxCameraDebugActor_{nullptr};
 };

@@ -1,9 +1,13 @@
 #include "PSX3DRenderComponent.h"
+#include "PSXCameraDebugActor.h"
 #include "PSX3DTrackingController.h"
 
+#include "Engine/World.h"
 #include "Engine/Texture2D.h"
+#include "GameFramework/Actor.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Logging/LogMacros.h"
+#include "Math/RotationMatrix.h"
 
 #include "gpu/gpu.h"
 #include "gpu/gpu_3d.h"
@@ -23,6 +27,78 @@ DEFINE_LOG_CATEGORY_STATIC(LogR3000Gpu3D, Log, All);
 #define GPU3D_NOISE_UELOG(Verbosity, Format, ...) UE_LOG(LogR3000Gpu3D, Verbosity, Format, ##__VA_ARGS__)
 #define GPU3D_NOISE_LOGF(...) emu::logf(__VA_ARGS__)
 #endif
+
+namespace
+{
+static FVector MapPsxToUeVector(const FVector& V)
+{
+    return FVector(V.Y, -V.X, V.Z);
+}
+
+static bool TryBuildPsxCameraLocalTransform(
+    const gpu::Gpu3D* Gpu3D,
+    float WorldScale,
+    const FVector& WorldOffset,
+    FTransform& OutTransform,
+    FString* OutDebugText = nullptr)
+{
+    if (!Gpu3D)
+        return false;
+
+    gpu::FrameDrawList DrawList;
+    Gpu3D->copy_ready_draw_list(DrawList);
+
+    for (const gpu::DrawCmd3D& Cmd3D : DrawList.cmds_3d)
+    {
+        if (Cmd3D.origin != gpu::PrimOrigin::origin_3d)
+            continue;
+
+        const gte::GteTransform& T = Cmd3D.transform;
+        const FVector BasisX(
+            static_cast<float>(T.rt[0]) / 4096.0f,
+            static_cast<float>(T.rt[3]) / 4096.0f,
+            static_cast<float>(T.rt[6]) / 4096.0f);
+        const FVector BasisY(
+            static_cast<float>(T.rt[1]) / 4096.0f,
+            static_cast<float>(T.rt[4]) / 4096.0f,
+            static_cast<float>(T.rt[7]) / 4096.0f);
+        const FVector BasisZ(
+            static_cast<float>(T.rt[2]) / 4096.0f,
+            static_cast<float>(T.rt[5]) / 4096.0f,
+            static_cast<float>(T.rt[8]) / 4096.0f);
+        const FVector Translation(
+            static_cast<float>(T.tr[0]),
+            static_cast<float>(T.tr[1]),
+            static_cast<float>(T.tr[2]));
+
+        const FVector CameraPosPsx(
+            -FVector::DotProduct(BasisX, Translation),
+            -FVector::DotProduct(BasisY, Translation),
+            -FVector::DotProduct(BasisZ, Translation));
+
+        const FVector Forward = MapPsxToUeVector(BasisZ).GetSafeNormal();
+        const FVector Up = MapPsxToUeVector(BasisY).GetSafeNormal();
+        if (Forward.IsNearlyZero() || Up.IsNearlyZero())
+            continue;
+
+        const FVector CameraPosUe = MapPsxToUeVector(CameraPosPsx) * WorldScale + WorldOffset;
+        OutTransform = FTransform(
+            FRotationMatrix::MakeFromXZ(Forward, Up).ToQuat(),
+            CameraPosUe);
+        if (OutDebugText)
+        {
+            const uint16 NearSz = FMath::Min3(Cmd3D.sz[0], Cmd3D.sz[1], Cmd3D.sz[2]);
+            *OutDebugText = FString::Printf(
+                TEXT("PSX Cam\nnear(sz)=%u\notz=%u"),
+                static_cast<unsigned>(NearSz),
+                static_cast<unsigned>(Cmd3D.ot_z));
+        }
+        return true;
+    }
+
+    return false;
+}
+} // namespace
 
 // ===================================================================
 // Constructor
@@ -52,9 +128,78 @@ void UPSX3DRenderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     Gpu_ = nullptr;
     Gpu3D_ = nullptr;
+    if (SpawnedPsxCameraDebugActor_)
+    {
+        SpawnedPsxCameraDebugActor_->Destroy();
+        SpawnedPsxCameraDebugActor_ = nullptr;
+    }
     delete TrackingController_;
     TrackingController_ = nullptr;
     Super::EndPlay(EndPlayReason);
+}
+
+AActor* UPSX3DRenderComponent::ResolvePsxCameraDebugActor()
+{
+    if (PsxCameraDebugActor.IsValid())
+        return PsxCameraDebugActor.Get();
+
+    if (SpawnedPsxCameraDebugActor_)
+        return SpawnedPsxCameraDebugActor_;
+
+    if (!bAutoSpawnPsxCameraDebugActor || !GetWorld())
+        return nullptr;
+
+    FActorSpawnParameters Params;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    Params.Name = TEXT("PSXCameraDebug3D");
+    SpawnedPsxCameraDebugActor_ = GetWorld()->SpawnActor<APSXCameraDebugActor>(
+        APSXCameraDebugActor::StaticClass(),
+        GetComponentLocation(),
+        GetComponentRotation(),
+        Params);
+    return SpawnedPsxCameraDebugActor_;
+}
+
+void UPSX3DRenderComponent::UpdatePsxCameraDebugActor()
+{
+    if (!bShowPsxCameraDebug)
+    {
+        if (PsxCameraDebugActor.IsValid())
+            PsxCameraDebugActor.Get()->SetActorHiddenInGame(true);
+        if (SpawnedPsxCameraDebugActor_)
+            SpawnedPsxCameraDebugActor_->SetActorHiddenInGame(true);
+        return;
+    }
+
+    AActor* CameraActor = ResolvePsxCameraDebugActor();
+    if (!CameraActor)
+        return;
+
+    CameraActor->SetActorHiddenInGame(false);
+
+    FTransform LocalCameraTransform;
+    FString CameraDebugText(TEXT("PSX Cam\nnear(sz)=n/a"));
+    const bool bUseApproxWorldCamera =
+        bApplyGteTransform && bApproxWorldFromFrameRef &&
+        TryBuildPsxCameraLocalTransform(Gpu3D_, WorldScale, WorldOffset, LocalCameraTransform, &CameraDebugText);
+
+    if (bUseApproxWorldCamera)
+    {
+        const FTransform ComponentTransform = GetComponentTransform();
+        CameraActor->SetActorTransform(FTransform(
+            ComponentTransform.TransformRotation(LocalCameraTransform.GetRotation()),
+            ComponentTransform.TransformPosition(LocalCameraTransform.GetLocation())));
+    }
+    else
+    {
+        CameraActor->SetActorTransform(FTransform(GetComponentQuat(), GetComponentLocation() + WorldOffset));
+    }
+
+    if (APSXCameraDebugActor* DebugActor = Cast<APSXCameraDebugActor>(CameraActor))
+    {
+        DebugActor->SetDebugColor(FColor(255, 170, 0));
+        DebugActor->SetDebugText(CameraDebugText);
+    }
 }
 
 // ===================================================================
@@ -201,6 +346,7 @@ void UPSX3DRenderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
     // Toggle visibility based on bEnabled
     if (!bEnabled)
     {
+        UpdatePsxCameraDebugActor();
         if (MeshComp_->IsVisible())
             MeshComp_->SetVisibility(false);
         return;
@@ -212,6 +358,7 @@ void UPSX3DRenderComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
     // Rebuild every tick — no frame gate, no VRAM sync needed.
     // Positions are double-buffered in Gpu3D (copy_ready_draw_list).
     RebuildMesh3D();
+    UpdatePsxCameraDebugActor();
 }
 
 // ===================================================================
@@ -278,18 +425,13 @@ void UPSX3DRenderComponent::RebuildMesh3D()
     // face_B / V3 hint exists. Rewriting quad pairs again here can fold real
     // GT4 grids, including Ridge Racer's menu flag.
 
-    // Display resolution for 2D centering.
-    // Normalize to a fixed reference (320×240) so that HD (640×480) and SD (320×240)
-    // content renders at the same physical size in UE5. Screen coords are scaled
-    // proportionally: a 640×480 coord is divided by 2 to match 320×240 space.
-    const float RawW = static_cast<float>(DL.display.width());
-    const float RawH = static_cast<float>(DL.display.height());
+    // 2D primitives coming from the GPU bridge use the same logical GP0 coords
+    // as PSX2DRenderComponent: raw screen-space around the projection center,
+    // without draw offset and without scan-out half-size baked in.
+    //
+    // Keep the 2D path here in the same coordinate contract as the standalone
+    // 2D renderer so the 3D projection center matches the PSX2D view.
     constexpr float RefW = 320.0f;
-    constexpr float RefH = 240.0f;
-    const float ResScale = FMath::Min(RefW / FMath::Max(1.0f, RawW),
-                                       RefH / FMath::Max(1.0f, RawH));
-    const float OriginX = 0.5f * RawW;
-    const float OriginY = 0.5f * RawH;
 
     // ── Run-based sectioning (same approach as 2D) ──────────────────
     struct RunSection
@@ -325,8 +467,7 @@ void UPSX3DRenderComponent::RebuildMesh3D()
     float EffDepthFront = Depth2DFront;
     if (bAutoScale2D && Last3DExtentY_ > 0.0f)
     {
-        // Use reference width (320) for consistent auto-scale regardless of display mode.
-        // ResScale already normalizes coords from any resolution to 320×240 space.
+        // Use reference width (320) for consistent auto-scale.
         EffScale2D = Last3DExtentY_ / RefW;
 
         // Depth range matches 3D scene with 10% margin so 2D can extend beyond
@@ -482,7 +623,7 @@ void UPSX3DRenderComponent::RebuildMesh3D()
             }
             else
             {
-                // 2D: use raw se11 screen coords centered on display resolution.
+                // 2D: use the same raw centered screen coords as PSX2DRenderComponent.
                 // The shadow GPU stores se11(raw) WITHOUT draw offset — the offset
                 // is for VRAM bank targeting (double-buffering) and varies per-primitive.
                 // This avoids the offset mismatch problem where the frame-level draw_env
@@ -497,12 +638,10 @@ void UPSX3DRenderComponent::RebuildMesh3D()
 
                 const float sx = static_cast<float>(V.x);
                 const float sy = static_cast<float>(V.y);
-                // ResScale normalizes HD (640×480) to SD (320×240) so both produce
-                // the same physical size in UE5 — (sx-Origin)*ResScale maps to [-160,160].
                 TriPos[j] = FVector(
                     Depth2D,                                         // Depth from draw order
-                    (sx - OriginX) * ResScale * EffScale2D,          // Screen X centered + normalized
-                   -(sy - OriginY) * ResScale * EffScale2D           // Screen Y centered, flipped
+                    sx * EffScale2D,                                 // Screen X centered
+                   -sy * EffScale2D                                  // Screen Y centered, flipped
                 );
             }
             TriPos[j] += WorldOffset;
@@ -639,8 +778,8 @@ void UPSX3DRenderComponent::RebuildMesh3D()
                 }
 
                 GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
-                    "  origin2D=(%.1f,%.1f) tp=0x%04X clut=0x%04X flags=0x%02X semi=%d tex=%d",
-                    OriginX, OriginY, Cmd.texpage, Cmd.clut, Cmd.flags, Cmd.semi_mode, Cmd.tex_depth);
+                    "  origin2D=raw-centered tp=0x%04X clut=0x%04X flags=0x%02X semi=%d tex=%d",
+                    Cmd.texpage, Cmd.clut, Cmd.flags, Cmd.semi_mode, Cmd.tex_depth);
             }
         }
 
@@ -726,8 +865,8 @@ void UPSX3DRenderComponent::RebuildMesh3D()
             DL.draw_env.clip_x2, DL.draw_env.clip_y2,
             DL.draw_env.texpage_raw);
         GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
-            "  Origin2D=(%.1f,%.1f) WorldScale=%.3f WorldScale2D=%.3f EffScale2D=%.4f",
-            OriginX, OriginY, WorldScale, WorldScale2D, EffScale2D);
+            "  Origin2D=raw-centered WorldScale=%.3f WorldScale2D=%.3f EffScale2D=%.4f",
+            WorldScale, WorldScale2D, EffScale2D);
         GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "  Auto2D=%d DepthRange=[%.1f..%.1f] Last3D: X=[%.1f..%.1f] ExtY=%.1f",
             bAutoScale2D ? 1 : 0, EffDepthBack, EffDepthFront,

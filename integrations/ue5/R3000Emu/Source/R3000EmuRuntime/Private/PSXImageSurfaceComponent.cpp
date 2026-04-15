@@ -30,6 +30,12 @@ static uint16 DisplayRowWords(const gpu::DisplayConfig& Disp)
     return static_cast<uint16>(((static_cast<uint32>(DisplayW) * 3u) + 1u) / 2u);
 }
 
+static bool IsImageMultiBufferedMode(EPSXSurfaceBufferingMode Mode)
+{
+    return Mode == EPSXSurfaceBufferingMode::DoubleBuffer ||
+           Mode == EPSXSurfaceBufferingMode::TripleBuffer;
+}
+
 static bool IsBufferedDisplaySizedWrite(const gpu::CpuVramWriteInfo& Write, const gpu::DisplayConfig& Disp, uint32 CurrentFrame)
 {
     if (Write.seq == 0 || !Disp.display_enabled)
@@ -46,10 +52,53 @@ static bool IsBufferedDisplaySizedWrite(const gpu::CpuVramWriteInfo& Write, cons
     return Write.w >= MinW && Write.h >= MinH;
 }
 
+static EPSXSurfaceBufferingMode InferImageBufferingMode(
+    const std::vector<gpu::CpuVramWriteInfo>& Writes,
+    const gpu::DisplayConfig& Disp,
+    uint32 CurrentFrame)
+{
+    struct FOrigin
+    {
+        uint16 X;
+        uint16 Y;
+        bool operator==(const FOrigin& Other) const { return X == Other.X && Y == Other.Y; }
+    };
+
+    TArray<FOrigin, TInlineAllocator<8>> UniqueOrigins;
+    for (const gpu::CpuVramWriteInfo& Write : Writes)
+    {
+        if (!IsBufferedDisplaySizedWrite(Write, Disp, CurrentFrame))
+            continue;
+
+        const FOrigin Origin{Write.x, Write.y};
+        bool bExists = false;
+        for (const FOrigin& Existing : UniqueOrigins)
+        {
+            if (Existing == Origin)
+            {
+                bExists = true;
+                break;
+            }
+        }
+
+        if (!bExists)
+            UniqueOrigins.Add(Origin);
+    }
+
+    if (UniqueOrigins.Num() >= 3)
+        return EPSXSurfaceBufferingMode::TripleBuffer;
+    if (UniqueOrigins.Num() == 2)
+        return EPSXSurfaceBufferingMode::DoubleBuffer;
+    if (UniqueOrigins.Num() == 1)
+        return EPSXSurfaceBufferingMode::Mono;
+    return EPSXSurfaceBufferingMode::AutoDetect;
+}
+
 static bool SelectBufferedImageWrite(
     const std::vector<gpu::CpuVramWriteInfo>& Writes,
     const gpu::DisplayConfig& Disp,
     uint32 CurrentFrame,
+    EPSXSurfaceBufferingMode BufferingMode,
     gpu::CpuVramWriteInfo& OutWrite)
 {
     bool bFound = false;
@@ -65,7 +114,7 @@ static bool SelectBufferedImageWrite(
             (Write.x == Disp.display_x) && (Write.y == Disp.display_y);
         const uint32 AreaScore = static_cast<uint32>(Write.w) * static_cast<uint32>(Write.h);
         const uint32 Score =
-            (bExactDisplayOrigin ? 1u << 30 : 0u) +
+            ((bExactDisplayOrigin && !IsImageMultiBufferedMode(BufferingMode)) ? 1u << 30 : 0u) +
             ((12u - FMath::Min(FrameDelta, 12u)) << 24) +
             FMath::Min(AreaScore, 0x00FFFFFFu);
         if (!bFound || Score >= BestScore)
@@ -139,8 +188,10 @@ bool UPSXImageSurfaceComponent::DoesCurrentDisplayMatchLatch() const
         return false;
 
     const gpu::DisplayConfig& Disp = Gpu_->display_config();
-    return Disp.display_x == LatchedDisplayX_ &&
-           Disp.display_y == LatchedDisplayY_ &&
+    const bool bMatchDisplayOrigin = !IsImageMultiBufferedMode(LatchedBufferingMode_) ||
+        (Disp.display_x == LatchedDisplayX_ && Disp.display_y == LatchedDisplayY_);
+
+    return bMatchDisplayOrigin &&
            Disp.width() == LatchedDisplayW_ &&
            Disp.height() == LatchedDisplayH_ &&
            Disp.color_24bit == LatchedDisplay24Bit_ &&
@@ -175,7 +226,8 @@ void UPSXImageSurfaceComponent::TickComponent(
     Gpu_->copy_recent_cpu_vram_writes(RecentWrites);
     gpu::CpuVramWriteInfo SelectedWrite{};
     const uint32 CurrentFrame = Gpu_->vram_frame_count();
-    const bool bBufferedCandidate = SelectBufferedImageWrite(RecentWrites, Disp, CurrentFrame, SelectedWrite);
+    const EPSXSurfaceBufferingMode BufferingMode = InferImageBufferingMode(RecentWrites, Disp, CurrentFrame);
+    const bool bBufferedCandidate = SelectBufferedImageWrite(RecentWrites, Disp, CurrentFrame, BufferingMode, SelectedWrite);
 
     if (bImageVisible_ && !DoesCurrentDisplayMatchLatch())
     {
@@ -238,15 +290,16 @@ void UPSXImageSurfaceComponent::TickComponent(
         return;
 
     LastSeenCpuWriteSeq_ = Write.seq;
-    UE_LOG(LogPSXImageSurface, VeryVerbose,
-        TEXT("Image surface cpu->vram write seq=%u vram_seq=%u frame=%u dma=(%u,%u %ux%u) disp=(%u,%u %ux%u 24=%d en=%d) eligible=%d"),
+        UE_LOG(LogPSXImageSurface, VeryVerbose,
+        TEXT("Image surface cpu->vram write seq=%u vram_seq=%u frame=%u dma=(%u,%u %ux%u) disp=(%u,%u %ux%u 24=%d en=%d) eligible=%d buffering=%d"),
         Write.seq, Write.vram_write_seq, Write.frame_count,
         Write.x, Write.y, Write.w, Write.h,
         Write.display.display_x, Write.display.display_y,
         Write.display.width(), Write.display.height(),
         Write.display.color_24bit ? 1 : 0,
         Write.display.display_enabled ? 1 : 0,
-        IsBufferedDisplaySizedWrite(Write, Disp, CurrentFrame) ? 1 : 0);
+        IsBufferedDisplaySizedWrite(Write, Disp, CurrentFrame) ? 1 : 0,
+        static_cast<int32>(BufferingMode));
 
     const int32 W = Disp.width();
     const int32 H = Disp.height();
@@ -262,6 +315,7 @@ void UPSXImageSurfaceComponent::TickComponent(
     LatchedDisplayH_ = static_cast<uint16>(H);
     LatchedDisplay24Bit_ = Disp.color_24bit;
     LatchedDisplayEnabled_ = Disp.display_enabled;
+    LatchedBufferingMode_ = BufferingMode;
 
     UploadImageFrame(W, H);
 
@@ -272,11 +326,12 @@ void UPSXImageSurfaceComponent::TickComponent(
     LastUploadedVramSeq_ = Write.vram_write_seq;
 
     UE_LOG(LogPSXImageSurface, Log,
-        TEXT("Image surface detected write_seq=%u vram_seq=%u frame=%u dma_xy=(%u,%u) dma_wh=%ux%u disp_xy=(%u,%u) w=%u h=%u depth=%d"),
+        TEXT("Image surface detected write_seq=%u vram_seq=%u frame=%u dma_xy=(%u,%u) dma_wh=%ux%u disp_xy=(%u,%u) w=%u h=%u depth=%d buffering=%d"),
         Write.seq, Write.vram_write_seq, Write.frame_count,
         Write.x, Write.y, Write.w, Write.h,
         Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
-        Disp.color_24bit ? 24 : 15);
+        Disp.color_24bit ? 24 : 15,
+        static_cast<int32>(BufferingMode));
 
     if (!bImageVisible_)
         SetImageVisible(true);
@@ -631,7 +686,7 @@ void UPSXImageSurfaceComponent::SyncUnifiedSurface(bool bSurfaceVisible)
     Decision.bVisible = bSurfaceVisible && ImageTexture_ != nullptr;
     Decision.Mode = bSurfaceVisible ? EPSXSurfaceMode::StaticImage : EPSXSurfaceMode::None;
     Decision.Shape = EPSXSurfaceShape::Plane;
-    Decision.Buffering = EPSXSurfaceBufferingMode::AutoDetect;
+    Decision.Buffering = LatchedBufferingMode_;
     Decision.PhysicalWidth = FMath::Max(PlaneWidth, 1.0f);
     Decision.AspectRatio = (ImageTexW_ > 0 && ImageTexH_ > 0)
         ? static_cast<float>(ImageTexW_) / static_cast<float>(ImageTexH_)

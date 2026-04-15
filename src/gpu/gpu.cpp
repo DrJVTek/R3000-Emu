@@ -202,8 +202,31 @@ Gpu::Gpu(rlog::Logger* logger)
     emu::logf(emu::LogLevel::debug, "GPU", "GPU created");
     status_ = 0x1490'2000u; // PAL default (bit 20 = 1) — matches SCPH-7502 hardware
     dma_dir_ = 0;
+    dma_busy_cycles_ = 0;
     vblank_div_ = 0;
     std::memset(vram_.get(), 0, kVramPixels * sizeof(uint16_t));
+}
+
+void Gpu::notify_dma_submit(uint32_t words, bool linked_list)
+{
+    // Minimal deterministic "GPU still busy after DMA submission" model.
+    // We only need a believable ready transition for wait-draw paths.
+    const uint32_t setup_cycles = linked_list ? 128u : 48u;
+    const uint32_t per_word_cycles = linked_list ? 3u : 2u;
+    const uint64_t total = (uint64_t)setup_cycles + (uint64_t)words * (uint64_t)per_word_cycles;
+    const uint32_t clamped = (total > 0x7FFFFFFFu) ? 0x7FFFFFFFu : (uint32_t)total;
+    if (clamped > dma_busy_cycles_)
+        dma_busy_cycles_ = clamped;
+}
+
+void Gpu::tick_timing(uint32_t cycles)
+{
+    if (dma_busy_cycles_ == 0 || cycles == 0)
+        return;
+    if (cycles >= dma_busy_cycles_)
+        dma_busy_cycles_ = 0;
+    else
+        dma_busy_cycles_ -= cycles;
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +294,23 @@ void Gpu::push_triangle(
     cmd.semi_mode = semi_mode;
     cmd.tex_depth = tex_depth;
     draw_lists_[draw_active_].push(cmd);
+
+    const bool extreme =
+        (std::abs((int)x0) >= 900 || std::abs((int)y0) >= 900 ||
+         std::abs((int)x1) >= 900 || std::abs((int)y1) >= 900 ||
+         std::abs((int)x2) >= 900 || std::abs((int)y2) >= 900);
+    if (extreme && !dma_extreme_primitive_.valid)
+    {
+        dma_extreme_primitive_.valid = true;
+        dma_extreme_primitive_.x[0] = x0; dma_extreme_primitive_.y[0] = y0;
+        dma_extreme_primitive_.x[1] = x1; dma_extreme_primitive_.y[1] = y1;
+        dma_extreme_primitive_.x[2] = x2; dma_extreme_primitive_.y[2] = y2;
+        dma_extreme_primitive_.flags = flags;
+        dma_extreme_primitive_.semi_mode = semi_mode;
+        dma_extreme_primitive_.tex_depth = tex_depth;
+        dma_extreme_primitive_.clut = clut;
+        dma_extreme_primitive_.texpage = texpage;
+    }
 
     // 3D reconstruction: correlate with GTE snapshot
     // GTE records SXY as raw screen coords (no draw offset), so DrawCmd matches it directly.
@@ -361,6 +401,19 @@ void Gpu::push_triangle(
                     v0.vx, v0.vy, v0.vz, v1.vx, v1.vy, v1.vz, v2.vx, v2.vy, v2.vz,
                     t.tr[0], t.tr[1], t.tr[2], cz0, cz1, cz2);
                 ++hit_log;
+            }
+
+            if (extreme && dma_extreme_primitive_.valid && !dma_extreme_primitive_.corr_valid)
+            {
+                dma_extreme_primitive_.corr_valid = true;
+                dma_extreme_primitive_.corr_swapped = swapped;
+                dma_extreme_primitive_.source_pc = snap.source_pc;
+                dma_extreme_primitive_.transform = cmd3d.transform;
+                for (int i = 0; i < 3; ++i)
+                {
+                    dma_extreme_primitive_.verts_3d[i] = cmd3d.verts_3d[i];
+                    dma_extreme_primitive_.sz[i] = cmd3d.sz[i];
+                }
             }
         }
         else
@@ -603,6 +656,19 @@ void Gpu::set_log_sinks(const flog::Sink& gpu_only, const flog::Sink& combined, 
         (unsigned)log_gpu_.level, (unsigned)log_io_.level);
 }
 
+void Gpu::reset_dma_debug_latches()
+{
+    dma_extreme_primitive_ = {};
+}
+
+bool Gpu::consume_dma_extreme_primitive(DmaExtremePrimitiveInfo& out)
+{
+    out = dma_extreme_primitive_;
+    const bool valid = out.valid;
+    dma_extreme_primitive_ = {};
+    return valid;
+}
+
 void Gpu::set_dump_file(const char* path)
 {
     if (dump_) { std::fclose(dump_); dump_ = nullptr; }
@@ -616,6 +682,95 @@ void Gpu::dump_u32(uint32_t port, uint32_t v)
     (void)std::fwrite(&port, 1, sizeof(port), dump_);
     (void)std::fwrite(&v, 1, sizeof(v), dump_);
     std::fflush(dump_);
+}
+
+Gpu::DynamicStatusBits Gpu::compute_dynamic_status_bits() const
+{
+    DynamicStatusBits bits{};
+
+    // Model GPUSTAT closer to hardware/DuckStation semantics:
+    // - bit26: GPU idle / draw engine idle
+    // - bit27: ready to send VRAM to CPU (GPUREAD active)
+    // - bit28: ready to receive DMA/GP0 words
+    // - bit25: DMA request, derived from direction + the two readiness bits
+    //
+    // Our old model incorrectly collapsed bit26 and bit28 into the same flag.
+    // TREX/BIOS polls them separately in different wait stages, so we must
+    // preserve that distinction even with a simplified internal pipeline.
+
+    const uint32_t draw_busy = (dma_busy_cycles_ != 0) ? 1u : 0u;
+    const uint32_t transfer_active = vram_to_cpu_active_ ? 1u : 0u;
+    const uint32_t parser_idle = (gp0_state_ == Gp0State::idle) ? 1u : 0u;
+
+    bits.gpu_idle = (parser_idle && !draw_busy && !transfer_active) ? 1u : 0u;
+    bits.ready_to_send_vram = transfer_active ? 1u : 0u;
+
+    // We do not emulate the hardware GP0 FIFO depth yet, but the parser can
+    // continue accepting GP0/DMA words while commands are being assembled or a
+    // CPU->VRAM transfer is in progress. The one mode where the data path is
+    // reversed is VRAM->CPU, so only block bit28 there.
+    bits.ready_to_receive_dma = transfer_active ? 0u : 1u;
+
+    switch (dma_dir_ & 3u)
+    {
+    case 1u: // FIFO
+    case 2u: // CPU->GP0
+        bits.dma_request = bits.ready_to_receive_dma;
+        break;
+    case 3u: // GPU read -> CPU
+        bits.dma_request = bits.ready_to_send_vram;
+        break;
+    default:
+        bits.dma_request = 0u;
+        break;
+    }
+
+    return bits;
+}
+
+uint32_t Gpu::build_gpustat() const
+{
+    uint32_t v = status_;
+    const DynamicStatusBits dyn = compute_dynamic_status_bits();
+    const uint32_t scanline = current_scanline();
+    uint32_t display_line_lsb = 0u;
+
+    if (display_.interlace && display_.v_res)
+    {
+        // 480i mode: bit31 = (display_y + field) & 1, no VBlank suppression.
+        // field toggles at each VBlank. Games like Tekken read GPUSTAT during
+        // VBlank (field=N), wait one VBlank, then read again (field=N^1) and
+        // XOR bit31 to detect the frame transition. Suppressing field during
+        // VBlank made the two reads identical (no change) -> init_slot loop.
+        const uint32_t field = even_odd_field_ ? 1u : 0u;
+        display_line_lsb = (uint32_t)((display_.display_y + field) & 1u);
+    }
+    else
+    {
+        // Non-480i: DuckStation uses (display_y + current_scanline) & 1,
+        // updated at each CRTC tick. We don't have per-scanline ticks,
+        // so we use the per-frame toggle which works for VSync detection.
+        // TODO: implement CRTC scanline tick events for full accuracy.
+        (void)scanline;
+        display_line_lsb = even_odd_field_ ? 1u : 0u;
+    }
+
+    v &= ~((1u << 25) | (1u << 26) | (1u << 27) | (1u << 28));
+    if (dyn.dma_request)         v |= (1u << 25);
+    if (dyn.gpu_idle)            v |= (1u << 26);
+    if (dyn.ready_to_send_vram)  v |= (1u << 27);
+    if (dyn.ready_to_receive_dma)v |= (1u << 28);
+
+    v &= ~(3u << 29);
+    v |= (dma_dir_ & 3u) << 29;
+
+    // Bit 31: display line parity, not a simple once-per-frame toggle.
+    // Some games poll GPUSTAT together with a timer/HBlank counter and
+    // expect this bit to reflect current raster progression.
+    v &= ~(1u << 31);
+    if (display_line_lsb) v |= (1u << 31);
+
+    return v;
 }
 
 // ---------------------------------------------------------------------------
@@ -658,52 +813,34 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
 
         case 0x1F80'1814u: // GPUSTAT
         {
-            uint32_t v = status_;
-            const uint32_t ready_cmd = (gp0_state_ == Gp0State::idle) ? 1u : 0u;
-            const uint32_t ready_dma = ready_cmd;
-            const uint32_t ready_v2c = vram_to_cpu_active_ ? 1u : 0u;
-            const uint32_t scanline = current_scanline();
-            uint32_t display_line_lsb = 0u;
-            if (display_.interlace && display_.v_res)
+            const uint32_t gpustat = build_gpustat();
+            const DynamicStatusBits dyn = compute_dynamic_status_bits();
+            if (dyn.ready_to_receive_dma &&
+                !dyn.gpu_idle &&
+                !dyn.ready_to_send_vram &&
+                dma_busy_cycles_ == 0 &&
+                !vram_to_cpu_active_ &&
+                gpustat_suspicious_log_count_ < 64u)
             {
-                // 480i mode: bit31 = (display_y + field) & 1, no VBlank suppression.
-                // field toggles at each VBlank. Games like Tekken read GPUSTAT during
-                // VBlank (field=N), wait one VBlank, then read again (field=N^1) and
-                // XOR bit31 to detect the frame transition. Suppressing field during
-                // VBlank made the two reads identical (no change) -> init_slot loop.
-                const uint32_t field = even_odd_field_ ? 1u : 0u;
-                display_line_lsb =
-                    (uint32_t)((display_.display_y + field) & 1u);
+                ++gpustat_suspicious_log_count_;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "GPUSTAT_DIAG",
+                    "suspicious gpustat=0x%08X dma_req=%u idle=%u send=%u recv=%u dma_dir=%u gp0_state=%u dma_busy=%u v2c=%u v2c_words=%u frame=%u (#%u)",
+                    gpustat,
+                    (unsigned)dyn.dma_request,
+                    (unsigned)dyn.gpu_idle,
+                    (unsigned)dyn.ready_to_send_vram,
+                    (unsigned)dyn.ready_to_receive_dma,
+                    (unsigned)(dma_dir_ & 3u),
+                    (unsigned)static_cast<uint32_t>(gp0_state_),
+                    (unsigned)dma_busy_cycles_,
+                    (unsigned)(vram_to_cpu_active_ ? 1u : 0u),
+                    (unsigned)cpu_vram_words_remaining_,
+                    (unsigned)frame_count_.load(std::memory_order_relaxed),
+                    (unsigned)gpustat_suspicious_log_count_);
             }
-            else
-            {
-                // Non-480i: DuckStation uses (display_y + current_scanline) & 1,
-                // updated at each CRTC tick. We don't have per-scanline ticks,
-                // so we use the per-frame toggle which works for VSync detection.
-                // TODO: implement CRTC scanline tick events for full accuracy.
-                display_line_lsb = even_odd_field_ ? 1u : 0u;
-            }
-
-            v &= ~((1u << 26) | (1u << 28) | (1u << 27));
-            if (ready_cmd) v |= (1u << 26);
-            if (ready_dma) v |= (1u << 28);
-            if (ready_v2c) v |= (1u << 27);
-
-            v &= ~(3u << 29);
-            v |= (dma_dir_ & 3u) << 29;
-
-            v &= ~(1u << 25);
-            if ((dma_dir_ & 3u) == 1u && ready_dma) v |= (1u << 25);
-            else if ((dma_dir_ & 3u) == 2u && ready_dma) v |= (1u << 25);
-            else if ((dma_dir_ & 3u) == 3u && ready_v2c) v |= (1u << 25);
-
-            // Bit 31: display line parity, not a simple once-per-frame toggle.
-            // Some games poll GPUSTAT together with a timer/HBlank counter and
-            // expect this bit to reflect current raster progression.
-            v &= ~(1u << 31);
-            if (display_line_lsb) v |= (1u << 31);
-
-            return v;
+            return gpustat;
         }
     }
     return 0;
@@ -712,6 +849,7 @@ uint32_t Gpu::mmio_read32(uint32_t addr)
 Stage67GpuDebug Gpu::stage67_debug() const
 {
     Stage67GpuDebug d{};
+    const DynamicStatusBits dyn = compute_dynamic_status_bits();
     const uint32_t scanline = current_scanline();
     uint32_t display_line_lsb = 0u;
     if (display_.interlace && display_.v_res)
@@ -724,24 +862,16 @@ Stage67GpuDebug Gpu::stage67_debug() const
         display_line_lsb = even_odd_field_ ? 1u : 0u;
     }
 
-    uint32_t v = status_;
-    const uint32_t ready_cmd = (gp0_state_ == Gp0State::idle) ? 1u : 0u;
-    const uint32_t ready_dma = ready_cmd;
-    const uint32_t ready_v2c = vram_to_cpu_active_ ? 1u : 0u;
-    v &= ~((1u << 26) | (1u << 28) | (1u << 27));
-    if (ready_cmd) v |= (1u << 26);
-    if (ready_dma) v |= (1u << 28);
-    if (ready_v2c) v |= (1u << 27);
-    v &= ~(3u << 29);
-    v |= (dma_dir_ & 3u) << 29;
-    v &= ~(1u << 25);
-    if ((dma_dir_ & 3u) == 1u && ready_dma) v |= (1u << 25);
-    else if ((dma_dir_ & 3u) == 2u && ready_dma) v |= (1u << 25);
-    else if ((dma_dir_ & 3u) == 3u && ready_v2c) v |= (1u << 25);
-    v &= ~(1u << 31);
-    if (display_line_lsb) v |= (1u << 31);
-
-    d.gpustat = v;
+    d.gpustat = build_gpustat();
+    d.dma_request = dyn.dma_request;
+    d.gpu_idle = dyn.gpu_idle;
+    d.ready_to_send_vram = dyn.ready_to_send_vram;
+    d.ready_to_receive_dma = dyn.ready_to_receive_dma;
+    d.dma_dir = (dma_dir_ & 3u);
+    d.gp0_state = static_cast<uint32_t>(gp0_state_);
+    d.dma_busy_cycles = dma_busy_cycles_;
+    d.vram_to_cpu_active = vram_to_cpu_active_ ? 1u : 0u;
+    d.cpu_vram_words_remaining = cpu_vram_words_remaining_;
     d.scanline = scanline;
     d.display_line_lsb = display_line_lsb;
     d.display_y = display_.display_y;
@@ -1595,6 +1725,7 @@ void Gpu::gp1_write(uint32_t v)
         case 0x00: // Reset GPU
             status_ = 0x1490'2000u; // PAL default (bit 20 = 1)
             dma_dir_ = 0;
+            dma_busy_cycles_ = 0;
             gp0_state_ = Gp0State::idle;
             cmd_buf_pos_ = 0;
             cmd_words_needed_ = 0;

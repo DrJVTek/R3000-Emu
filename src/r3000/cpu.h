@@ -2,12 +2,15 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <array>
 #include <unordered_map>
 #include <vector>
 
 #include "../log/filelog.h"
 #include "../gte/gte.h"
+#include "../gte/gte_backend_kind.h"
+#include "../gte/gte_modern.h"
 #include "../gte/gte_3d.h"
 #include "../log/logger.h"
 #include "bus.h"
@@ -110,6 +113,13 @@ class Cpu
     // Batch bus ticking: tick every N steps instead of every step.
     // Higher values = faster but less accurate. 1 = cycle-accurate (default CLI). 32 = good for UE5.
     void set_bus_tick_batch(uint32_t n) { bus_tick_batch_ = (n < 1) ? 1 : n; }
+    void set_crash_trace_steps(uint32_t n)
+    {
+        crash_trace_enabled_ = (n > 0) ? 1 : 0;
+        crash_trace_dump_count_ = (n > kCrashTraceCapacity) ? kCrashTraceCapacity : n;
+        crash_trace_pos_ = 0;
+        crash_trace_count_ = 0;
+    }
 
     // Cycle multiplier: compensate for simplified 1-cycle-per-instruction model.
     // Real MIPS R3000 averages ~1.5-2 cycles/instruction due to loads, branches, etc.
@@ -121,8 +131,11 @@ class Cpu
     // Raw cost (GTE 5-44, MUL 13, DIV 36, other 1) × cycle_multiplier_.
     uint32_t last_cycles() const { return last_multiplied_cycles_; }
 
-    // Access GTE for 3D reconstruction (snapshot readback)
-    gte::Gte& gte() { return gte_; }
+    // Access primary GTE backend. Returns the faithful-compatible base.
+    gte::Gte& gte() { return *static_cast<gte::Gte*>(gte_backend_.get()); }
+    const gte::Gte& gte() const { return *static_cast<const gte::Gte*>(gte_backend_.get()); }
+    gte::BackendKind gte_backend_kind() const { return gte_backend_kind_; }
+    void set_gte_backend_kind(gte::BackendKind kind);
 
     // Shadow GTE for differential tag encoding (3D reconstruction)
     void set_gte_shadow(gte::Gte3D* g) { gte_shadow_ = g; }
@@ -385,6 +398,24 @@ class Cpu
     uint32_t recent_pc_[256]{};
     uint32_t recent_instr_[256]{};
     uint32_t recent_pos_{0};
+    struct CrashTraceEntry
+    {
+        uint32_t pc{0};
+        uint32_t instr{0};
+        uint32_t hi{0};
+        uint32_t lo{0};
+        uint32_t status{0};
+        uint32_t cause{0};
+        uint32_t epc{0};
+        uint32_t badvaddr{0};
+        uint32_t gpr[32]{};
+    };
+    static constexpr uint32_t kCrashTraceCapacity = 2048;
+    std::array<CrashTraceEntry, kCrashTraceCapacity> crash_trace_{};
+    uint32_t crash_trace_pos_{0};
+    uint32_t crash_trace_count_{0};
+    uint32_t crash_trace_dump_count_{0};
+    int crash_trace_enabled_{0};
     int stop_on_high_ram_{0};
     int stopped_on_high_ram_{0};
     int stop_on_bios_to_ram_nop_{0};
@@ -567,7 +598,8 @@ class Cpu
     // NOTE: pas de "skip loop" ici: on préfère corriger l'émulation plutôt que patcher le flow du BIOS.
 
     // COP2 = GTE (PS1). Séparé du CPU pour garder le code propre.
-    gte::Gte gte_;
+    std::unique_ptr<gte::IGte> gte_backend_{};
+    gte::BackendKind gte_backend_kind_{gte::BackendKind::faithful};
     gte::Gte3D* gte_shadow_{nullptr}; // Shadow GTE for 3D tag encoding
 
     // MIPS: branchements/jumps ont un delay slot.
@@ -586,6 +618,8 @@ class Cpu
     GteTraceConfig gte_trace_{};
     std::unordered_map<uint32_t, uint32_t> gte_trace_pc_hist_{};
     std::unordered_map<uint32_t, uint32_t> gte_trace_op_hist_{};
+    void record_crash_trace(uint32_t instr);
+    void dump_crash_trace(const char* reason) const;
 };
 
 } // namespace r3000

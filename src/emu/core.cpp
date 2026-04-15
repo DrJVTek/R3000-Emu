@@ -354,6 +354,7 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
         set_err(err, err_cap, "out of memory");
         return false;
     }
+    cpu_->set_gte_backend_kind(opt.gte_backend);
 
     // Hook system: pass hooks to Bus for VBlank/write dispatch.
     bus_->set_hooks(&hooks_);
@@ -386,6 +387,34 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     bus_->set_trace_vectors(opt.trace_vectors ? 1 : 0);
     if (opt.watch_u32_enabled)
         bus_->set_watch_ram_u32(opt.watch_u32_phys, 1);
+    bus_->set_watch_ram_range(opt.watch_ram_range_phys, opt.watch_ram_range_size, opt.watch_ram_range_size ? 1 : 0);
+    if (opt.watch_ram_range_size != 0)
+    {
+        emu::logf(
+            emu::LogLevel::warn,
+            "RAMWATCH",
+            "armed phys=[0x%08X..0x%08X) size=0x%X",
+            opt.watch_ram_range_phys,
+            opt.watch_ram_range_phys + opt.watch_ram_range_size,
+            opt.watch_ram_range_size);
+    }
+    bus_->set_stack_watch(
+        opt.stack_watch_phys,
+        opt.stack_watch_size,
+        opt.stack_watch_enabled,
+        opt.stack_watch_target_enabled,
+        opt.stack_watch_target_value);
+    if (opt.stack_watch_enabled && opt.stack_watch_size != 0)
+    {
+        emu::logf(
+            emu::LogLevel::warn,
+            "STACKWATCH",
+            "armed phys=0x%08X size=0x%X target_enabled=%u target_value=0x%08X",
+            opt.stack_watch_phys,
+            opt.stack_watch_size,
+            (unsigned)opt.stack_watch_target_enabled,
+            opt.stack_watch_target_value);
+    }
 
     cpu_->reset(img.entry_pc);
 
@@ -393,6 +422,9 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
     cpu_->set_trace_io(opt.trace_io ? 1 : 0);
     cpu_->set_hle_vectors(opt.hle_vectors ? 1 : 0);
     cpu_->set_text_hle(opt.text_hle ? 1 : 0);
+    init_hle_vectors_ = opt.hle_vectors ? 1 : 0;
+    init_text_hle_ = opt.text_hle ? 1 : 0;
+    cpu_->set_crash_trace_steps(opt.crash_trace_steps);
 
     // GPU generates real VBlanks at ~50Hz. Disable HLE pseudo-vblank (~333Hz).
     cpu_->set_use_gpu_vblank(1);
@@ -1372,8 +1404,10 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
 
     // 7. Initialize minimal hardware state for game code
 
-    // Enable HLE vectors so A0/B0/C0 calls + exception vector are intercepted
-    cpu_->set_hle_vectors(1);
+    // Respect the init mode chosen by the host. Fast boot should not silently
+    // switch the core to HLE if the session explicitly requested non-HLE.
+    cpu_->set_hle_vectors(init_hle_vectors_ ? 1 : 0);
+    cpu_->set_text_hle(init_text_hle_ ? 1 : 0);
 
     // GPU generates real VBlanks at ~50Hz. Disable HLE pseudo-vblank (~333Hz)
     // which would corrupt game timing if both fire.
@@ -1421,7 +1455,8 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
     // Debug: watch writes to 0x8007BCF4 (filename buffer)
     bus_->set_watch_ram_u32(0x0007'BCF4u, 1);
 
-    emu::logf(emu::LogLevel::info, "CORE", "Fast boot: PC=0x%08X GP=0x%08X SP=0x%08X", pc0, gp0, cpu_->gpr(29));
+    emu::logf(emu::LogLevel::info, "CORE", "Fast boot: PC=0x%08X GP=0x%08X SP=0x%08X hle=%d text_hle=%d",
+        pc0, gp0, cpu_->gpr(29), init_hle_vectors_, init_text_hle_);
     return true;
 }
 
@@ -1436,9 +1471,11 @@ void Core::set_psx_params(const int32_t* params, uint32_t count)
 }
 
 // ---------------------------------------------------------------------------
-// Dev kit boot: load PS-EXE from file + HLE kernel init
+// Dev kit boot:
+// - devkit: direct EXE boot with minimal hardware bootstrap, no forced HLE
+// - devkit_hle: explicit HLE-friendly bootstrap for tooling/legacy paths
 // ---------------------------------------------------------------------------
-bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
+bool Core::fast_boot_from_exe(const char* exe_path, ExeBootMode mode, char* err, size_t err_cap)
 {
     if (!cpu_ || !bus_ || !ram_)
     {
@@ -1465,21 +1502,22 @@ bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
     else
         cpu_->set_gpr(29, 0x801F'FF00u);
 
-    // 3. Initialize minimal hardware state (same as fast_boot_from_cd)
-
-    cpu_->set_hle_vectors(1);
+    // 3. Initialize minimal hardware state for direct EXE boot.
+    // Keep the host-selected HLE/text-HLE mode; only the devkit_hle variant
+    // installs extra kernel bootstrap structures.
+    cpu_->set_hle_vectors(init_hle_vectors_ ? 1 : 0);
+    cpu_->set_text_hle(init_text_hle_ ? 1 : 0);
     cpu_->set_use_gpu_vblank(1);
 
-    // I_MASK: VBLANK(0) + DMA(3)
+    // Match the practical interrupt baseline used by the old devkit path, but
+    // keep the bootstrap structures reserved for the explicit HLE variant.
     {
         r3000::Bus::MemFault mf{};
-        bus_->write_u32(0x1F80'1074u, 0x0009u, mf); // bits 0+3
+        bus_->write_u32(0x1F80'1074u, 0x0009u, mf); // VBLANK + DMA
     }
-
-    // COP0 Status: IEc=1, IM2=1, IM0=1
     cpu_->set_cop0(12, (1u << 0) | (1u << 8) | (1u << 10));
 
-    // PCB/TCB kernel structures
+    if (mode == ExeBootMode::devkit_hle)
     {
         constexpr uint32_t kPcbAddr = 0x0200u;
         constexpr uint32_t kTcbAddr = 0x0300u;
@@ -1497,6 +1535,10 @@ bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
         w32(0x108, 0x80000000u | kPcbAddr);
 
         cpu_->set_hle_tcb_addr(kTcbAddr);
+    }
+    else
+    {
+        cpu_->set_hle_tcb_addr(0);
     }
 
     // Inject PSX params into scratchpad RAM if set.
@@ -1520,8 +1562,16 @@ bool Core::fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap)
             (unsigned)psx_params_.size(), kScratchpadBase);
     }
 
-    emu::logf(emu::LogLevel::info, "CORE", "Dev kit boot: %s PC=0x%08X SP=0x%08X",
-        exe_path, img.entry_pc, cpu_->gpr(29));
+    emu::logf(
+        emu::LogLevel::info,
+        "CORE",
+        "Dev kit boot: mode=%s %s PC=0x%08X SP=0x%08X hle=%d text_hle=%d",
+        (mode == ExeBootMode::devkit_hle) ? "devkit-hle" : "devkit",
+        exe_path,
+        img.entry_pc,
+        cpu_->gpr(29),
+        init_hle_vectors_,
+        init_text_hle_);
     return true;
 }
 

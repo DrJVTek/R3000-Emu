@@ -24,6 +24,12 @@ static uint16 VideoDisplayRowWords(const gpu::DisplayConfig& Disp)
     return static_cast<uint16>(((static_cast<uint32>(DisplayW) * 3u) + 1u) / 2u);
 }
 
+static bool IsVideoMultiBufferedMode(EPSXSurfaceBufferingMode Mode)
+{
+    return Mode == EPSXSurfaceBufferingMode::DoubleBuffer ||
+           Mode == EPSXSurfaceBufferingMode::TripleBuffer;
+}
+
 static bool IsRecentDisplaySizedWrite(const gpu::CpuVramWriteInfo& Write, const gpu::DisplayConfig& Disp, uint32 CurrentFrame)
 {
     if (Write.seq == 0 || !Disp.display_enabled)
@@ -58,6 +64,7 @@ static bool SelectVideoSourceWrite(
     const std::vector<gpu::CpuVramWriteInfo>& Writes,
     const gpu::DisplayConfig& Disp,
     uint32 CurrentFrame,
+    EPSXSurfaceBufferingMode BufferingMode,
     gpu::CpuVramWriteInfo& OutWrite)
 {
     bool bFound = false;
@@ -73,7 +80,7 @@ static bool SelectVideoSourceWrite(
         const bool bExactDisplayOrigin =
             (Write.x == Disp.display_x) && (Write.y == Disp.display_y);
         const uint32 Score =
-            (bExactDisplayOrigin ? 1u << 30 : 0u) +
+            ((bExactDisplayOrigin && !IsVideoMultiBufferedMode(BufferingMode)) ? 1u << 30 : 0u) +
             ((4u - FMath::Min(FrameDelta, 4u)) << 24) +
             FMath::Min(AreaScore, 0x00FFFFFFu);
 
@@ -177,9 +184,9 @@ void UPSXVideoSurfaceComponent::TickComponent(
     Gpu_->copy_recent_cpu_vram_writes(RecentWrites);
     gpu::CpuVramWriteInfo SelectedWrite{};
     const uint32 CurrentFrame = Gpu_->vram_frame_count();
-    const bool bDisplaySizedWrite = SelectVideoSourceWrite(RecentWrites, disp, CurrentFrame, SelectedWrite);
-    const uint32 RecentDisplayWriteCount = CountRecentDisplaySizedWrites(RecentWrites, disp, CurrentFrame);
     const EPSXSurfaceBufferingMode BufferingMode = InferBufferingMode(RecentWrites, disp, CurrentFrame);
+    const bool bDisplaySizedWrite = SelectVideoSourceWrite(RecentWrites, disp, CurrentFrame, BufferingMode, SelectedWrite);
+    const uint32 RecentDisplayWriteCount = CountRecentDisplaySizedWrites(RecentWrites, disp, CurrentFrame);
 
     if (!disp.display_enabled || disp.width() == 0 || disp.height() == 0)
     {
@@ -206,15 +213,15 @@ void UPSXVideoSurfaceComponent::TickComponent(
 
     if (!bVideoCandidate && Gpu_->has_mdec_activity())
     {
-        const uint32 CurrentFrame = Gpu_->vram_frame_count();
-        if (CurrentFrame != LastRejectedLogFrame)
+        const uint32 RejectFrame = Gpu_->vram_frame_count();
+        if (RejectFrame != LastRejectedLogFrame)
         {
-            LastRejectedLogFrame = CurrentFrame;
+            LastRejectedLogFrame = RejectFrame;
             emu::logf(
                 emu::LogLevel::warn,
                 "VIDEO",
                 "candidate rejected frame=%u mdec_display=%d display_sized_write=%d eligible_writes=%u recent_writes=%u disp=(%u,%u %ux%u 24=%d)",
-                CurrentFrame,
+                RejectFrame,
                 bMdecDisplay ? 1 : 0,
                 bDisplaySizedWrite ? 1 : 0,
                 RecentDisplayWriteCount,

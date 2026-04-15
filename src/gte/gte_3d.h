@@ -74,11 +74,11 @@ class Gte3D : public IGte
     static constexpr uint32_t FLAG_COLOR_B = 1u << 19;
     static constexpr uint32_t FLAG_SZ3_OTZ_SAT = 1u << 18;
     static constexpr uint32_t FLAG_DIV_OFLOW = 1u << 17;
-    static constexpr uint32_t FLAG_SX2_SAT = 1u << 16;
-    static constexpr uint32_t FLAG_SY2_SAT = 1u << 15;
-    static constexpr uint32_t FLAG_IR0_SAT = 1u << 14;
-    static constexpr uint32_t FLAG_MAC0_OFLOW_POS = 1u << 13;
-    static constexpr uint32_t FLAG_MAC0_OFLOW_NEG = 1u << 12;
+    static constexpr uint32_t FLAG_MAC0_OFLOW_POS = 1u << 16;  // DuckStation: mac0_overflow
+    static constexpr uint32_t FLAG_MAC0_OFLOW_NEG = 1u << 15;  // DuckStation: mac0_underflow
+    static constexpr uint32_t FLAG_SX2_SAT = 1u << 14;         // DuckStation: sx2_saturated
+    static constexpr uint32_t FLAG_SY2_SAT = 1u << 13;         // DuckStation: sy2_saturated
+    static constexpr uint32_t FLAG_IR0_SAT = 1u << 12;         // DuckStation: ir0_saturated
     static constexpr uint32_t FLAG_ERROR_BITS = 0x7F87E000u;
 
     // ── GTE commands (IGte interface) ────────────────────────────────

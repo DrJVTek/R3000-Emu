@@ -108,9 +108,9 @@ static int load_psx_exe(
 
     out->entry_pc = pc0;
     out->gp = gp0;
-    out->sp = (sp_size != 0) ? (sp_addr + sp_size) : 0;
+    out->sp = (sp_size != 0) ? (sp_addr + sp_size) : sp_addr;
     out->has_gp = 1;
-    out->has_sp = (sp_size != 0) ? 1 : 0;
+    out->has_sp = (sp_addr != 0 || sp_size != 0) ? 1 : 0;
     return 1;
 }
 

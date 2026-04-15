@@ -29,6 +29,7 @@
 #include "emu/mcp_server.h"
 #include "gpu/gpu.h"
 #include "gpu/gpu_3d.h"
+#include "gte/gte_backend_kind.h"
 #include "loader/loader.h"
 #include "log/async_log.h"
 #include "log/emu_log.h"
@@ -57,6 +58,47 @@ static int has_flag(int argc, char** argv, const char* flag)
     }
     return 0;
 }
+
+namespace
+{
+
+enum class CliDevkitMode
+{
+    none,
+    devkit,
+    devkit_hle,
+};
+
+static CliDevkitMode parse_devkit_mode(int argc, char** argv)
+{
+    const int devkit = has_flag(argc, argv, "--devkit");
+    const int devkit_hle = has_flag(argc, argv, "--devkit-hle");
+    if (devkit_hle)
+        return CliDevkitMode::devkit_hle;
+    if (devkit)
+        return CliDevkitMode::devkit;
+    return CliDevkitMode::none;
+}
+
+static const char* cli_devkit_mode_name(CliDevkitMode mode)
+{
+    switch (mode)
+    {
+    case CliDevkitMode::none: return "none";
+    case CliDevkitMode::devkit: return "devkit";
+    case CliDevkitMode::devkit_hle: return "devkit-hle";
+    }
+    return "none";
+}
+
+static emu::Core::ExeBootMode to_core_exe_boot_mode(CliDevkitMode mode)
+{
+    return (mode == CliDevkitMode::devkit_hle)
+        ? emu::Core::ExeBootMode::devkit_hle
+        : emu::Core::ExeBootMode::devkit;
+}
+
+} // namespace
 
 namespace
 {
@@ -1328,9 +1370,15 @@ static void print_usage(void)
         "  --psx3d-refresh=R:S   Queue analysis refresh request (reason:scope)\n"
         "  --max-time=N          Stop after N seconds wall clock (default: 300)\n"
         "  --load=<file>         Load ELF or PS-X EXE directly (skips BIOS)\n"
+        "  --devkit              Real devkit EXE boot (non-HLE, BIOS-backed)\n"
+        "  --devkit-hle          Assisted devkit EXE boot (explicit HLE bootstrap)\n"
         "  --pretty              Pretty print instructions\n"
         "  --trace-io            Verbose MMIO logging\n"
+        "  --hle                 Enable HLE vectors explicitly\n"
         "  --text-hle            Intercept BIOS/SDK printf+putchar only (keeps non-HLE execution)\n"
+        "  --gte-backend=NAME    Primary GTE backend: faithful|modern\n"
+        "  --cpu-crash-trace=N   Keep last N CPU states and dump them on fatal faults\n"
+        "  --watch-ram-range=A:S Watch RAM writes in physical range A..A+S (hex or dec)\n"
         "  --pc-sample=N         Print PC every N steps\n"
         "  --bus-tick-batch=N    Tick HW every N CPU steps (1=accurate, 32=fast)\n"
         "  --cd-timing=MODE      CD seek/spin-up timing: realistic|compat\n"
@@ -1492,6 +1540,13 @@ int main(int argc, char** argv)
     const char* bios_path = arg_value(argc, argv, "--bios=");
     const char* load_path = arg_value(argc, argv, "--load=");
     const char* cd_path = arg_value(argc, argv, "--cd=");
+    const CliDevkitMode devkit_mode = parse_devkit_mode(argc, argv);
+    const int is_devkit_mode = (devkit_mode != CliDevkitMode::none) ? 1 : 0;
+    if (has_flag(argc, argv, "--devkit") && has_flag(argc, argv, "--devkit-hle"))
+    {
+        emu::logf(emu::LogLevel::warn, "MAIN",
+            "Both --devkit and --devkit-hle were passed; using --devkit-hle");
+    }
     const char* gpu_dump = arg_value(argc, argv, "--gpu-dump=");
     const char* wav_output = arg_value(argc, argv, "--wav-output=");
     const int trace_io = has_flag(argc, argv, "--trace-io");
@@ -1521,6 +1576,12 @@ int main(int argc, char** argv)
     const uint64_t max_time_s = (max_time_raw != 0) ? max_time_raw : 300; // default 5 min
     const uint64_t pc_sample = parse_u64_or_zero(arg_value(argc, argv, "--pc-sample="));
     const uint64_t stop_on_pc = parse_u64_or_zero(arg_value(argc, argv, "--stop-on-pc="));
+    const uint64_t cpu_crash_trace_raw = parse_u64_or_zero(arg_value(argc, argv, "--cpu-crash-trace="));
+    const uint64_t cpu_crash_trace = cpu_crash_trace_raw ? cpu_crash_trace_raw : 512;
+    const char* watch_ram_range_s = arg_value(argc, argv, "--watch-ram-range=");
+    const char* stack_watch_s = arg_value(argc, argv, "--stack-watch=");
+    const char* stack_watch_target_s = arg_value(argc, argv, "--stack-watch-target=");
+    const int no_stack_watch = has_flag(argc, argv, "--no-stack-watch") ? 1 : 0;
     const char* cd_timing_s = arg_value(argc, argv, "--cd-timing=");
     const char* bus_tick_batch_s = arg_value(argc, argv, "--bus-tick-batch=");
     uint32_t bus_tick_batch = 0;
@@ -1660,7 +1721,7 @@ int main(int argc, char** argv)
     loader::LoadedImage img{};
     bool boot_bios = false;
 
-    if (!load_path)
+    if (!load_path || is_devkit_mode)
     {
         boot_bios = true;
         if (!bios_path)
@@ -1717,7 +1778,7 @@ int main(int argc, char** argv)
         core.load_psx3d_profile_for_exe(load_path);
     }
 
-    if (boot_bios)
+    if (boot_bios && !is_devkit_mode)
     {
         img.entry_pc = 0xBFC0'0000u;  // BIOS reset vector
         img.has_gp = 0;
@@ -1732,7 +1793,7 @@ int main(int argc, char** argv)
         core.set_gpu_dump_file(gpu_dump);
     }
 
-    if (cd_path)
+    if (cd_path && !is_devkit_mode)
     {
         char err[256];
         err[0] = '\0';
@@ -1746,7 +1807,7 @@ int main(int argc, char** argv)
         }
     }
 
-    if (bios)
+    if (bios && !is_devkit_mode)
     {
         char err[256];
         err[0] = '\0';
@@ -1767,6 +1828,55 @@ int main(int argc, char** argv)
     core_opt.trace_io = trace_io ? 1 : 0;
     core_opt.hle_vectors = has_flag(argc, argv, "--hle") ? 1 : 0;
     core_opt.text_hle = has_flag(argc, argv, "--text-hle") ? 1 : 0;
+    if (devkit_mode == CliDevkitMode::devkit_hle)
+        core_opt.hle_vectors = 1;
+    core_opt.crash_trace_steps = static_cast<uint32_t>(cpu_crash_trace);
+    if (watch_ram_range_s && *watch_ram_range_s)
+    {
+        const char* sep = std::strchr(watch_ram_range_s, ':');
+        if (sep)
+        {
+            std::string base_s(watch_ram_range_s, (size_t)(sep - watch_ram_range_s));
+            std::string size_s(sep + 1);
+            core_opt.watch_ram_range_phys = (uint32_t)parse_u64_or_zero(base_s.c_str());
+            core_opt.watch_ram_range_size = (uint32_t)parse_u64_or_zero(size_s.c_str());
+        }
+    }
+    if (no_stack_watch)
+    {
+        core_opt.stack_watch_enabled = 0;
+        core_opt.stack_watch_size = 0;
+    }
+    else if (stack_watch_s && *stack_watch_s)
+    {
+        const char* sep = std::strchr(stack_watch_s, ':');
+        if (sep)
+        {
+            std::string base_s(stack_watch_s, (size_t)(sep - stack_watch_s));
+            std::string size_s(sep + 1);
+            core_opt.stack_watch_phys = (uint32_t)parse_u64_or_zero(base_s.c_str());
+            core_opt.stack_watch_size = (uint32_t)parse_u64_or_zero(size_s.c_str());
+        }
+        else
+        {
+            core_opt.stack_watch_phys = (uint32_t)parse_u64_or_zero(stack_watch_s);
+        }
+    }
+    if (stack_watch_target_s && *stack_watch_target_s)
+    {
+        core_opt.stack_watch_target_enabled = 1;
+        core_opt.stack_watch_target_value = (uint32_t)parse_u64_or_zero(stack_watch_target_s);
+    }
+    {
+        const char* gte_backend = arg_value(argc, argv, "--gte-backend=");
+        if (gte_backend && *gte_backend)
+        {
+            if (std::strcmp(gte_backend, "modern") == 0)
+                core_opt.gte_backend = gte::BackendKind::modern;
+            else
+                core_opt.gte_backend = gte::BackendKind::faithful;
+        }
+    }
     core_opt.cd_timing_mode = cd_timing_mode;
     if (bus_tick_batch != 0)
         core_opt.bus_tick_batch = bus_tick_batch;
@@ -1779,10 +1889,45 @@ int main(int argc, char** argv)
     {
         char err[256];
         err[0] = '\0';
-        if (!core.init_from_image(img, core_opt, err, sizeof(err)))
+        if (is_devkit_mode && load_path)
         {
-            emu::logf(emu::LogLevel::error, "MAIN", "Core init failed: %s", err[0] ? err : "unknown error");
-            return 1;
+            loader::LoadedImage devkit_img{};
+            devkit_img.entry_pc = 0x80010000u;
+            devkit_img.has_sp = 1;
+            devkit_img.sp = 0x801FFFF0u;
+
+            if (!core.init_from_image(devkit_img, core_opt, err, sizeof(err)))
+            {
+                emu::logf(emu::LogLevel::error, "MAIN", "Core init (devkit) failed: %s", err[0] ? err : "unknown error");
+                return 1;
+            }
+
+            if (bios)
+            {
+                if (!core.set_bios_copy(bios, bios_size, err, sizeof(err)))
+                {
+                    emu::logf(emu::LogLevel::error, "MAIN", "BIOS setup (devkit) failed: %s", err[0] ? err : "unknown error");
+                    return 1;
+                }
+                std::free(bios);
+                bios = nullptr;
+                emu::logf(emu::LogLevel::info, "MAIN", "Devkit BIOS ROM mapped for SDK services");
+            }
+
+            emu::logf(emu::LogLevel::info, "MAIN", "Devkit boot begin: mode=%s exe=%s hle=%d text_hle=%d gte=%s",
+                cli_devkit_mode_name(devkit_mode),
+                load_path,
+                core_opt.hle_vectors ? 1 : 0,
+                core_opt.text_hle ? 1 : 0,
+                (core_opt.gte_backend == gte::BackendKind::modern) ? "modern" : "faithful");
+        }
+        else
+        {
+            if (!core.init_from_image(img, core_opt, err, sizeof(err)))
+            {
+                emu::logf(emu::LogLevel::error, "MAIN", "Core init failed: %s", err[0] ? err : "unknown error");
+                return 1;
+            }
         }
     }
 
@@ -1946,6 +2091,18 @@ int main(int argc, char** argv)
                 emu::logf(emu::LogLevel::info, "MAIN", "PSX params: %d ints from '%s'", count, psxparam);
             }
         }
+    }
+
+    if (is_devkit_mode && load_path)
+    {
+        char err[256]{};
+        if (!core.fast_boot_from_exe(load_path, to_core_exe_boot_mode(devkit_mode), err, sizeof(err)))
+        {
+            emu::logf(emu::LogLevel::error, "MAIN", "Devkit EXE boot failed: %s", err[0] ? err : "unknown error");
+            return 1;
+        }
+        emu::logf(emu::LogLevel::info, "MAIN", "Devkit boot OK: mode=%s %s -> PC=0x%08X",
+            cli_devkit_mode_name(devkit_mode), load_path, core.pc());
     }
 
     // --- Hook: 3D diagnostic ---

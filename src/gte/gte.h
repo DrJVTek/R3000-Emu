@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "igte.h"
 #include "gte_snapshot.h"
 
 // GTE (Geometry Transformation Engine) de la PS1.
@@ -13,31 +14,31 @@
 namespace gte
 {
 
-class Gte
+class Gte : public IGte
 {
   public:
     Gte();
 
-    void reset();
+    void reset() override;
 
     // Registres data/control (index 0..31).
     // NOTE: certains registres sont packés/saturés en vrai. On commence simple: stockage brut
     // 32-bit.
-    uint32_t read_data(uint32_t idx) const;
-    void write_data(uint32_t idx, uint32_t v);
+    uint32_t read_data(uint32_t idx) const override;
+    void write_data(uint32_t idx, uint32_t v) override;
 
-    uint32_t read_ctrl(uint32_t idx) const;
-    void write_ctrl(uint32_t idx, uint32_t v);
+    uint32_t read_ctrl(uint32_t idx) const override;
+    void write_ctrl(uint32_t idx, uint32_t v) override;
 
     // LWC2/SWC2 utilisent le même espace de registres que MTC2/MFC2 (data regs).
     // On garde une API explicite pour rendre l'intention claire dans le CPU.
-    void lwc2(uint32_t gte_reg, uint32_t word);
-    uint32_t swc2(uint32_t gte_reg) const;
+    void lwc2(uint32_t gte_reg, uint32_t word) override;
+    uint32_t swc2(uint32_t gte_reg) const override;
 
     // Exécute une instruction COP2 "CO" (commande GTE).
     // Retourne le nombre de cycles GTE (>0) si la commande est reconnue, 0 sinon.
     // Cycle counts match real PS1 hardware (PSX-SPX / DuckStation reference).
-    int execute(uint32_t cop2_instruction);
+    int execute(uint32_t cop2_instruction) override;
 
     // FLAG bit constants (public so gte_divide helper can access them)
     static constexpr uint32_t FLAG_MAC1_OFLOW_POS = 1u << 30;
@@ -54,14 +55,36 @@ class Gte
     static constexpr uint32_t FLAG_COLOR_B = 1u << 19;
     static constexpr uint32_t FLAG_SZ3_OTZ_SAT = 1u << 18;
     static constexpr uint32_t FLAG_DIV_OFLOW = 1u << 17;
-    static constexpr uint32_t FLAG_SX2_SAT = 1u << 16;
-    static constexpr uint32_t FLAG_SY2_SAT = 1u << 15;
-    static constexpr uint32_t FLAG_IR0_SAT = 1u << 14;
-    static constexpr uint32_t FLAG_MAC0_OFLOW_POS = 1u << 13;
-    static constexpr uint32_t FLAG_MAC0_OFLOW_NEG = 1u << 12;
+    static constexpr uint32_t FLAG_MAC0_OFLOW_POS = 1u << 16;  // DuckStation: mac0_overflow
+    static constexpr uint32_t FLAG_MAC0_OFLOW_NEG = 1u << 15;  // DuckStation: mac0_underflow
+    static constexpr uint32_t FLAG_SX2_SAT = 1u << 14;         // DuckStation: sx2_saturated
+    static constexpr uint32_t FLAG_SY2_SAT = 1u << 13;         // DuckStation: sy2_saturated
+    static constexpr uint32_t FLAG_IR0_SAT = 1u << 12;         // DuckStation: ir0_saturated
     static constexpr uint32_t FLAG_ERROR_BITS = 0x7F87E000u;
 
   private:
+    struct RtpsTraceVertex
+    {
+        int32_t vx{0};
+        int32_t vy{0};
+        int32_t vz{0};
+        int64_t mac1_raw{0};
+        int64_t mac2_raw{0};
+        int64_t mac3_raw{0};
+        int32_t ir1{0};
+        int32_t ir2{0};
+        int32_t ir3_z{0};
+        uint32_t sz3{0};
+        uint32_t h{0};
+        uint32_t quotient{0};
+        int64_t sx_accum{0};
+        int64_t sy_accum{0};
+        int32_t sx_preclamp{0};
+        int32_t sy_preclamp{0};
+        uint32_t flag_before_push{0};
+        bool last{false};
+    };
+
     // Index des registres GTE (data/control) pour rendre le code lisible en live.
     // Data regs (0..31):
     enum DataReg : uint32_t
@@ -173,28 +196,28 @@ class Gte
     void dpcs_internal(const uint8_t color[3], int shift, int lm);
 
     // Commandes (subset utile pour démarrer "matrices").
-    void cmd_mvmva(uint32_t cmd);
-    void cmd_rtps(uint32_t cmd);
-    void cmd_rtpt(uint32_t cmd);
-    void cmd_nclip(uint32_t cmd);
-    void cmd_avsz3(uint32_t cmd);
-    void cmd_avsz4(uint32_t cmd);
-    void cmd_sqr(uint32_t cmd);
-    void cmd_gpf(uint32_t cmd);
-    void cmd_gpl(uint32_t cmd);
-    void cmd_op(uint32_t cmd);
-    void cmd_dpcs(uint32_t cmd);
-    void cmd_intpl(uint32_t cmd);
-    void cmd_ncds(uint32_t cmd);
-    void cmd_cdp(uint32_t cmd);
-    void cmd_ncdt(uint32_t cmd);
-    void cmd_nccs(uint32_t cmd);
-    void cmd_cc(uint32_t cmd);
-    void cmd_ncs(uint32_t cmd);
-    void cmd_nct(uint32_t cmd);
-    void cmd_dcpl(uint32_t cmd);
-    void cmd_dpct(uint32_t cmd);
-    void cmd_ncct(uint32_t cmd);
+    void cmd_mvmva(uint32_t cmd) override;
+    void cmd_rtps(uint32_t cmd) override;
+    void cmd_rtpt(uint32_t cmd) override;
+    void cmd_nclip(uint32_t cmd) override;
+    void cmd_avsz3(uint32_t cmd) override;
+    void cmd_avsz4(uint32_t cmd) override;
+    void cmd_sqr(uint32_t cmd) override;
+    void cmd_gpf(uint32_t cmd) override;
+    void cmd_gpl(uint32_t cmd) override;
+    void cmd_op(uint32_t cmd) override;
+    void cmd_dpcs(uint32_t cmd) override;
+    void cmd_intpl(uint32_t cmd) override;
+    void cmd_ncds(uint32_t cmd) override;
+    void cmd_cdp(uint32_t cmd) override;
+    void cmd_ncdt(uint32_t cmd) override;
+    void cmd_nccs(uint32_t cmd) override;
+    void cmd_cc(uint32_t cmd) override;
+    void cmd_ncs(uint32_t cmd) override;
+    void cmd_nct(uint32_t cmd) override;
+    void cmd_dcpl(uint32_t cmd) override;
+    void cmd_dpct(uint32_t cmd) override;
+    void cmd_ncct(uint32_t cmd) override;
 
     // 3D reconstruction: snapshot captured after each RTPS/RTPT.
     GteSnapshot last_snapshot_{};
@@ -204,9 +227,11 @@ class Gte
     // After 3 consecutive RTPS calls, this contains the same 3 vertices
     // that the GTE SXY FIFO holds as projected screen coords.
     GteVertex3D rtps_vert_fifo_[3]{};
+    RtpsTraceVertex rtps_trace_[3]{};
+    int rtps_trace_count_{0};
 
   public:
-    const GteSnapshot& last_snapshot() const { return last_snapshot_; }
+    const GteSnapshot& last_snapshot() const override { return last_snapshot_; }
 
     // ── RTPT diagnostic counters (per-frame, reset at VBlank) ──
     struct RtptDiag {

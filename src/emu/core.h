@@ -11,6 +11,7 @@
 #include "../cdrom/cdrom.h"
 #include "../gpu/gpu.h"
 #include "../gpu/gpu_3d.h"
+#include "../gte/gte_backend_kind.h"
 #include "../gte/gte_3d.h"
 #include "../loader/loader.h"
 #include "../mdec/mdec.h"
@@ -31,12 +32,19 @@ namespace emu
 class Core
 {
   public:
+    enum class ExeBootMode
+    {
+        devkit,
+        devkit_hle,
+    };
+
     struct InitOptions
     {
         int pretty{0};
         int trace_io{0};
         int hle_vectors{0}; // opt-in only
         int text_hle{0}; // text-only BIOS/SDK interception (printf/putchar)
+        gte::BackendKind gte_backend{gte::BackendKind::faithful};
 
         int stop_on_high_ram{0};
         int stop_on_bios_to_ram_nop{0};
@@ -48,10 +56,18 @@ class Core
         int trace_vectors{0};
         int watch_u32_enabled{0};
         uint32_t watch_u32_phys{0};
+        uint32_t watch_ram_range_phys{0};
+        uint32_t watch_ram_range_size{0};
+        int stack_watch_enabled{1};
+        uint32_t stack_watch_phys{0x001FFF4Cu};
+        uint32_t stack_watch_size{4};
+        int stack_watch_target_enabled{1};
+        uint32_t stack_watch_target_value{1};
 
         int loop_detectors{1}; // enable one-shot loop debug dumps (default: on)
         uint32_t bus_tick_batch{1}; // bus tick batching (1=accurate, 32=fast)
         int cd_timing_mode{1}; // 0=realistic, 1=compatibility-fast
+        uint32_t crash_trace_steps{512}; // default ON for current crash-debug phase
     };
 
     Core(rlog::Logger* logger);
@@ -97,8 +113,11 @@ class Core
     // Fast boot: read SYSTEM.CNF from CD, load the EXE, set PC/GP/SP. Requires init_from_image() first.
     bool fast_boot_from_cd(char* err, size_t err_cap);
 
-    // Dev kit boot: load PS-EXE from file, set PC/GP/SP, init HLE kernel. Requires init_from_image() first.
-    bool fast_boot_from_exe(const char* exe_path, char* err, size_t err_cap);
+    // Dev kit boot:
+    // - devkit: direct EXE boot without forcing HLE/kernel bootstrap
+    // - devkit_hle: direct EXE boot with explicit HLE-style kernel/bootstrap
+    // Requires init_from_image() first.
+    bool fast_boot_from_exe(const char* exe_path, ExeBootMode mode, char* err, size_t err_cap);
 
     // Set PSX EXE parameters (injected into scratchpad RAM before the EXE starts).
     // The ints are written at 0x1F800200 and $a1 is pointed there at boot.
@@ -246,6 +265,8 @@ class Core
 
     // PSX EXE params (devkit mode, written to scratchpad at boot)
     std::vector<int32_t> psx_params_{};
+    int init_hle_vectors_{0};
+    int init_text_hle_{0};
 };
 
 } // namespace emu

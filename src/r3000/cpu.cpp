@@ -282,6 +282,7 @@ static int psx_is_critical_mmio(uint32_t phys_addr)
 
 Cpu::Cpu(Bus& bus, rlog::Logger* logger) : bus_(bus), logger_(logger)
 {
+    set_gte_backend_kind(gte::BackendKind::faithful);
     // Version marker - update when making changes!
     emu::logf(emu::LogLevel::debug, "CPU", "CPU source v10 (session_2026_03_22)");
 }
@@ -389,9 +390,100 @@ void Cpu::reset(uint32_t reset_pc)
         recent_instr_[i] = 0;
     }
     recent_pos_ = 0;
+    crash_trace_pos_ = 0;
+    crash_trace_count_ = 0;
     stopped_on_high_ram_ = 0;
 
-    gte_.reset();
+    if (gte_backend_)
+        gte_backend_->reset();
+}
+
+void Cpu::set_gte_backend_kind(gte::BackendKind kind)
+{
+    if (gte_backend_ && gte_backend_kind_ == kind)
+        return;
+
+    switch (kind)
+    {
+    case gte::BackendKind::modern:
+        gte_backend_ = std::make_unique<gte::GteModern>();
+        break;
+    case gte::BackendKind::faithful:
+    default:
+        gte_backend_ = std::make_unique<gte::Gte>();
+        kind = gte::BackendKind::faithful;
+        break;
+    }
+
+    gte_backend_kind_ = kind;
+    emu::logf(emu::LogLevel::warn, "CPU", "Primary GTE backend=%s", gte::backend_kind_name(kind));
+}
+
+void Cpu::record_crash_trace(uint32_t instr)
+{
+    if (!crash_trace_enabled_)
+        return;
+
+    CrashTraceEntry& e = crash_trace_[crash_trace_pos_];
+    e.pc = pc_;
+    e.instr = instr;
+    e.hi = hi_;
+    e.lo = lo_;
+    e.status = cop0_[COP0_STATUS];
+    e.cause = cop0_[COP0_CAUSE];
+    e.epc = cop0_[COP0_EPC];
+    e.badvaddr = cop0_[COP0_BADVADDR];
+    for (uint32_t i = 0; i < 32; ++i)
+        e.gpr[i] = gpr_[i];
+
+    crash_trace_pos_ = (crash_trace_pos_ + 1u) % kCrashTraceCapacity;
+    if (crash_trace_count_ < kCrashTraceCapacity)
+        ++crash_trace_count_;
+}
+
+void Cpu::dump_crash_trace(const char* reason) const
+{
+    if (!crash_trace_enabled_ || crash_trace_dump_count_ == 0 || crash_trace_count_ == 0)
+        return;
+
+    const uint32_t count = (crash_trace_dump_count_ < crash_trace_count_) ? crash_trace_dump_count_ : crash_trace_count_;
+    emu::logf(emu::LogLevel::error, "CPU", "CrashTrace dump: reason=%s entries=%u", reason ? reason : "unknown", count);
+
+    const uint32_t start = (crash_trace_pos_ + kCrashTraceCapacity - count) % kCrashTraceCapacity;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const CrashTraceEntry& e = crash_trace_[(start + i) % kCrashTraceCapacity];
+        emu::logf(
+            emu::LogLevel::error,
+            "CPU",
+            "CrashTrace[%03u] pc=0x%08X instr=0x%08X hi=0x%08X lo=0x%08X sr=0x%08X cause=0x%08X epc=0x%08X bad=0x%08X",
+            i,
+            e.pc, e.instr, e.hi, e.lo, e.status, e.cause, e.epc, e.badvaddr);
+        emu::logf(
+            emu::LogLevel::error,
+            "CPU",
+            "CrashTrace[%03u] v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X",
+            i,
+            e.gpr[2], e.gpr[3], e.gpr[4], e.gpr[5], e.gpr[6], e.gpr[7], e.gpr[8], e.gpr[9]);
+        emu::logf(
+            emu::LogLevel::error,
+            "CPU",
+            "CrashTrace[%03u] t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X s0=0x%08X s1=0x%08X",
+            i,
+            e.gpr[10], e.gpr[11], e.gpr[12], e.gpr[13], e.gpr[14], e.gpr[15], e.gpr[16], e.gpr[17]);
+        emu::logf(
+            emu::LogLevel::error,
+            "CPU",
+            "CrashTrace[%03u] s2=0x%08X s3=0x%08X s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X t8=0x%08X t9=0x%08X",
+            i,
+            e.gpr[18], e.gpr[19], e.gpr[20], e.gpr[21], e.gpr[22], e.gpr[23], e.gpr[24], e.gpr[25]);
+        emu::logf(
+            emu::LogLevel::error,
+            "CPU",
+            "CrashTrace[%03u] k0=0x%08X k1=0x%08X gp=0x%08X sp=0x%08X fp=0x%08X ra=0x%08X at=0x%08X",
+            i,
+            e.gpr[26], e.gpr[27], e.gpr[28], e.gpr[29], e.gpr[30], e.gpr[31], e.gpr[1]);
+    }
 }
 
 
@@ -511,6 +603,7 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
             // On first ADEL/ADES, dump recent trace to identify the caller path.
             if (aerr_trace_count_ == 1)
             {
+                dump_crash_trace(((code & 0x1Fu) == EXC_ADEL) ? "adel_first" : "ades_first");
                 rlog::logger_logf(logger_, rlog::Level::debug, rlog::Category::exc, "Recent trace (latest last):");
                 for (uint32_t i = 0; i < 64; ++i)
                 {
@@ -549,6 +642,13 @@ void Cpu::raise_exception(uint32_t code, uint32_t badvaddr, uint32_t pc_of_fault
                 ((code & 0x1Fu) == 9) ? "Bp" :
                 ((code & 0x1Fu) == 12) ? "OV" : "?",
                 pc_of_fault, epc, badvaddr, gpr_[31], fault_log);
+            bus_.request_gpu_dma_dump(
+                ((code & 0x1Fu) == 4) ? "cpu_fault_adel" :
+                ((code & 0x1Fu) == 5) ? "cpu_fault_ades" :
+                ((code & 0x1Fu) == 10) ? "cpu_fault_ri" :
+                ((code & 0x1Fu) == 8) ? "cpu_fault_sys" :
+                ((code & 0x1Fu) == 9) ? "cpu_fault_bp" :
+                ((code & 0x1Fu) == 12) ? "cpu_fault_ov" : "cpu_fault_other");
         }
     }
 
@@ -2972,6 +3072,8 @@ Cpu::StepResult Cpu::step()
                     "IFETCH ADEL repeated %u times at pc=0x%08X — halting CPU "
                     "(BIOS handler cannot recover)",
                     ifetch_adel_repeat_, pc_);
+                bus_.dump_stack_watch_context("ifetch_adel_repeat");
+                dump_crash_trace("ifetch_adel_repeat");
                 r.kind = StepResult::Kind::halted;
                 return r;
             }
@@ -2995,6 +3097,7 @@ Cpu::StepResult Cpu::step()
     }
 
     // Ring buffer: on capture après un fetch réussi.
+    record_crash_trace(instr);
     const uint32_t prev_pos = (recent_pos_ - 1) & 255u;
     const uint32_t prev_pc = recent_pc_[prev_pos];
     recent_pc_[recent_pos_ & 255u] = pc_;
@@ -4536,8 +4639,6 @@ Cpu::StepResult Cpu::step()
                             else if (svc == 0xFF02u)
                             {
                                 const uint8_t ch = (uint8_t)(gpr_[4] & 0xFFu);
-                                std::fputc((int)ch, stderr);
-                                std::fflush(stderr);
                                 if (text_out_)
                                 {
                                     std::fputc((int)ch, text_out_);
@@ -4566,7 +4667,6 @@ Cpu::StepResult Cpu::step()
                                         break;
                                     if (b == 0)
                                         break;
-                                    std::fputc((int)b, stderr);
                                     if (text_out_)
                                     {
                                         std::fputc((int)b, text_out_);
@@ -4582,7 +4682,6 @@ Cpu::StepResult Cpu::step()
                                     );
                                     addr++;
                                 }
-                                std::fflush(stderr);
                                 if (text_out_)
                                 {
                                     std::fflush(text_out_);
@@ -4652,7 +4751,6 @@ Cpu::StepResult Cpu::step()
                                         uint8_t b = 0;
                                         if (!load_u8(ptr + i, b))
                                             break;
-                                        std::fputc((int)b, stderr);
                                         if (text_out_)
                                         {
                                             std::fputc((int)b, text_out_);
@@ -4667,7 +4765,6 @@ Cpu::StepResult Cpu::step()
                                             b
                                         );
                                     }
-                                    std::fflush(stderr);
                                     if (text_out_)
                                     {
                                         std::fflush(text_out_);
@@ -5803,7 +5900,7 @@ Cpu::StepResult Cpu::step()
                 {
                     // MFC2: lecture data reg GTE -> CPU (avec load delay slot)
                     // Cortex test: always read primary GTE (do not inject tagged coords in game path).
-                    const uint32_t v = gte_.read_data(d);
+                    const uint32_t v = gte_backend_->read_data(d);
                     next_pending_load.valid = 1;
                     next_pending_load.reg = t;
                     next_pending_load.value = v;
@@ -5820,7 +5917,7 @@ Cpu::StepResult Cpu::step()
                 else if (rs_field == 0x02)
                 {
                     // CFC2: lecture ctrl reg GTE -> CPU (avec load delay slot)
-                    const uint32_t v = gte_.read_ctrl(d);
+                    const uint32_t v = gte_backend_->read_ctrl(d);
                     next_pending_load.valid = 1;
                     next_pending_load.reg = t;
                     next_pending_load.value = v;
@@ -5833,14 +5930,14 @@ Cpu::StepResult Cpu::step()
                 else if (rs_field == 0x04)
                 {
                     // MTC2: écriture CPU -> data reg GTE
-                    gte_.write_data(d, gpr_[t]);
+                    gte_backend_->write_data(d, gpr_[t]);
                     if (gte_shadow_) gte_shadow_->write_data(d, gpr_[t]);
                     observe_camera_mtc2(r.pc, d, t);
                 }
                 else if (rs_field == 0x06)
                 {
                     // CTC2: écriture CPU -> ctrl reg GTE
-                    gte_.write_ctrl(d, gpr_[t]);
+                    gte_backend_->write_ctrl(d, gpr_[t]);
                     if (gte_shadow_) gte_shadow_->write_ctrl(d, gpr_[t]);
                 }
                 else if (rs_field & 0x10)
@@ -5880,7 +5977,7 @@ Cpu::StepResult Cpu::step()
                             gte_trace_.summary_dumped = 1;
                         }
                     }
-                    const int gte_cycles = gte_.execute(instr);
+                    const int gte_cycles = gte_backend_->execute(instr);
                     if (gte_shadow_)
                     {
                         gte_shadow_->set_source_pc(r.pc);
@@ -5899,9 +5996,10 @@ Cpu::StepResult Cpu::step()
                         if (gte_func == 0x01 || gte_func == 0x30)
                         {
                             auto* corr = bus_.gte_correlation();
-                            if (corr && gte_.last_snapshot().valid)
+                            const auto& snapshot = gte_backend_->last_snapshot();
+                            if (corr && snapshot.valid)
                             {
-                                corr->record(gte_.last_snapshot());
+                                corr->record(snapshot);
                             }
                             else if (gte_corr_diag_count_ < 5)
                             {
@@ -5960,7 +6058,7 @@ Cpu::StepResult Cpu::step()
                 // Pour l'instant: écriture immédiate dans le GTE (pédago).
                 // Si on veut coller plus finement au timing hardware, on pourra ajouter une
                 // latence.
-                gte_.lwc2(t, v);
+                gte_backend_->lwc2(t, v);
                 if (gte_shadow_) gte_shadow_->lwc2(t, v);
                 break;
             }
@@ -5973,7 +6071,7 @@ Cpu::StepResult Cpu::step()
                 const int32_t off = (int16_t)imm_s(instr);
                 const uint32_t addr = (uint32_t)((int32_t)gpr_[s] + off);
                 // Cortex test: always store primary GTE value to guest RAM.
-                const uint32_t v = gte_.swc2(t);
+                const uint32_t v = gte_backend_->swc2(t);
                 uint32_t face_token = kNoFaceToken;
                 if (gte_shadow_ && t >= 12 && t <= 15)
                 {

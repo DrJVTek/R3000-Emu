@@ -4,6 +4,7 @@
 #include "HAL/CriticalSection.h"
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
+#include "InputCoreTypes.h"
 #include "Templates/Atomic.h"
 
 // Core logging.
@@ -52,6 +53,13 @@ enum class ECDTimingMode : uint8
 {
     Realistic UMETA(DisplayName = "Realistic"),
     CompatibilityFast UMETA(DisplayName = "Compatibility Fast")
+};
+
+UENUM(BlueprintType)
+enum class EGteBackendMode : uint8
+{
+    Faithful UMETA(DisplayName = "Faithful"),
+    Modern UMETA(DisplayName = "Modern (Experimental)")
 };
 
 UCLASS(ClassGroup = (PSXEmu), meta = (BlueprintSpawnableComponent))
@@ -186,6 +194,30 @@ class UPSXEmulatorComponent : public UActorComponent
     bool bTraceASM{false};
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs")
+    int32 CpuCrashTraceSteps{512};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs")
+    int32 WatchRamRangePhys{0};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs")
+    int32 WatchRamRangeSize{0};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs")
+    bool bEnableStackWatch{true};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs", meta = (EditCondition = "bEnableStackWatch"))
+    int32 StackWatchPhys{0x001FFF4C};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs", meta = (EditCondition = "bEnableStackWatch", ClampMin = "1"))
+    int32 StackWatchSize{4};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs", meta = (EditCondition = "bEnableStackWatch"))
+    bool bStackWatchTargetValueEnabled{true};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs", meta = (EditCondition = "bEnableStackWatch && bStackWatchTargetValueEnabled"))
+    int32 StackWatchTargetValue{1};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs")
     bool bTraceIO{false};
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Logs")
@@ -199,6 +231,9 @@ class UPSXEmulatorComponent : public UActorComponent
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
     bool bTextHle{false};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|GTE")
+    EGteBackendMode GteBackendMode{EGteBackendMode::Faithful};
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu", meta = (ClampMin = "1", ClampMax = "128"))
     int32 BusTickBatch{1};
@@ -281,11 +316,25 @@ class UPSXEmulatorComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input")
     TObjectPtr<UInputAction> IA_PadR3;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input|Debug")
+    bool bEnablePauseHotkey{true};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input|Debug", meta = (EditCondition = "bEnablePauseHotkey"))
+    FKey PauseToggleKey{EKeys::P};
+
+    UFUNCTION(BlueprintCallable, Category = "PSXEmu")
+    void TogglePause();
+
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu")
+    bool IsEmulationPaused() const;
+
     // Routing struct for emu::logf callback (tag → file).
     struct EmuLogFiles
     {
         std::FILE* spu{nullptr};
         std::FILE* sys{nullptr};
+        std::FILE* cpu{nullptr};
+        std::FILE* gpu_dma{nullptr};
     };
 
     // Thread-safe accessors for worker thread
@@ -324,6 +373,7 @@ class UPSXEmulatorComponent : public UActorComponent
     void PollPadInput();
     bool bPadMappingAdded_{false};
     bool bPawnInputDisabled_{false};
+    bool bPauseToggleWasDown_{false};
 
     emu::Core* Core_{nullptr};
     TAtomic<uint64> StepsExecuted_{0};
@@ -348,7 +398,9 @@ class UPSXEmulatorComponent : public UActorComponent
     std::FILE* CoreLogFile_{nullptr};
     std::FILE* CdLogFile_{nullptr};
     std::FILE* GpuLogFile_{nullptr};
+    std::FILE* GpuDmaLogFile_{nullptr};
     std::FILE* SysLogFile_{nullptr};
+    std::FILE* CpuLogFile_{nullptr};
     std::FILE* IoLogFile_{nullptr};
     std::FILE* SpuLogFile_{nullptr};
     std::FILE* TextLogFile_{nullptr};

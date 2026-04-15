@@ -68,6 +68,15 @@ struct CpuVramWriteInfo
 struct Stage67GpuDebug
 {
     uint32_t gpustat{0};
+    uint32_t dma_request{0};
+    uint32_t gpu_idle{0};
+    uint32_t ready_to_send_vram{0};
+    uint32_t ready_to_receive_dma{0};
+    uint32_t dma_dir{0};
+    uint32_t gp0_state{0};
+    uint32_t dma_busy_cycles{0};
+    uint32_t vram_to_cpu_active{0};
+    uint32_t cpu_vram_words_remaining{0};
     uint32_t scanline{0};
     uint32_t display_line_lsb{0};
     uint32_t display_y{0};
@@ -204,6 +213,24 @@ struct FrameStats
 class Gpu
 {
   public:
+    struct DmaExtremePrimitiveInfo
+    {
+        bool valid{false};
+        int16_t x[3]{};
+        int16_t y[3]{};
+        uint8_t flags{0};
+        uint8_t semi_mode{0};
+        uint8_t tex_depth{0};
+        uint16_t clut{0};
+        uint16_t texpage{0};
+        bool corr_valid{false};
+        bool corr_swapped{false};
+        uint32_t source_pc{0};
+        gte::GteVertex3D verts_3d[3]{};
+        uint16_t sz[3]{};
+        gte::GteTransform transform{};
+    };
+
     // Magic number to detect stale/freed Gpu pointers (Hot Reload issue)
     static constexpr uint32_t kMagicValid = 0x47505531u;  // "GPU1"
     uint32_t magic_{kMagicValid};
@@ -212,11 +239,15 @@ class Gpu
     explicit Gpu(rlog::Logger* logger = nullptr);
 
     void set_log_sinks(const flog::Sink& gpu_only, const flog::Sink& combined, const flog::Clock& clock);
+    void reset_dma_debug_latches();
+    bool consume_dma_extreme_primitive(DmaExtremePrimitiveInfo& out);
 
     // MMIO 32-bit (absolute addresses)
     uint32_t mmio_read32(uint32_t addr);
     void mmio_write32(uint32_t addr, uint32_t v);
     Stage67GpuDebug stage67_debug() const;
+    void notify_dma_submit(uint32_t words, bool linked_list);
+    void tick_timing(uint32_t cycles);
 
     void set_dump_file(const char* path);
 
@@ -353,7 +384,17 @@ class Gpu
     uint32_t vram_write_seq() const { return vram_write_seq_; }
 
   private:
+    struct DynamicStatusBits
+    {
+        uint32_t dma_request{0};
+        uint32_t gpu_idle{0};
+        uint32_t ready_to_send_vram{0};
+        uint32_t ready_to_receive_dma{0};
+    };
+
     void dump_u32(uint32_t port, uint32_t v);
+    DynamicStatusBits compute_dynamic_status_bits() const;
+    uint32_t build_gpustat() const;
 
     // GP0 command processing
     void gp0_write(uint32_t v);
@@ -396,6 +437,7 @@ class Gpu
     // GPU status register (0x1F801814)
     uint32_t status_{0};
     uint32_t dma_dir_{0};
+    uint32_t dma_busy_cycles_{0};
 
     // VRAM backing store (15-bit pixels as u16)
     std::unique_ptr<uint16_t[]> vram_;
@@ -418,6 +460,7 @@ class Gpu
     uint16_t cpu_vram_w_{0}, cpu_vram_h_{0};
     uint16_t cpu_vram_col_{0}, cpu_vram_row_{0};
     uint32_t cpu_vram_words_remaining_{0};
+    uint32_t gpustat_suspicious_log_count_{0};
 
     // VRAM→CPU transfer state (GP0 C0h + GPUREAD)
     bool vram_to_cpu_active_{false};
@@ -495,6 +538,7 @@ class Gpu
 
     // Binary GP0 packet capture
     std::FILE* dump_{nullptr};
+    DmaExtremePrimitiveInfo dma_extreme_primitive_{};
 };
 
 } // namespace gpu

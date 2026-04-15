@@ -52,6 +52,13 @@ static int EffectiveCdTimingMode(ECDTimingMode Mode)
     return (Mode == ECDTimingMode::Realistic) ? 0 : 1;
 }
 
+static gte::BackendKind EffectiveGteBackend(EGteBackendMode Mode)
+{
+    return (Mode == EGteBackendMode::Modern)
+        ? gte::BackendKind::modern
+        : gte::BackendKind::faithful;
+}
+
 static const TCHAR* LexToString(ECDTimingMode Mode)
 {
     switch (Mode)
@@ -338,6 +345,36 @@ static void UERlogCallback(rlog::Level Level, rlog::Category /*Cat*/, const char
 static void UEAsyncLogOutput(uint64_t /*ts_ns*/, emu::LogLevel Level,
                               const char* Tag, const char* Msg, void* User)
 {
+    auto HasPrefix = [](const char* Value, const char* Prefix) -> bool
+    {
+        return Value && Prefix && std::strncmp(Value, Prefix, std::strlen(Prefix)) == 0;
+    };
+    auto IsCpuTag = [&](const char* Value) -> bool
+    {
+        return Value && (
+            std::strcmp(Value, "CPU") == 0 ||
+            std::strcmp(Value, "BUS") == 0 ||
+            std::strcmp(Value, "IRQ") == 0 ||
+            std::strcmp(Value, "RAMWATCH") == 0 ||
+            std::strcmp(Value, "STACKWATCH") == 0 ||
+            std::strcmp(Value, "STAGE67") == 0 ||
+            std::strcmp(Value, "REGTRACE") == 0 ||
+            std::strcmp(Value, "CAM_ROOT") == 0 ||
+            std::strcmp(Value, "BIOS") == 0 ||
+            HasPrefix(Value, "EXC-") ||
+            HasPrefix(Value, "GAME") ||
+            HasPrefix(Value, "TEKK") ||
+            HasPrefix(Value, "VSYNC") ||
+            HasPrefix(Value, "VBLANK") ||
+            HasPrefix(Value, "BIOSJ") ||
+            HasPrefix(Value, "INT") ||
+            HasPrefix(Value, "D66") ||
+            HasPrefix(Value, "CD_INIT") ||
+            HasPrefix(Value, "EXE_") ||
+            HasPrefix(Value, "LDST") ||
+            HasPrefix(Value, "STAGE67"));
+    };
+
     switch (Level)
     {
     case emu::LogLevel::error: UE_LOG(LogPSXEmu, Error,       TEXT("[%hs] %hs"), Tag, Msg); break;
@@ -367,6 +404,16 @@ static void UEAsyncLogOutput(uint64_t /*ts_ns*/, emu::LogLevel Level,
     {
         std::fprintf(Files->sys, "[%hs] %hs\n", Tag, Msg);
         std::fflush(Files->sys);
+    }
+    if (Files->cpu && IsCpuTag(Tag))
+    {
+        std::fprintf(Files->cpu, "[%hs] %hs\n", Tag, Msg);
+        std::fflush(Files->cpu);
+    }
+    if (Files->gpu_dma && std::strcmp(Tag, "GPUDMA") == 0)
+    {
+        std::fprintf(Files->gpu_dma, "[%hs] %hs\n", Tag, Msg);
+        std::fflush(Files->gpu_dma);
     }
 }
 
@@ -508,6 +555,15 @@ bool UPSXEmulatorComponent::BootBiosInternal()
     // User can toggle via bHleVectors property in Blueprint.
     Opt.hle_vectors = bHleVectors ? 1 : 0;
     Opt.text_hle = bTextHle ? 1 : 0;
+    Opt.gte_backend = EffectiveGteBackend(GteBackendMode);
+    Opt.crash_trace_steps = static_cast<uint32>(FMath::Clamp(CpuCrashTraceSteps, 0, 2048));
+    Opt.watch_ram_range_phys = static_cast<uint32>(FMath::Max(WatchRamRangePhys, 0));
+    Opt.watch_ram_range_size = static_cast<uint32>(FMath::Max(WatchRamRangeSize, 0));
+    Opt.stack_watch_enabled = bEnableStackWatch ? 1 : 0;
+    Opt.stack_watch_phys = static_cast<uint32>(FMath::Max(StackWatchPhys, 0));
+    Opt.stack_watch_size = static_cast<uint32>(FMath::Clamp(StackWatchSize, 0, 0x10000));
+    Opt.stack_watch_target_enabled = bStackWatchTargetValueEnabled ? 1 : 0;
+    Opt.stack_watch_target_value = static_cast<uint32>(StackWatchTargetValue);
     Opt.loop_detectors = bLoopDetectors ? 1 : 0;
     Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
     Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
@@ -555,14 +611,18 @@ void UPSXEmulatorComponent::InitEmulator()
         const FString CoreLogPath = FPaths::Combine(AbsOut, TEXT("r3000_core.log"));
         const FString CdLogPath = FPaths::Combine(AbsOut, TEXT("cdrom.log"));
         const FString GpuLogPath = FPaths::Combine(AbsOut, TEXT("gpu.log"));
+        const FString GpuDmaLogPath = FPaths::Combine(AbsOut, TEXT("gpu_dma.log"));
         const FString SysLogPath = FPaths::Combine(AbsOut, TEXT("system.log"));
+        const FString CpuLogPath = FPaths::Combine(AbsOut, TEXT("cpu.log"));
         const FString IoLogPath = FPaths::Combine(AbsOut, TEXT("io.log"));
         const FString SpuLogPath = FPaths::Combine(AbsOut, TEXT("spu.log"));
 
         CoreLogFile_ = fopen_utf8(FTCHARToUTF8(*CoreLogPath).Get(), "wb");
         CdLogFile_ = fopen_utf8(FTCHARToUTF8(*CdLogPath).Get(), "wb");
         GpuLogFile_ = fopen_utf8(FTCHARToUTF8(*GpuLogPath).Get(), "wb");
+        GpuDmaLogFile_ = fopen_utf8(FTCHARToUTF8(*GpuDmaLogPath).Get(), "wb");
         SysLogFile_ = fopen_utf8(FTCHARToUTF8(*SysLogPath).Get(), "wb");
+        CpuLogFile_ = fopen_utf8(FTCHARToUTF8(*CpuLogPath).Get(), "wb");
         IoLogFile_ = fopen_utf8(FTCHARToUTF8(*IoLogPath).Get(), "wb");
         SpuLogFile_ = fopen_utf8(FTCHARToUTF8(*SpuLogPath).Get(), "wb");
 
@@ -574,6 +634,8 @@ void UPSXEmulatorComponent::InitEmulator()
     // File pointers are valid until async_log_shutdown() in EndPlay.
     EmuLogFiles_.spu = SpuLogFile_;
     EmuLogFiles_.sys = SysLogFile_;
+    EmuLogFiles_.cpu = CpuLogFile_;
+    EmuLogFiles_.gpu_dma = GpuDmaLogFile_;
     emu::LogLevel EmuLevel = emu::LogLevel::info;
     {
         const FTCHARToUTF8 EmuLvlUtf8(*EmuLogLevel);
@@ -705,7 +767,16 @@ void UPSXEmulatorComponent::InitEmulator()
     Opt.trace_io = bTraceIO ? 1 : 0;
     Opt.hle_vectors = 1; // Dev kit always uses HLE
     Opt.text_hle = bTextHle ? 1 : 0;
-        Opt.loop_detectors = bLoopDetectors ? 1 : 0;
+    Opt.gte_backend = EffectiveGteBackend(GteBackendMode);
+    Opt.crash_trace_steps = static_cast<uint32>(FMath::Clamp(CpuCrashTraceSteps, 0, 2048));
+    Opt.watch_ram_range_phys = static_cast<uint32>(FMath::Max(WatchRamRangePhys, 0));
+    Opt.watch_ram_range_size = static_cast<uint32>(FMath::Max(WatchRamRangeSize, 0));
+    Opt.stack_watch_enabled = bEnableStackWatch ? 1 : 0;
+    Opt.stack_watch_phys = static_cast<uint32>(FMath::Max(StackWatchPhys, 0));
+    Opt.stack_watch_size = static_cast<uint32>(FMath::Clamp(StackWatchSize, 0, 0x10000));
+    Opt.stack_watch_target_enabled = bStackWatchTargetValueEnabled ? 1 : 0;
+    Opt.stack_watch_target_value = static_cast<uint32>(StackWatchTargetValue);
+    Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
         Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
@@ -747,7 +818,7 @@ void UPSXEmulatorComponent::InitEmulator()
 
         // Load EXE + initialize HLE kernel (PCB/TCB, I_MASK, COP0)
         FTCHARToUTF8 ExeUtf8(*ExePath);
-        if (!Core_->fast_boot_from_exe(ExeUtf8.Get(), err, sizeof(err)))
+        if (!Core_->fast_boot_from_exe(ExeUtf8.Get(), emu::Core::ExeBootMode::devkit_hle, err, sizeof(err)))
         {
             UE_LOG(LogPSXEmu, Error, TEXT("Dev kit EXE boot failed: %hs"), err[0] ? err : "unknown error");
             return;
@@ -770,7 +841,16 @@ void UPSXEmulatorComponent::InitEmulator()
     Opt.trace_io = bTraceIO ? 1 : 0;
     Opt.hle_vectors = 0; // fastboot will enable HLE vectors internally after loading EXE
     Opt.text_hle = bTextHle ? 1 : 0;
-        Opt.loop_detectors = bLoopDetectors ? 1 : 0;
+    Opt.gte_backend = EffectiveGteBackend(GteBackendMode);
+    Opt.crash_trace_steps = static_cast<uint32>(FMath::Clamp(CpuCrashTraceSteps, 0, 2048));
+    Opt.watch_ram_range_phys = static_cast<uint32>(FMath::Max(WatchRamRangePhys, 0));
+    Opt.watch_ram_range_size = static_cast<uint32>(FMath::Max(WatchRamRangeSize, 0));
+    Opt.stack_watch_enabled = bEnableStackWatch ? 1 : 0;
+    Opt.stack_watch_phys = static_cast<uint32>(FMath::Max(StackWatchPhys, 0));
+    Opt.stack_watch_size = static_cast<uint32>(FMath::Clamp(StackWatchSize, 0, 0x10000));
+    Opt.stack_watch_target_enabled = bStackWatchTargetValueEnabled ? 1 : 0;
+    Opt.stack_watch_target_value = static_cast<uint32>(StackWatchTargetValue);
+    Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
         Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
         if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
@@ -1447,10 +1527,20 @@ void UPSXEmulatorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
         std::fclose(GpuLogFile_);
         GpuLogFile_ = nullptr;
     }
+    if (GpuDmaLogFile_)
+    {
+        std::fclose(GpuDmaLogFile_);
+        GpuDmaLogFile_ = nullptr;
+    }
     if (SysLogFile_)
     {
         std::fclose(SysLogFile_);
         SysLogFile_ = nullptr;
+    }
+    if (CpuLogFile_)
+    {
+        std::fclose(CpuLogFile_);
+        CpuLogFile_ = nullptr;
     }
     if (IoLogFile_)
     {
@@ -1553,6 +1643,18 @@ void UPSXEmulatorComponent::PollPadInput()
         return;
     }
 
+    if (bEnablePauseHotkey)
+    {
+        const bool bPauseDown = PC->IsInputKeyDown(PauseToggleKey);
+        if (bPauseDown && !bPauseToggleWasDown_)
+            TogglePause();
+        bPauseToggleWasDown_ = bPauseDown;
+    }
+    else
+    {
+        bPauseToggleWasDown_ = false;
+    }
+
     // Disable default pawn input so gamepad buttons don't move the UE5 camera.
     // We consume all gamepad input for the PS1 emulator.
     if (!bPawnInputDisabled_)
@@ -1604,5 +1706,28 @@ void UPSXEmulatorComponent::PollPadInput()
     }
 
     Core_->set_pad_buttons(Buttons);
+}
+
+void UPSXEmulatorComponent::TogglePause()
+{
+    if (bThreadedMode && EmuWorker_)
+    {
+        const bool bNewPaused = !bWorkerPaused_.Load();
+        bWorkerPaused_.Store(bNewPaused);
+        UE_LOG(LogPSXEmu, Log, TEXT("Emulation %s"), bNewPaused ? TEXT("paused") : TEXT("resumed"));
+        emu::logf(emu::LogLevel::warn, "CORE", "UE emulation %s", bNewPaused ? "paused" : "resumed");
+        return;
+    }
+
+    bRunning = !bRunning;
+    UE_LOG(LogPSXEmu, Log, TEXT("Emulation %s"), bRunning ? TEXT("resumed") : TEXT("paused"));
+    emu::logf(emu::LogLevel::warn, "CORE", "UE emulation %s", bRunning ? "resumed" : "paused");
+}
+
+bool UPSXEmulatorComponent::IsEmulationPaused() const
+{
+    if (bThreadedMode && EmuWorker_)
+        return bWorkerPaused_.Load();
+    return !bRunning;
 }
 

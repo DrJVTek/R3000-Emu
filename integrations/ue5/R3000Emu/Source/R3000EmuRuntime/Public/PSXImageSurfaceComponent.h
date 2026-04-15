@@ -3,6 +3,7 @@
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Engine/Texture2D.h"
+#include "PSXSurfaceComponent.h"
 #include "PSXImageSurfaceComponent.generated.h"
 
 class UMaterialInterface;
@@ -98,6 +99,7 @@ private:
     uint16 LatchedDisplayH_{0};
     bool LatchedDisplay24Bit_{false};
     bool LatchedDisplayEnabled_{false};
+    EPSXSurfaceBufferingMode LatchedBufferingMode_{EPSXSurfaceBufferingMode::AutoDetect};
 
     static constexpr int32 kVramW = 1024;
     static constexpr int32 kVramH = 512;

@@ -32,9 +32,80 @@ static constexpr double kDotclkPeriodNs = 1e9 / 5322240.0;   // ~188ns (320px)
 namespace r3000
 {
 
+static int16_t gpudma_sign_extend_11(uint32_t v)
+{
+    v &= 0xFFFFu;
+    int32_t lo = (int32_t)(v & 0x7FFu);
+    if (lo & 0x400)
+        lo |= ~0x7FF;
+    return (int16_t)lo;
+}
+
+static const char* gpudma_cmd_name(uint8_t cmd)
+{
+    if (cmd == 0x00) return "NOP";
+    if (cmd == 0x01) return "CLEAR_CACHE";
+    if (cmd == 0x02) return "FILL_RECT";
+    if (cmd == 0x1F) return "IRQ";
+    if (cmd >= 0x20 && cmd <= 0x3F) return "POLYGON";
+    if (cmd >= 0x40 && cmd <= 0x5F) return "LINE";
+    if (cmd >= 0x60 && cmd <= 0x7F) return "RECT";
+    if (cmd >= 0x80 && cmd <= 0x9F) return "VRAM_TO_VRAM";
+    if (cmd >= 0xA0 && cmd <= 0xBF) return "CPU_TO_VRAM";
+    if (cmd >= 0xC0 && cmd <= 0xDF) return "VRAM_TO_CPU";
+    if (cmd >= 0xE1 && cmd <= 0xE6) return "ENV";
+    return "UNKNOWN";
+}
+
+static int gpudma_param_count(uint8_t cmd)
+{
+    if (cmd == 0x00 || cmd == 0x01 || cmd == 0x1F) return 0;
+    if (cmd == 0x02) return 2;
+    if (cmd <= 0x1F) return 0;
+
+    if (cmd >= 0x20 && cmd <= 0x3F)
+    {
+        const bool gouraud = (cmd & 0x10) != 0;
+        const bool quad = (cmd & 0x08) != 0;
+        const bool textured = (cmd & 0x04) != 0;
+        const int verts = quad ? 4 : 3;
+        if (!gouraud && !textured) return verts;
+        if (!gouraud && textured) return verts * 2;
+        if (gouraud && !textured) return verts * 2 - 1;
+        return verts * 3 - 1;
+    }
+    if (cmd >= 0x40 && cmd <= 0x5F)
+    {
+        const bool gouraud = (cmd & 0x10) != 0;
+        const bool polyline = (cmd & 0x08) != 0;
+        if (polyline) return -1;
+        return gouraud ? 3 : 2;
+    }
+    if (cmd >= 0x60 && cmd <= 0x7F)
+    {
+        const int size_code = (cmd >> 3) & 3;
+        const bool textured = (cmd & 0x04) != 0;
+        int params = 1;
+        if (size_code == 0) params++;
+        if (textured) params++;
+        return params;
+    }
+    if (cmd >= 0x80 && cmd <= 0x9F) return 3;
+    if (cmd >= 0xA0 && cmd <= 0xBF) return -2;
+    if (cmd >= 0xC0 && cmd <= 0xDF) return 2;
+    if (cmd >= 0xE1 && cmd <= 0xE6) return 0;
+    return 0;
+}
+
 static bool stage67_watch_pc(uint32_t pc)
 {
     return pc >= 0x80065400u && pc <= 0x8006A800u;
+}
+
+static bool trex_gpu_wait_watch_pc(uint32_t pc)
+{
+    return (pc >= 0x8014D980u && pc <= 0x8014E090u) ||
+           (pc >= 0x8014EA20u && pc <= 0x8014ECACu);
 }
 
 static const char* stage67_watch_name(uint32_t phys)
@@ -128,7 +199,11 @@ void Bus::log_stage67_mmio_read(uint32_t, uint32_t, uint32_t) {}
 #else
 void Bus::log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size)
 {
-    if (!stage67_watch_pc(cpu_pc_) || stage67_mmio_log_count_ >= 256u)
+    const bool is_stage67 = stage67_watch_pc(cpu_pc_);
+    const bool is_trex_wait = trex_gpu_wait_watch_pc(cpu_pc_);
+    if ((!is_stage67 && !is_trex_wait) ||
+        (is_stage67 && stage67_mmio_log_count_ >= 256u) ||
+        (is_trex_wait && trex_gpu_wait_log_count_ >= 512u))
         return;
 
     if (!(phys == 0x1F801814u ||
@@ -148,18 +223,28 @@ void Bus::log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size)
     const uint32_t abec = stage67_ram_rd32(ram_, ram_size_, 0x0008ABECu);
     const uint32_t acfc = stage67_ram_rd32(ram_, ram_size_, 0x0008ACFCu);
 
-    ++stage67_mmio_log_count_;
+    uint32_t* log_counter = is_trex_wait ? &trex_gpu_wait_log_count_ : &stage67_mmio_log_count_;
+    ++(*log_counter);
     if (phys == 0x1F801814u && gpu_)
     {
         const gpu::Stage67GpuDebug gd = gpu_->stage67_debug();
         emu::logf(
             emu::LogLevel::warn,
-            "STAGE67MMIO",
-            "RD%u pc=0x%08X phys=0x%08X -> 0x%08X bit31=%u scan=%u line_lsb=%u dy=%u hres=%u vres=%u pal=%u interlace=%u vblank=%u field=%u frame=%u abdc=0x%08X abe0=0x%08X abe4=0x%08X abe8=0x%08X abec=0x%08X acfc=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
+            is_trex_wait ? "TREX_GPUWAIT" : "STAGE67MMIO",
+            "RD%u pc=0x%08X phys=0x%08X -> 0x%08X dma_req=%u idle=%u send=%u recv=%u dma_dir=%u gp0=%u dma_busy=%u v2c=%u v2c_words=%u bit31=%u scan=%u line_lsb=%u dy=%u hres=%u vres=%u pal=%u interlace=%u vblank=%u field=%u frame=%u abdc=0x%08X abe0=0x%08X abe4=0x%08X abe8=0x%08X abec=0x%08X acfc=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
             size * 8u,
             cpu_pc_,
             phys,
             value,
+            (unsigned)gd.dma_request,
+            (unsigned)gd.gpu_idle,
+            (unsigned)gd.ready_to_send_vram,
+            (unsigned)gd.ready_to_receive_dma,
+            (unsigned)gd.dma_dir,
+            (unsigned)gd.gp0_state,
+            (unsigned)gd.dma_busy_cycles,
+            (unsigned)gd.vram_to_cpu_active,
+            (unsigned)gd.cpu_vram_words_remaining,
             (unsigned)((gd.gpustat >> 31) & 1u),
             (unsigned)gd.scanline,
             (unsigned)gd.display_line_lsb,
@@ -179,13 +264,13 @@ void Bus::log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size)
             acfc,
             (unsigned)i_stat_,
             (unsigned)i_mask_,
-            stage67_mmio_log_count_);
+            *log_counter);
         return;
     }
 
     emu::logf(
         emu::LogLevel::warn,
-        "STAGE67MMIO",
+        is_trex_wait ? "TREX_GPUWAIT" : "STAGE67MMIO",
         "RD%u pc=0x%08X phys=0x%08X -> 0x%08X abdc=0x%08X abe0=0x%08X abe4=0x%08X abe8=0x%08X abec=0x%08X acfc=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
         size * 8u,
         cpu_pc_,
@@ -199,9 +284,161 @@ void Bus::log_stage67_mmio_read(uint32_t phys, uint32_t value, uint32_t size)
         acfc,
         (unsigned)i_stat_,
         (unsigned)i_mask_,
-        stage67_mmio_log_count_);
+        *log_counter);
 }
 #endif // R3000_NO_DIAG — log_stage67_mmio_read + static helpers
+
+void Bus::log_watch_ram_range(const char* op, uint32_t addr, uint32_t phys, uint32_t value, uint32_t size)
+{
+    if (!watch_ram_range_enabled_ || watch_ram_range_size_ == 0)
+        return;
+    if (watch_ram_range_log_count_ >= 512u)
+        return;
+
+    const uint32_t start = watch_ram_range_phys_;
+    const uint32_t end = start + watch_ram_range_size_;
+    const uint32_t write_end = phys + size;
+    if (write_end <= start || phys >= end)
+        return;
+
+    ++watch_ram_range_log_count_;
+    emu::logf(
+        emu::LogLevel::warn,
+        "RAMWATCH",
+        "%s pc=0x%08X addr=0x%08X phys=0x%08X size=%u val=0x%08X watch=[0x%08X..0x%08X) (#%u)",
+        op ? op : "WR?",
+        cpu_pc_,
+        addr,
+        phys,
+        size,
+        value,
+        start,
+        end,
+        watch_ram_range_log_count_);
+}
+
+bool Bus::stack_watch_overlaps(uint32_t phys, uint32_t size, uint32_t& watched_word_addr) const
+{
+    if (!stack_watch_enabled_ || stack_watch_size_ == 0 || ram_size_ == 0)
+        return false;
+
+    const uint32_t watch_start = stack_watch_phys_;
+    const uint32_t watch_end = watch_start + stack_watch_size_;
+    const uint32_t rm = ram_size_ - 1u;
+    for (uint32_t i = 0; i < size; ++i)
+    {
+        const uint32_t p = (phys + i) & rm;
+        if (p >= watch_start && p < watch_end)
+        {
+            watched_word_addr = watch_start & ~3u;
+            return true;
+        }
+    }
+    return false;
+}
+
+uint32_t Bus::read_ram_word_debug(uint32_t phys) const
+{
+    if (!ram_ || ram_size_ == 0)
+        return 0u;
+    const uint32_t rm = ram_size_ - 1u;
+    const uint32_t p0 = phys & rm;
+    const uint32_t p1 = (phys + 1u) & rm;
+    const uint32_t p2 = (phys + 2u) & rm;
+    const uint32_t p3 = (phys + 3u) & rm;
+    return (uint32_t)ram_[p0] |
+           ((uint32_t)ram_[p1] << 8) |
+           ((uint32_t)ram_[p2] << 16) |
+           ((uint32_t)ram_[p3] << 24);
+}
+
+void Bus::log_stack_watch(const char* op, uint32_t addr, uint32_t phys, uint32_t size, uint32_t old_word, uint32_t new_word)
+{
+    if (!stack_watch_enabled_ || stack_watch_size_ == 0)
+        return;
+
+    const uint8_t matched_target =
+        (stack_watch_target_enabled_ && new_word == stack_watch_target_value_) ? 1u : 0u;
+
+    stack_watch_last_writer_.addr = addr;
+    stack_watch_last_writer_.phys = phys;
+    stack_watch_last_writer_.size = size;
+    stack_watch_last_writer_.pc = cpu_pc_;
+    stack_watch_last_writer_.old_word = old_word;
+    stack_watch_last_writer_.new_word = new_word;
+    stack_watch_last_writer_.matched_target = matched_target;
+    ++stack_watch_last_writer_.hit_count;
+    std::snprintf(stack_watch_last_writer_.op, sizeof(stack_watch_last_writer_.op), "%s", op ? op : "WR?");
+    stack_watch_last_writer_valid_ = 1;
+
+    if (stack_watch_log_count_ >= 512u)
+        return;
+
+    ++stack_watch_log_count_;
+    emu::logf(
+        emu::LogLevel::warn,
+        "STACKWATCH",
+        "%s pc=0x%08X addr=0x%08X phys=0x%08X size=%u val_before=0x%08X val_after=0x%08X watch=[0x%08X..0x%08X) target_hit=%u (#%u)",
+        op ? op : "WR?",
+        cpu_pc_,
+        addr,
+        phys,
+        size,
+        old_word,
+        new_word,
+        stack_watch_phys_,
+        stack_watch_phys_ + stack_watch_size_,
+        (unsigned)matched_target,
+        stack_watch_log_count_);
+}
+
+void Bus::dump_stack_watch_context(const char* reason) const
+{
+    if (!stack_watch_enabled_ || stack_watch_size_ == 0)
+        return;
+
+    const uint32_t word_addr = stack_watch_phys_ & ~3u;
+    emu::logf(
+        emu::LogLevel::error,
+        "STACKWATCH",
+        "dump reason=%s watch=[0x%08X..0x%08X) target_enabled=%u target_value=0x%08X",
+        reason ? reason : "unknown",
+        stack_watch_phys_,
+        stack_watch_phys_ + stack_watch_size_,
+        (unsigned)stack_watch_target_enabled_,
+        stack_watch_target_value_);
+
+    for (uint32_t addr = word_addr - 8u; addr <= word_addr + 4u; addr += 4u)
+    {
+        emu::logf(
+            emu::LogLevel::error,
+            "STACKWATCH",
+            "dump word phys=0x%08X val=0x%08X",
+            addr,
+            read_ram_word_debug(addr));
+    }
+
+    if (stack_watch_last_writer_valid_)
+    {
+        emu::logf(
+            emu::LogLevel::error,
+            "STACKWATCH",
+            "last_writer op=%s pc=0x%08X addr=0x%08X phys=0x%08X size=%u val_before=0x%08X val_after=0x%08X target_hit=%u hits=%u",
+            stack_watch_last_writer_.op,
+            stack_watch_last_writer_.pc,
+            stack_watch_last_writer_.addr,
+            stack_watch_last_writer_.phys,
+            stack_watch_last_writer_.size,
+            stack_watch_last_writer_.old_word,
+            stack_watch_last_writer_.new_word,
+            (unsigned)stack_watch_last_writer_.matched_target,
+            stack_watch_last_writer_.hit_count);
+    }
+    else
+    {
+        emu::logf(emu::LogLevel::error, "STACKWATCH", "last_writer unavailable");
+    }
+}
 
 void Bus::set_pad_buttons(uint16_t v) { g_pad_buttons.store(v, std::memory_order_relaxed); }
 uint16_t Bus::pad_buttons() const    { return g_pad_buttons.load(std::memory_order_relaxed); }
@@ -299,6 +536,207 @@ Bus::~Bus()
 uint32_t Bus::ram_size() const
 {
     return ram_size_;
+}
+
+void Bus::request_gpu_dma_dump(const char* reason)
+{
+    dump_last_gpu_dma_linked_list(reason ? reason : "manual");
+}
+
+void Bus::dump_last_gpu_dma_linked_list(const char* reason)
+{
+    static constexpr uint32_t kGpudmaMaxVerboseNodes = 256u;
+    const uint32_t start_node = last_dma2_ll_start_node_ & 0x00FFFFFFu;
+    if (start_node == 0u)
+    {
+        emu::logf(emu::LogLevel::warn, "GPUDMA",
+            "dump skipped: no DMA2 linked-list captured yet (reason=%s)",
+            reason ? reason : "unknown");
+        return;
+    }
+
+    if (gpu_dma_dump_count_ >= 12u)
+    {
+        emu::logf(emu::LogLevel::warn, "GPUDMA",
+            "dump skipped: rate limit reached count=%u start=0x%05X reason=%s",
+            gpu_dma_dump_count_, start_node, reason ? reason : "unknown");
+        return;
+    }
+    ++gpu_dma_dump_count_;
+
+    emu::logf(emu::LogLevel::error, "GPUDMA",
+        "DUMP begin #%u reason=%s start=0x%05X",
+        gpu_dma_dump_count_, reason ? reason : "unknown", start_node);
+
+    auto read_ram_word = [this](uint32_t addr) -> uint32_t
+    {
+        const uint32_t a = addr & 0x1FFFFFu;
+        return (uint32_t)ram_[a] |
+               ((uint32_t)ram_[(a + 1) & 0x1FFFFFu] << 8) |
+               ((uint32_t)ram_[(a + 2) & 0x1FFFFFu] << 16) |
+               ((uint32_t)ram_[(a + 3) & 0x1FFFFFu] << 24);
+    };
+
+    uint32_t node = start_node;
+    std::vector<uint8_t> seen_nodes((0x200000u + 7u) / 8u, 0u);
+    uint32_t total_words = 0;
+    uint32_t total_nodes = 0;
+    uint32_t total_cmds = 0;
+    uint32_t verbose_nodes = 0;
+    uint32_t ot_run_start_idx = 0;
+    uint32_t ot_run_start_addr = 0;
+    uint32_t ot_run_last_addr = 0;
+    uint32_t ot_run_count = 0;
+
+    auto flush_ot_run = [&]()
+    {
+        if (ot_run_count == 0u)
+            return;
+        emu::logf(emu::LogLevel::error, "GPUDMA",
+            "OTRUN idx=%u..%u addr=0x%05X..0x%05X count=%u",
+            ot_run_start_idx,
+            ot_run_start_idx + ot_run_count - 1u,
+            ot_run_start_addr,
+            ot_run_last_addr,
+            ot_run_count);
+        ot_run_count = 0u;
+    };
+
+    for (uint32_t safety = 0; safety < 0x100000u; ++safety)
+    {
+        const uint32_t transfer_addr = node & 0x1FFFFCu;
+        const uint32_t seen_index = transfer_addr >> 3;
+        const uint8_t seen_mask = (uint8_t)(1u << (transfer_addr & 7u));
+        if (seen_nodes[seen_index] & seen_mask)
+        {
+            emu::logf(emu::LogLevel::error, "GPUDMA",
+                "DUMP cycle repeat=0x%05X after nodes=%u words=%u cmds=%u",
+                transfer_addr, total_nodes, total_words, total_cmds);
+            break;
+        }
+        seen_nodes[seen_index] |= seen_mask;
+
+        const uint32_t header = read_ram_word(transfer_addr);
+        const uint32_t words = header >> 24;
+        const uint32_t next = header & 0x00FFFFFFu;
+        const uint32_t node_index = total_nodes;
+        ++total_nodes;
+        total_words += words;
+
+        const uint32_t node_writer_pc = ram_face_writer_pc(transfer_addr);
+        const bool next_unaligned = (next & 3u) != 0u;
+        const bool is_plain_ot_entry =
+            (words == 0u) &&
+            !next_unaligned &&
+            (node_writer_pc == 0u) &&
+            ((next == 0x00FFFFFFu) || (next == ((transfer_addr - 4u) & 0x00FFFFFCu)));
+
+        if (is_plain_ot_entry)
+        {
+            if (ot_run_count == 0u)
+            {
+                ot_run_start_idx = node_index;
+                ot_run_start_addr = transfer_addr;
+            }
+            ot_run_last_addr = transfer_addr;
+            ++ot_run_count;
+        }
+        else
+        {
+            flush_ot_run();
+            if (verbose_nodes < kGpudmaMaxVerboseNodes)
+            {
+                emu::logf(emu::LogLevel::error, "GPUDMA",
+                    "NODE idx=%u addr=0x%05X hdr=0x%08X next=0x%05X words=%u writer_pc=0x%08X checks=%s%s",
+                    node_index,
+                    transfer_addr,
+                    header,
+                    next,
+                    words,
+                    node_writer_pc,
+                    next_unaligned ? "next_unaligned " : "",
+                    (words == 0u) ? "ot_entry" : "");
+                ++verbose_nodes;
+            }
+            else
+            {
+                emu::logf(emu::LogLevel::error, "GPUDMA",
+                    "NODE idx=%u addr=0x%05X summary_only hdr=0x%08X next=0x%05X words=%u writer_pc=0x%08X",
+                    node_index,
+                    transfer_addr,
+                    header,
+                    next,
+                    words,
+                    node_writer_pc);
+            }
+        }
+
+        int cmd_words_remaining = 0;
+        uint8_t current_cmd = 0;
+        int current_param_index = 0;
+
+        for (uint32_t i = 0; i < words; ++i)
+        {
+            const uint32_t addr = (transfer_addr + 4 + i * 4) & 0x1FFFFFu;
+            const uint32_t w = read_ram_word(addr);
+            const uint32_t writer_pc = ram_face_writer_pc(addr);
+
+            if (cmd_words_remaining <= 0)
+            {
+                current_cmd = (uint8_t)(w >> 24);
+                current_param_index = 0;
+                cmd_words_remaining = gpudma_param_count(current_cmd);
+                ++total_cmds;
+                emu::logf(emu::LogLevel::error, "GPUDMA",
+                    "CMD idx=%u.%u addr=0x%05X word=0x%08X op=0x%02X kind=%s params=%d writer_pc=0x%08X",
+                    node_index, i, addr, w, current_cmd, gpudma_cmd_name(current_cmd), cmd_words_remaining, writer_pc);
+
+                if (cmd_words_remaining < 0)
+                {
+                    emu::logf(emu::LogLevel::error, "GPUDMA",
+                        "CMD idx=%u.%u special=%s raw=0x%08X",
+                        node_index, i,
+                        (cmd_words_remaining == -1) ? "polyline" : "cpu_to_vram_stream",
+                        w);
+                    cmd_words_remaining = 0;
+                }
+            }
+            else
+            {
+                const int16_t sx = gpudma_sign_extend_11(w);
+                const int16_t sy = gpudma_sign_extend_11(w >> 16);
+                const bool xy_extreme = (std::abs((int)sx) >= 900 || std::abs((int)sy) >= 900);
+                if (xy_extreme || current_param_index < 4)
+                {
+                    emu::logf(emu::LogLevel::error, "GPUDMA",
+                        "PARAM idx=%u.%u addr=0x%05X word=0x%08X cmd=0x%02X param=%d xy=(%d,%d)%s writer_pc=0x%08X",
+                        node_index, i, addr, w, current_cmd, current_param_index,
+                        (int)sx, (int)sy,
+                        xy_extreme ? " EXTREME" : "",
+                        writer_pc);
+                }
+                --cmd_words_remaining;
+                ++current_param_index;
+            }
+        }
+
+        if (next == 0x00FFFFFFu)
+        {
+            flush_ot_run();
+            emu::logf(emu::LogLevel::error, "GPUDMA",
+                "DUMP end terminator nodes=%u words=%u cmds=%u",
+                total_nodes, total_words, total_cmds);
+            break;
+        }
+
+        node = next;
+        if (safety == 0x100000u - 1u)
+        {
+            flush_ot_run();
+            emu::logf(emu::LogLevel::error, "GPUDMA",
+                "DUMP safety nodes=%u words=%u cmds=%u", total_nodes, total_words, total_cmds);
+        }
+    }
 }
 
 void Bus::set_ram_face_token(uint32_t paddr, uint32_t token)
@@ -1178,7 +1616,7 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
     }
 
     // BIOS
-    if (phys >= kBiosBase && phys + 2 <= kBiosBase + bios_size_)
+    if (is_in_range(phys, kBiosBase, bios_size_, 2))
     {
         const uint32_t off = phys - kBiosBase;
         out = (uint16_t)bios_[off] | ((uint16_t)bios_[off + 1] << 8);
@@ -1292,7 +1730,7 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
     }
 
     // Scratchpad
-    if (phys >= kScratchBase && phys + 2 <= kScratchBase + kScratchSize)
+    if (is_in_range(phys, kScratchBase, kScratchSize, 2))
     {
         const uint32_t off = phys - kScratchBase;
         out = (uint16_t)scratch_[off] | ((uint16_t)scratch_[off + 1] << 8);
@@ -1300,7 +1738,7 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
     }
 
     // I/O fallback
-    if (phys >= kIoBase && phys + 2 <= kIoBase + kIoSize)
+    if (is_in_range(phys, kIoBase, kIoSize, 2))
     {
         if (phys >= 0x1F801000u && phys < 0x1F802000u)
         {
@@ -1366,7 +1804,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
     }
 
     // BIOS
-    if (phys >= kBiosBase && phys + 4 <= kBiosBase + bios_size_)
+    if (is_in_range(phys, kBiosBase, bios_size_, 4))
     {
         const uint32_t off = phys - kBiosBase;
         out = (uint32_t)bios_[off] | ((uint32_t)bios_[off + 1] << 8) |
@@ -1482,7 +1920,7 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
     }
 
     // Scratchpad
-    if (phys >= kScratchBase && phys + 4 <= kScratchBase + kScratchSize)
+    if (is_in_range(phys, kScratchBase, kScratchSize, 4))
     {
         const uint32_t off = phys - kScratchBase;
         out = (uint32_t)scratch_[off] | ((uint32_t)scratch_[off + 1] << 8) |
@@ -1491,14 +1929,14 @@ bool Bus::read_u32(uint32_t addr, uint32_t& out, MemFault& fault)
     }
 
     // EXP1
-    if (phys >= kExp1Base && phys + 4 <= kExp1Base + kExp1Size)
+    if (is_in_range(phys, kExp1Base, kExp1Size, 4))
     {
         out = 0xFFFFFFFFu; // Open bus
         return true;
     }
 
     // I/O fallback
-    if (phys >= kIoBase && phys + 4 <= kIoBase + kIoSize)
+    if (is_in_range(phys, kIoBase, kIoSize, 4))
     {
         const uint32_t off = phys - kIoBase;
         out = (uint32_t)io_[off] | ((uint32_t)io_[off + 1] << 8) |
@@ -1520,6 +1958,9 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
     if (phys < kRamWindow)
     {
         const uint32_t mp = phys & (ram_size_ - 1);
+        uint32_t stack_watch_word_addr = 0;
+        const bool stack_watch_hit = stack_watch_overlaps(mp, 1, stack_watch_word_addr);
+        const uint32_t stack_watch_before = stack_watch_hit ? read_ram_word_debug(stack_watch_word_addr) : 0u;
         ram_[mp] = v;
         if (mp >= 0x00050000u && mp < 0x00070000u && code_overlay_log_count_ < 256u)
         {
@@ -1582,6 +2023,9 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
                 }
             }
         }
+        log_watch_ram_range("WR8", addr, mp, v, 1);
+        if (stack_watch_hit)
+            log_stack_watch("WR8", addr, mp, 1, stack_watch_before, read_ram_word_debug(stack_watch_word_addr));
         log_stage67_watch(stage67_watch_log_count_, "WR8", cpu_pc_, addr, mp, v, 1);
         {
             const char* gname = nullptr;
@@ -1871,6 +2315,9 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
         const uint32_t rm = ram_size_ - 1;
         const uint32_t mp0 = phys & rm;
         const uint32_t mp1 = (phys + 1u) & rm;
+        uint32_t stack_watch_word_addr = 0;
+        const bool stack_watch_hit = stack_watch_overlaps(mp0, 2, stack_watch_word_addr);
+        const uint32_t stack_watch_before = stack_watch_hit ? read_ram_word_debug(stack_watch_word_addr) : 0u;
         ram_[mp0] = (uint8_t)(v & 0xFF);
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
         if (mp0 >= 0x00050000u && mp0 < 0x00070000u && code_overlay_log_count_ < 256u)
@@ -1900,6 +2347,9 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
                 "WR16 pc=0x%08X addr=0x%08X phys=0x%08X val=0x%04X (#%u)",
                 cpu_pc_, addr, mp0, (unsigned)v, code_stage67win_log_count_);
         }
+        log_watch_ram_range("WR16", addr, mp0, v, 2);
+        if (stack_watch_hit)
+            log_stack_watch("WR16", addr, mp0, 2, stack_watch_before, read_ram_word_debug(stack_watch_word_addr));
         log_stage67_watch(stage67_watch_log_count_, "WR16", cpu_pc_, addr, mp0, v, 2);
         {
             const char* gname = nullptr;
@@ -2126,7 +2576,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
     }
 
     // Scratchpad
-    if (phys >= kScratchBase && phys + 2 <= kScratchBase + kScratchSize)
+    if (is_in_range(phys, kScratchBase, kScratchSize, 2))
     {
         const uint32_t off = phys - kScratchBase;
         scratch_[off] = (uint8_t)(v & 0xFF);
@@ -2135,7 +2585,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
     }
 
     // I/O fallback
-    if (phys >= kIoBase && phys + 2 <= kIoBase + kIoSize)
+    if (is_in_range(phys, kIoBase, kIoSize, 2))
     {
         const uint32_t off = phys - kIoBase;
         io_[off] = (uint8_t)(v & 0xFF);
@@ -2172,6 +2622,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
         const uint32_t mp1 = (phys + 1u) & rm;
         const uint32_t mp2 = (phys + 2u) & rm;
         const uint32_t mp3 = (phys + 3u) & rm;
+        uint32_t stack_watch_word_addr = 0;
+        const bool stack_watch_hit = stack_watch_overlaps(mp0, 4, stack_watch_word_addr);
+        const uint32_t stack_watch_before = stack_watch_hit ? read_ram_word_debug(stack_watch_word_addr) : 0u;
         ram_[mp0] = (uint8_t)(v & 0xFF);
         ram_[mp1] = (uint8_t)((v >> 8) & 0xFF);
         ram_[mp2] = (uint8_t)((v >> 16) & 0xFF);
@@ -2345,6 +2798,9 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                 }
             }
         }
+        log_watch_ram_range("WR32", addr, mp0, v, 4);
+        if (stack_watch_hit)
+            log_stack_watch("WR32", addr, mp0, 4, stack_watch_before, read_ram_word_debug(stack_watch_word_addr));
         log_stage67_watch(stage67_watch_log_count_, "WR32", cpu_pc_, addr, mp0, v, 4);
         {
             const char* gname = nullptr;
@@ -2517,6 +2973,8 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                     {
                         const int dir = (v >> 0) & 1;
                         const int mode = (v >> 9) & 3;
+                        uint32_t dma2_words_submitted = 0;
+                        bool dma2_linked_list = false;
 
                         emu::logf(emu::LogLevel::info, "BUS", "DMA2 GPU dir=%d mode=%d madr=0x%08X bcr=0x%08X",
                             dir, mode, dma_[ch].madr, dma_[ch].bcr);
@@ -2528,6 +2986,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 const uint32_t bs = dma_[ch].bcr & 0xFFFF;
                                 const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
                                 const uint32_t words = (mode == 0) ? bs : bs * bc;
+                                dma2_words_submitted = words;
                                 uint32_t ma = dma_[ch].madr & 0x1FFFFF;
                                 for (uint32_t i = 0; i < words; ++i)
                                 {
@@ -2560,6 +3019,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                 const uint32_t bs = dma_[ch].bcr & 0xFFFF;
                                 const uint32_t bc = (dma_[ch].bcr >> 16) & 0xFFFF;
                                 const uint32_t words = (mode == 0) ? bs : bs * bc;
+                                dma2_words_submitted = words;
                                 uint32_t ma = dma_[ch].madr & 0x1FFFFF;
                                 for (uint32_t i = 0; i < words; ++i)
                                 {
@@ -2581,25 +3041,54 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                             }
                             else if (mode == 2) // Linked list
                             {
-                                uint32_t node = dma_[ch].madr & 0x1FFFFF;
+                                dma2_linked_list = true;
+                                uint32_t node = dma_[ch].madr & 0x00FFFFFFu;
                                 uint32_t start_node = node;
+                                last_dma2_ll_start_node_ = start_node;
+                                if (gpu_)
+                                    gpu_->reset_dma_debug_latches();
                                 uint32_t total_ll_words = 0;
                                 uint32_t ll_nodes = 0;
                                 uint32_t first_header = 0;
                                 uint32_t second_header = 0;
                                 bool hit_safety = false;
+                                bool hit_cycle = false;
+                                uint32_t cycle_node = 0;
+                                uint32_t cycle_header = 0;
+                                uint32_t cycle_next = 0;
+                                uint32_t cycle_words = 0;
+                                std::vector<uint8_t> seen_nodes((0x200000u + 7u) / 8u, 0u);
+                                struct Dma2LlTraceNode
+                                {
+                                    uint32_t node{0};
+                                    uint32_t header{0};
+                                };
+                                Dma2LlTraceNode tail_nodes[8]{};
                                 // OT Z tracking: empty nodes (0 data words) are OT
                                 // entry boundaries. Count them to determine depth level.
                                 uint32_t ot_z = 0;
                                 for (int safety = 0; safety < 0x100000; ++safety)
                                 {
-                                    uint32_t header = (uint32_t)ram_[node] |
-                                                      ((uint32_t)ram_[node + 1] << 8) |
-                                                      ((uint32_t)ram_[node + 2] << 16) |
-                                                      ((uint32_t)ram_[node + 3] << 24);
+                                    const uint32_t transfer_addr = node & 0x1FFFFCu;
+                                    const uint32_t seen_index = transfer_addr >> 3;
+                                    const uint8_t seen_mask = (uint8_t)(1u << (transfer_addr & 7u));
+                                    if (seen_nodes[seen_index] & seen_mask)
+                                    {
+                                        hit_cycle = true;
+                                        cycle_node = transfer_addr;
+                                        break;
+                                    }
+                                    seen_nodes[seen_index] |= seen_mask;
+
+                                    uint32_t header = (uint32_t)ram_[transfer_addr] |
+                                                      ((uint32_t)ram_[(transfer_addr + 1) & 0x1FFFFF] << 8) |
+                                                      ((uint32_t)ram_[(transfer_addr + 2) & 0x1FFFFF] << 16) |
+                                                      ((uint32_t)ram_[(transfer_addr + 3) & 0x1FFFFF] << 24);
+                                    tail_nodes[ll_nodes & 7u] = {transfer_addr, header};
                                     if (ll_nodes == 0) first_header = header;
                                     if (ll_nodes == 1) second_header = header;
                                     uint32_t words = header >> 24;
+                                    dma2_words_submitted += words;
                                     total_ll_words += words;
                                     ll_nodes++;
                                     if (words == 0)
@@ -2614,7 +3103,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                     }
                                     for (uint32_t i = 0; i < words; ++i)
                                     {
-                                        uint32_t off2 = (node + 4 + i * 4) & 0x1FFFFF;
+                                        uint32_t off2 = (transfer_addr + 4 + i * 4) & 0x1FFFFF;
                                         uint32_t w = (uint32_t)ram_[off2] |
                                                      ((uint32_t)ram_[off2 + 1] << 8) |
                                                      ((uint32_t)ram_[off2 + 2] << 16) |
@@ -2630,14 +3119,121 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
                                     }
                                     if ((header & 0x00FFFFFF) == 0x00FFFFFF)
                                         break;
-                                    node = header & 0x1FFFFF;
+                                    cycle_header = header;
+                                    cycle_words = words;
+                                    cycle_next = header & 0x00FFFFFFu;
+                                    node = cycle_next;
                                     if (safety == 0x100000 - 1) hit_safety = true;
                                 }
                                 emu::logf(emu::LogLevel::info, "BUS", "DMA2 LL: start=0x%05X nodes=%u words=%u hdr0=0x%08X hdr1=0x%08X %s",
                                     start_node, ll_nodes, total_ll_words, first_header, second_header, hit_safety ? "SAFETY" : "");
+                                if (hit_cycle)
+                                {
+                                    auto read_ram_word = [this](uint32_t addr) -> uint32_t
+                                    {
+                                        const uint32_t a = addr & 0x1FFFFFu;
+                                        return (uint32_t)ram_[a] |
+                                               ((uint32_t)ram_[(a + 1) & 0x1FFFFFu] << 8) |
+                                               ((uint32_t)ram_[(a + 2) & 0x1FFFFFu] << 16) |
+                                               ((uint32_t)ram_[(a + 3) & 0x1FFFFFu] << 24);
+                                    };
+                                    emu::logf(
+                                        emu::LogLevel::warn,
+                                        "BUS",
+                                        "DMA2 LL cycle: start=0x%05X repeat=0x%05X last_hdr=0x%08X next=0x%05X words=%u nodes=%u total_words=%u",
+                                        start_node,
+                                        cycle_node,
+                                        cycle_header,
+                                        cycle_next,
+                                        cycle_words,
+                                        ll_nodes,
+                                        total_ll_words);
+                                    for (uint32_t i = 0; i < 8u; ++i)
+                                    {
+                                        const Dma2LlTraceNode& tn = tail_nodes[(ll_nodes + i) & 7u];
+                                        if (tn.header == 0 && tn.node == 0)
+                                            continue;
+                                        emu::logf(
+                                            emu::LogLevel::warn,
+                                            "BUS",
+                                            "DMA2 LL tail[%u]: node=0x%05X hdr=0x%08X next=0x%05X words=%u",
+                                            i,
+                                            tn.node,
+                                            tn.header,
+                                            tn.header & 0x1FFFFF,
+                                            tn.header >> 24);
+                                        emu::logf(
+                                            emu::LogLevel::warn,
+                                            "BUS",
+                                            "DMA2 LL mem[%u]: node=0x%05X writer_pc=0x%08X face_tok=0x%08X w0=0x%08X w1=0x%08X w2=0x%08X w3=0x%08X",
+                                            i,
+                                            tn.node,
+                                            ram_face_writer_pc(tn.node),
+                                            ram_face_token(tn.node),
+                                            read_ram_word(tn.node + 0),
+                                            read_ram_word(tn.node + 4),
+                                            read_ram_word(tn.node + 8),
+                                            read_ram_word(tn.node + 12));
+                                    }
+                                }
+                                gpu::Gpu::DmaExtremePrimitiveInfo extreme_info{};
+                                const bool hit_extreme = gpu_ && gpu_->consume_dma_extreme_primitive(extreme_info);
+                                if (hit_extreme)
+                                {
+                                    emu::logf(
+                                        emu::LogLevel::warn,
+                                        "GPUDMA",
+                                        "EXTREME primitive start=0x%05X tri=(%d,%d)(%d,%d)(%d,%d) flags=0x%02X semi=%u depth=%u clut=0x%04X texpage=0x%04X writer_pc=0x%08X",
+                                        start_node,
+                                        (int)extreme_info.x[0], (int)extreme_info.y[0],
+                                        (int)extreme_info.x[1], (int)extreme_info.y[1],
+                                        (int)extreme_info.x[2], (int)extreme_info.y[2],
+                                        (unsigned)extreme_info.flags,
+                                        (unsigned)extreme_info.semi_mode,
+                                        (unsigned)extreme_info.tex_depth,
+                                        extreme_info.clut,
+                                        extreme_info.texpage,
+                                        ram_face_writer_pc(start_node));
+                                    if (extreme_info.corr_valid)
+                                    {
+                                        emu::logf(
+                                            emu::LogLevel::warn,
+                                            "GPUDMA",
+                                            "EXTREME_CORR source_pc=0x%08X swap=%u "
+                                            "v3d=(%d,%d,%d)(%d,%d,%d)(%d,%d,%d) sz=(%u,%u,%u) tr=(%d,%d,%d)",
+                                            extreme_info.source_pc,
+                                            extreme_info.corr_swapped ? 1u : 0u,
+                                            extreme_info.verts_3d[0].vx, extreme_info.verts_3d[0].vy, extreme_info.verts_3d[0].vz,
+                                            extreme_info.verts_3d[1].vx, extreme_info.verts_3d[1].vy, extreme_info.verts_3d[1].vz,
+                                            extreme_info.verts_3d[2].vx, extreme_info.verts_3d[2].vy, extreme_info.verts_3d[2].vz,
+                                            extreme_info.sz[0], extreme_info.sz[1], extreme_info.sz[2],
+                                            extreme_info.transform.tr[0], extreme_info.transform.tr[1], extreme_info.transform.tr[2]);
+                                    }
+                                    else
+                                    {
+                                        emu::logf(
+                                            emu::LogLevel::warn,
+                                            "GPUDMA",
+                                            "EXTREME_CORR unavailable start=0x%05X",
+                                            start_node);
+                                    }
+                                }
+                                if (hit_safety)
+                                    dump_last_gpu_dma_linked_list("dma2_ll_safety");
+                                else if (hit_cycle)
+                                    dump_last_gpu_dma_linked_list("dma2_ll_cycle");
+                                else if (hit_extreme)
+                                    dump_last_gpu_dma_linked_list("gpu_extreme_coords");
                             }
                         }
-                        dma_finish(ch);
+                        gpu_->notify_dma_submit(dma2_words_submitted, dma2_linked_list);
+                        uint64_t dma2_delay = dma2_linked_list
+                            ? (uint64_t)128u + (uint64_t)dma2_words_submitted * 3u
+                            : (uint64_t)48u + (uint64_t)dma2_words_submitted * 2u;
+                        if (dma2_delay == 0)
+                            dma2_delay = 1;
+                        dma_finish_delay_[ch] = (dma2_delay > 0x7FFFFFFFu) ? 0x7FFFFFFFu : (uint32_t)dma2_delay;
+                        dma_finish_pending_[ch] = 1;
                     }
 
                     // DMA4 (SPU)
@@ -2900,7 +3496,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     }
 
     // Scratchpad
-    if (phys >= kScratchBase && phys + 4 <= kScratchBase + kScratchSize)
+    if (is_in_range(phys, kScratchBase, kScratchSize, 4))
     {
         const uint32_t off = phys - kScratchBase;
         scratch_[off] = (uint8_t)(v & 0xFF);
@@ -2911,7 +3507,7 @@ bool Bus::write_u32(uint32_t addr, uint32_t v, MemFault& fault)
     }
 
     // I/O fallback
-    if (phys >= kIoBase && phys + 4 <= kIoBase + kIoSize)
+    if (is_in_range(phys, kIoBase, kIoSize, 4))
     {
         const uint32_t off = phys - kIoBase;
         io_[off] = (uint8_t)(v & 0xFF);
@@ -3191,6 +3787,28 @@ void Bus::exec_dma3_transfer()
 }
 
 // ================== DMA completion ==================
+
+void Bus::tick_dma_latencies(uint32_t cycles)
+{
+    if (cycles != 0 && gpu_)
+        gpu_->tick_timing(cycles);
+
+    for (int ch = 0; ch < 7; ++ch)
+    {
+        if (!dma_finish_pending_[ch])
+            continue;
+        if (cycles >= dma_finish_delay_[ch])
+        {
+            dma_finish_delay_[ch] = 0;
+            dma_finish_pending_[ch] = 0;
+            dma_finish(ch);
+        }
+        else
+        {
+            dma_finish_delay_[ch] -= cycles;
+        }
+    }
+}
 
 void Bus::dma_finish(int ch)
 {
@@ -3658,6 +4276,8 @@ void Bus::tick_peripherals(uint32_t cycles)
         return;
     }
 
+    tick_dma_latencies(cycles);
+
     // GPU scanline + Timer 1 HBlank: handled by GPU thread (fire_hblank_external).
     // Timer 0 dotclock: still ticked in fast path (per instruction).
 
@@ -3672,6 +4292,8 @@ void Bus::tick_peripherals(uint32_t cycles)
 
 void Bus::tick(uint32_t cycles)
 {
+    tick_dma_latencies(cycles);
+
     // In external peripheral mode, only tick SIO0 (needs per-instruction
     // precision for ACK timing) and return. Everything else is handled by
     // tick_peripherals() called every ~256 cycles from the worker thread.
