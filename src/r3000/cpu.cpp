@@ -12,6 +12,7 @@
 #include "../gpu/gpu_3d.h"
 #include "../gpu/gte_correlation.h"
 #include "../log/emu_log.h"
+#include "cpu_diag_gate.h"
 
 namespace r3000
 {
@@ -979,7 +980,7 @@ Cpu::StepResult Cpu::step()
         if (exe_dst_ptr == 0u && exe_remain != 0u && tekk_early_cb_skips < 1u)
         {
             ++tekk_early_cb_skips;
-            emu::logf(
+            CPU_INV_LOGF(
                 emu::LogLevel::warn,
                 "TEKK_CB_SKIP_EARLY",
                 "pc=0x%08X ra=0x%08X exe_dst=0x%08X exe_remain=0x%08X skip=%u",
@@ -1229,7 +1230,7 @@ Cpu::StepResult Cpu::step()
             {
                 ++tekk_bcall_n;
                 const uint32_t fn = gpr_[9] & 0xFFu;
-                emu::logf(emu::LogLevel::warn, "TEKK_BCALL",
+                CPU_INV_LOGF(emu::LogLevel::warn, "TEKK_BCALL",
                     "vblank=%u %c(0x%02X) ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
                     vbl,
                     (pc_ == 0xB0u ? 'B' : 'C'),
@@ -1706,15 +1707,31 @@ Cpu::StepResult Cpu::step()
         {
             if (!s)
                 return;
+            // Accumulate chars into a static line buffer and emit one emu::logf
+            // call per completed line — preserves stderr visibility of the
+            // guest printf on CLI (emu::logf falls back to fprintf(stderr)
+            // when no sink is installed) without violating the "no printf"
+            // project rule.  text_out_ (a dedicated diagnostic FILE*) and
+            // text_push_char (flog::Sink path) keep receiving every byte.
+            // Single-threaded: HLE runs on the emu thread only.
+            static char   hle_line_buf[512];
+            static uint32_t hle_line_pos = 0;
             for (uint32_t i = 0; s[i] != 0; ++i)
             {
                 const uint8_t ch = (uint8_t)s[i];
-                std::fputc((int)ch, stderr);
+                if (ch == '\n' || hle_line_pos + 1 >= sizeof(hle_line_buf))
+                {
+                    hle_line_buf[hle_line_pos] = '\0';
+                    if (hle_line_pos > 0)
+                        emu::logf(emu::LogLevel::info, "HLE", "%s", hle_line_buf);
+                    hle_line_pos = 0;
+                }
+                if (ch != '\n')
+                    hle_line_buf[hle_line_pos++] = (char)ch;
                 if (text_out_)
                     std::fputc((int)ch, text_out_);
                 text_push_char(text_io_, text_clock_, text_has_clock_, text_line_, (uint32_t)sizeof(text_line_), text_pos_, ch);
             }
-            std::fflush(stderr);
             if (text_out_)
                 std::fflush(text_out_);
         };
@@ -4010,7 +4027,7 @@ Cpu::StepResult Cpu::step()
         ++log_count;
 
         const uint32_t r = reg_idx & 31u;
-        emu::logf(
+        CPU_INV_LOGF(
             suspicious ? emu::LogLevel::warn : emu::LogLevel::debug,
             "TEKK_DMA3_SLOT",
             "pc=0x%08X op=%s kind=%s vaddr=0x%08X phys=0x%08X reg=r%u val=0x%08X src_mem_valid=%u src_mem=0x%08X",
@@ -4029,7 +4046,7 @@ Cpu::StepResult Cpu::step()
             for (uint32_t back = 1; back <= 8; ++back)
             {
                 const uint32_t pos = (recent_pos_ - back) & 255u;
-                emu::logf(
+                CPU_INV_LOGF(
                     emu::LogLevel::warn,
                     "TEKK_DMA3_SLOT",
                     "  hist[-%u] pc=0x%08X instr=0x%08X",
@@ -4074,7 +4091,7 @@ Cpu::StepResult Cpu::step()
         ++log_count;
 
         const uint32_t r = reg_idx & 31u;
-        emu::logf(
+        CPU_INV_LOGF(
             suspicious ? emu::LogLevel::warn : emu::LogLevel::debug,
             "TEKK_BUF",
             "pc=0x%08X op=%s kind=%s %s vaddr=0x%08X phys=0x%08X reg=r%u val=0x%08X src_mem_valid=%u src_mem=0x%08X",
@@ -4094,7 +4111,7 @@ Cpu::StepResult Cpu::step()
             for (uint32_t back = 1; back <= 8; ++back)
             {
                 const uint32_t pos = (recent_pos_ - back) & 255u;
-                emu::logf(
+                CPU_INV_LOGF(
                     emu::LogLevel::warn,
                     "TEKK_BUF",
                     "  hist[-%u] pc=0x%08X instr=0x%08X",
@@ -4127,14 +4144,14 @@ Cpu::StepResult Cpu::step()
     static uint32_t tekk_cdprep_ring_pos = 0;
     auto dump_tekk_cdprep_ring = [&](const char* reason)
     {
-        emu::logf(emu::LogLevel::warn, "TEKK_CDPREP_HIST", "reason=%s", reason ? reason : "?");
+        CPU_INV_LOGF(emu::LogLevel::warn, "TEKK_CDPREP_HIST", "reason=%s", reason ? reason : "?");
         for (uint32_t i = 0; i < tekk_cdprep_ring.size(); ++i)
         {
             const uint32_t pos = (tekk_cdprep_ring_pos + i) & 15u;
             const TekkCdPrepSample& s = tekk_cdprep_ring[pos];
             if (!s.valid)
                 continue;
-            emu::logf(
+            CPU_INV_LOGF(
                 emu::LogLevel::warn,
                 "TEKK_CDPREP_HIST",
                 "pc=0x%08X instr=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
@@ -4159,7 +4176,7 @@ Cpu::StepResult Cpu::step()
     {
         if (target >= 0x8016A98Cu && target <= 0x8016AA00u)
         {
-            emu::logf(
+            CPU_INV_LOGF(
                 gpr_[4] == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
                 "TEKK_DMA3_CALL",
                 "pc=0x%08X op=%s target=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X ra=0x%08X",
@@ -4184,7 +4201,7 @@ Cpu::StepResult Cpu::step()
             (void)bus_.read_u32(0x001CA694u, dst_cur, mf);
             (void)bus_.read_u32(0x001CA6A0u, remain, mf);
             (void)bus_.read_u32(0x001CA69Cu, chunk, mf);
-            emu::logf(
+            CPU_INV_LOGF(
                 gpr_[4] == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
                 "TEKK_DMA3_AAE0",
                 "pc=0x%08X op=%s target=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X ra=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
@@ -4220,7 +4237,7 @@ Cpu::StepResult Cpu::step()
         (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
         (void)bus_.read_u32(0x001CB33Cu, exe_dst, mf);
         (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
-        emu::logf(
+        CPU_INV_LOGF(
             emu::LogLevel::warn,
             "TEKK_EVENT3",
             "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X cb=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
@@ -4251,7 +4268,7 @@ Cpu::StepResult Cpu::step()
         (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
         (void)bus_.read_u32(0x001CB33Cu, exe_dst, mf);
         (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
-        emu::logf(
+        CPU_INV_LOGF(
             emu::LogLevel::warn,
             tag ? tag : "TEKK_DISPATCH",
             "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X ra=0x%08X sync=0x%08X ready=0x%08X cb=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
@@ -4286,7 +4303,7 @@ Cpu::StepResult Cpu::step()
         (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
         (void)bus_.read_u32(0x001CB33Cu, exe_dst, mf);
         (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
-        emu::logf(
+        CPU_INV_LOGF(
             emu::LogLevel::warn,
             "TEKK_CBSET",
             "pc=0x%08X instr=0x%08X a0=0x%08X v0=0x%08X ra=0x%08X cb_now=0x%08X sync=0x%08X ready=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
@@ -4349,7 +4366,7 @@ Cpu::StepResult Cpu::step()
             (void)bus_.read_u32(virt_to_phys(table_ptr + 0x14u), gate_p14, mf2);
         }
 
-        emu::logf(
+        CPU_INV_LOGF(
             emu::LogLevel::warn,
             tag ? tag : "TEKK_SCHED",
             "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X ra=0x%08X sync=0x%08X ready=0x%08X cb=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X table=0x%08X gate4=0x%08X gate10=0x%08X gate14=0x%08X",
@@ -4586,7 +4603,7 @@ Cpu::StepResult Cpu::step()
                                     {
                                         static uint32_t tekk_ready_reuse_holds = 0;
                                         ++tekk_ready_reuse_holds;
-                                        emu::logf(
+                                        CPU_INV_LOGF(
                                             emu::LogLevel::warn,
                                             "TEKK_READY_REUSE_HOLD",
                                             "pc=0x%08X first_cb=0x%08X target=0x%08X ra=0x%08X ready=0x%08X exe_dst=0x%08X exe_remain=0x%08X hold=%u",
@@ -6344,7 +6361,7 @@ Cpu::StepResult Cpu::step()
             ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
         }
 
-        std::printf("%s\n", line);
+        emu::logf(emu::LogLevel::debug, "CPU_DASM", "%s", line);
     }
 
     // Debug log "exec"
@@ -6369,7 +6386,7 @@ Cpu::StepResult Cpu::step()
         if ((r.pc == 0x8016A98Cu || r.pc == 0x8016A990u || r.pc == 0x8016AAE8u || r.pc == 0x8016AB64u) && tekk_dma3_func_logs < 32u)
         {
             ++tekk_dma3_func_logs;
-            emu::logf(
+            CPU_INV_LOGF(
                 emu::LogLevel::warn,
                 "TEKK_S1",
                 "entry pc=0x%08X a0=0x%08X a1=0x%08X s1=0x%08X sp=0x%08X ra=0x%08X",
@@ -6383,7 +6400,7 @@ Cpu::StepResult Cpu::step()
 
         if (r.pc >= 0x8016A98Cu && r.pc <= 0x8016A99Cu)
         {
-            emu::logf(
+            CPU_INV_LOGF(
                 emu::LogLevel::warn,
                 "TEKK_WIN",
                 "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X",
@@ -6402,7 +6419,7 @@ Cpu::StepResult Cpu::step()
 
         if (wb_valid && (wb_reg & 31u) == 17u)
         {
-            emu::logf(
+            CPU_INV_LOGF(
                 wb_new == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
                 "TEKK_S1",
                 "pc=0x%08X wb s1: 0x%08X -> 0x%08X",
@@ -6412,7 +6429,7 @@ Cpu::StepResult Cpu::step()
         }
         if (ld_valid && (ld_reg & 31u) == 17u)
         {
-            emu::logf(
+            CPU_INV_LOGF(
                 ld_val == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
                 "TEKK_S1",
                 "pc=0x%08X ld_sched s1=0x%08X from vaddr=0x%08X phys=0x%08X",
@@ -6423,7 +6440,7 @@ Cpu::StepResult Cpu::step()
         }
         if (wb2_valid && (wb2_reg & 31u) == 17u)
         {
-            emu::logf(
+            CPU_INV_LOGF(
                 wb2_new == 0u ? emu::LogLevel::warn : emu::LogLevel::debug,
                 "TEKK_S1",
                 "pc=0x%08X ld_commit s1: 0x%08X -> 0x%08X",
@@ -6452,7 +6469,7 @@ Cpu::StepResult Cpu::step()
             (void)bus_.read_u32(0x001CA694u, dst_cur, mf);
             (void)bus_.read_u32(0x001CA6A0u, remain, mf);
             (void)bus_.read_u32(0x001CA69Cu, chunk, mf);
-            emu::logf(
+            CPU_INV_LOGF(
                 (gpr_[4] == 0u || dst_cur == 0u || dst_param == 0u) ? emu::LogLevel::warn : emu::LogLevel::debug,
                 "TEKK_PIPE",
                 "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X wave_head=0x%08X wave_body=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
@@ -6493,7 +6510,7 @@ Cpu::StepResult Cpu::step()
             (void)bus_.read_u32(0x001CB324u, exe_stage, mf);
             (void)bus_.read_u32(0x001CB33Cu, exe_dst_ptr, mf);
             (void)bus_.read_u32(0x001CB334u, exe_remain, mf);
-            emu::logf(
+            CPU_INV_LOGF(
                 emu::LogLevel::warn,
                 "TEKK_CB",
                 "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X cb=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
@@ -6519,7 +6536,7 @@ Cpu::StepResult Cpu::step()
 
             if (r.pc >= 0x8015D42Cu && r.pc <= 0x8015D43Cu && exe_dst_ptr == 0u)
             {
-                emu::logf(
+                CPU_INV_LOGF(
                     emu::LogLevel::warn,
                     "TEKK_CB_ZERO",
                     "pc=0x%08X instr=0x%08X callback=0x%08X using zero EXE_DST_PTR exe_stage=0x%08X exe_remain=0x%08X a0=0x%08X",
@@ -6596,7 +6613,7 @@ Cpu::StepResult Cpu::step()
             if (tekk_outer_logs < 2048u)
             {
                 ++tekk_outer_logs;
-                emu::logf(
+                CPU_INV_LOGF(
                     emu::LogLevel::warn,
                     "LDST3_OUT",
                     "pc=0x%08X instr=0x%08X a0=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X ra=0x%08X ldst=%d",
@@ -7400,7 +7417,7 @@ Cpu::StepResult Cpu::step()
             (void)bus_.read_u32(0x001EF68Cu, cb, mf);
             (void)bus_.read_u32(0x001CA680u, sync_state, mf);
             (void)bus_.read_u32(0x001CA684u, ready_state, mf);
-            emu::logf(
+            CPU_INV_LOGF(
                 emu::LogLevel::warn,
                 "TEKK_EXEINIT",
                 "pc=0x%08X instr=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X cb=0x%08X sync=0x%08X ready=0x%08X exe_stage=0x%08X exe_dst=0x%08X exe_remain=0x%08X",
@@ -7456,7 +7473,7 @@ Cpu::StepResult Cpu::step()
         if (interesting && tekk_cdprep_logs < 256u)
         {
             ++tekk_cdprep_logs;
-            emu::logf(
+            CPU_INV_LOGF(
                 emu::LogLevel::warn,
                 "TEKK_CDPREP",
                 "pc=0x%08X instr=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X sp=0x%08X dst_param=0x%08X dst_cur=0x%08X remain=0x%08X chunk=0x%08X",
