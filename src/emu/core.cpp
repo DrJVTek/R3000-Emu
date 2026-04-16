@@ -1575,4 +1575,70 @@ bool Core::fast_boot_from_exe(const char* exe_path, ExeBootMode mode, char* err,
     return true;
 }
 
+bool Core::boot_bios_with_exe(const char* exe_path, const char* cd_path,
+                              const InitOptions& opt, char* err, size_t err_cap)
+{
+    if (!exe_path || !*exe_path)
+    {
+        set_err(err, err_cap, "boot_bios_with_exe: exe_path is required");
+        return false;
+    }
+    if (!bios_data() || bios_size() == 0)
+    {
+        set_err(err, err_cap, "boot_bios_with_exe: BIOS must be set before calling this");
+        return false;
+    }
+
+    // Insert disc: real CD (for runtime reads) or in-memory virtual disc.
+    // The virtual disc exposes SYSTEM.CNF pointing to BOOT.EXE so the BIOS
+    // boot sequence can find and load the EXE without a physical disc.
+    if (cd_path && *cd_path)
+    {
+        emu::logf(emu::LogLevel::info, "CORE",
+            "boot_bios_with_exe: real CD=%s, EXE=%s", cd_path, exe_path);
+
+        // With a real CD we still need the BIOS to boot OUR exe, not the
+        // game on the CD. We therefore insert the virtual disc so SYSTEM.CNF
+        // points to BOOT.EXE, then the BIOS loads our EXE from the virtual
+        // disc. The real CD can then be inserted by the caller after the BIOS
+        // has finished booting if runtime CD access is needed.
+        //
+        // For now: insert the virtual disc for BIOS boot. The real CD path
+        // is stored so the caller can swap it in after boot if required.
+        // (A future extension could intercept the first ReadN and hotswap.)
+        if (!cdrom_.insert_virtual_exe_disc(exe_path, err, err_cap))
+            return false;
+    }
+    else
+    {
+        emu::logf(emu::LogLevel::info, "CORE",
+            "boot_bios_with_exe: virtual disc from EXE=%s", exe_path);
+        if (!cdrom_.insert_virtual_exe_disc(exe_path, err, err_cap))
+            return false;
+    }
+
+    // Track psx3dprof identity from EXE path (same as fast_boot_from_exe).
+    set_psx3d_profile_identity_from_path(exe_path);
+    try_load_psx3d_profile();
+
+    // Build a boot image that starts at the BIOS reset vector.
+    // init_from_image creates bus+cpu and sets the initial PC.
+    loader::LoadedImage bios_img{};
+    bios_img.entry_pc = 0xBFC0'0000u; // MIPS reset vector → BIOS ROM
+    bios_img.has_sp   = 1;
+    bios_img.sp       = 0x801F'FFF0u;
+
+    // BIOS boot must NOT use HLE vectors — the real BIOS installs its own.
+    InitOptions bios_opt = opt;
+    bios_opt.hle_vectors = 0;
+
+    if (!init_from_image(bios_img, bios_opt, err, err_cap))
+        return false;
+
+    emu::logf(emu::LogLevel::info, "CORE",
+        "BIOS devkit boot ready: PC=0xBFC00000, virtual disc active, EXE=%s",
+        exe_path);
+    return true;
+}
+
 } // namespace emu

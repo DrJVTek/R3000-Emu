@@ -91,13 +91,6 @@ static const char* cli_devkit_mode_name(CliDevkitMode mode)
     return "none";
 }
 
-static emu::Core::ExeBootMode to_core_exe_boot_mode(CliDevkitMode mode)
-{
-    return (mode == CliDevkitMode::devkit_hle)
-        ? emu::Core::ExeBootMode::devkit_hle
-        : emu::Core::ExeBootMode::devkit;
-}
-
 } // namespace
 
 namespace
@@ -1541,7 +1534,11 @@ int main(int argc, char** argv)
     const char* load_path = arg_value(argc, argv, "--load=");
     const char* cd_path = arg_value(argc, argv, "--cd=");
     const CliDevkitMode devkit_mode = parse_devkit_mode(argc, argv);
-    const int is_devkit_mode = (devkit_mode != CliDevkitMode::none) ? 1 : 0;
+    const int is_devkit_mode  = (devkit_mode != CliDevkitMode::none) ? 1 : 0;
+    // --devkit      : BIOS boot + virtual disc (real BIOS, no HLE) — new mode
+    // --devkit-hle  : skip BIOS, HLE kernel bootstrap — old mode
+    const int is_bios_devkit  = (devkit_mode == CliDevkitMode::devkit)     ? 1 : 0;
+    const int is_hle_devkit   = (devkit_mode == CliDevkitMode::devkit_hle) ? 1 : 0;
     if (has_flag(argc, argv, "--devkit") && has_flag(argc, argv, "--devkit-hle"))
     {
         emu::logf(emu::LogLevel::warn, "MAIN",
@@ -1807,7 +1804,9 @@ int main(int argc, char** argv)
         }
     }
 
-    if (bios && !is_devkit_mode)
+    // For BIOS devkit, set_bios_copy is called here (BIOS boots for real).
+    // For HLE devkit, the BIOS is optional and loaded inside the devkit block.
+    if (bios && (!is_devkit_mode || is_bios_devkit))
     {
         char err[256];
         err[0] = '\0';
@@ -1828,8 +1827,9 @@ int main(int argc, char** argv)
     core_opt.trace_io = trace_io ? 1 : 0;
     core_opt.hle_vectors = has_flag(argc, argv, "--hle") ? 1 : 0;
     core_opt.text_hle = has_flag(argc, argv, "--text-hle") ? 1 : 0;
-    if (devkit_mode == CliDevkitMode::devkit_hle)
-        core_opt.hle_vectors = 1;
+    if (is_hle_devkit)
+        core_opt.hle_vectors = 1;  // HLE devkit needs syscall interception
+    // is_bios_devkit: real BIOS installs its own vectors — hle_vectors stays 0
     core_opt.crash_trace_steps = static_cast<uint32_t>(cpu_crash_trace);
     if (watch_ram_range_s && *watch_ram_range_s)
     {
@@ -1889,8 +1889,24 @@ int main(int argc, char** argv)
     {
         char err[256];
         err[0] = '\0';
-        if (is_devkit_mode && load_path)
+        if (is_bios_devkit && load_path)
         {
+            // BIOS devkit: boot_bios_with_exe inserts virtual disc + calls
+            // init_from_image internally starting at 0xBFC00000. The real
+            // BIOS runs fully, finds the disc, and loads BOOT.EXE.
+            // BIOS was already set via set_bios_copy above.
+            if (!core.boot_bios_with_exe(load_path, cd_path, core_opt, err, sizeof(err)))
+            {
+                emu::logf(emu::LogLevel::error, "MAIN", "BIOS devkit boot failed: %s", err[0] ? err : "unknown error");
+                return 1;
+            }
+            emu::logf(emu::LogLevel::info, "MAIN",
+                "BIOS devkit boot initialised: EXE=%s cd=%s hle=%d",
+                load_path, cd_path ? cd_path : "<virtual>", core_opt.hle_vectors);
+        }
+        else if (is_hle_devkit && load_path)
+        {
+            // HLE devkit: skip BIOS entirely, fake kernel bootstrap.
             loader::LoadedImage devkit_img{};
             devkit_img.entry_pc = 0x80010000u;
             devkit_img.has_sp = 1;
@@ -1898,7 +1914,7 @@ int main(int argc, char** argv)
 
             if (!core.init_from_image(devkit_img, core_opt, err, sizeof(err)))
             {
-                emu::logf(emu::LogLevel::error, "MAIN", "Core init (devkit) failed: %s", err[0] ? err : "unknown error");
+                emu::logf(emu::LogLevel::error, "MAIN", "Core init (devkit-hle) failed: %s", err[0] ? err : "unknown error");
                 return 1;
             }
 
@@ -1906,16 +1922,15 @@ int main(int argc, char** argv)
             {
                 if (!core.set_bios_copy(bios, bios_size, err, sizeof(err)))
                 {
-                    emu::logf(emu::LogLevel::error, "MAIN", "BIOS setup (devkit) failed: %s", err[0] ? err : "unknown error");
+                    emu::logf(emu::LogLevel::error, "MAIN", "BIOS setup (devkit-hle) failed: %s", err[0] ? err : "unknown error");
                     return 1;
                 }
                 std::free(bios);
                 bios = nullptr;
-                emu::logf(emu::LogLevel::info, "MAIN", "Devkit BIOS ROM mapped for SDK services");
+                emu::logf(emu::LogLevel::info, "MAIN", "Devkit-hle BIOS ROM mapped for SDK services");
             }
 
-            emu::logf(emu::LogLevel::info, "MAIN", "Devkit boot begin: mode=%s exe=%s hle=%d text_hle=%d gte=%s",
-                cli_devkit_mode_name(devkit_mode),
+            emu::logf(emu::LogLevel::info, "MAIN", "Devkit-hle boot begin: exe=%s hle=%d text_hle=%d gte=%s",
                 load_path,
                 core_opt.hle_vectors ? 1 : 0,
                 core_opt.text_hle ? 1 : 0,
@@ -2093,16 +2108,18 @@ int main(int argc, char** argv)
         }
     }
 
-    if (is_devkit_mode && load_path)
+    // HLE devkit: set CPU state directly from EXE (skips BIOS).
+    // BIOS devkit: boot_bios_with_exe already handled everything.
+    if (is_hle_devkit && load_path)
     {
         char err[256]{};
-        if (!core.fast_boot_from_exe(load_path, to_core_exe_boot_mode(devkit_mode), err, sizeof(err)))
+        if (!core.fast_boot_from_exe(load_path, emu::Core::ExeBootMode::devkit_hle, err, sizeof(err)))
         {
-            emu::logf(emu::LogLevel::error, "MAIN", "Devkit EXE boot failed: %s", err[0] ? err : "unknown error");
+            emu::logf(emu::LogLevel::error, "MAIN", "Devkit-hle EXE boot failed: %s", err[0] ? err : "unknown error");
             return 1;
         }
-        emu::logf(emu::LogLevel::info, "MAIN", "Devkit boot OK: mode=%s %s -> PC=0x%08X",
-            cli_devkit_mode_name(devkit_mode), load_path, core.pc());
+        emu::logf(emu::LogLevel::info, "MAIN", "Devkit-hle boot OK: %s -> PC=0x%08X",
+            load_path, core.pc());
     }
 
     // --- Hook: 3D diagnostic ---

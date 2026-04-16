@@ -72,6 +72,10 @@ class Cdrom
     // Limitations actuelles:
     // - parsing CUE minimal (pas de pregaps complexes / pas d’audio/subchannel)
     bool insert_disc(const char* path, char* err, size_t err_cap);
+    // Insert an in-memory virtual disc built from a PS-EXE file.
+    // The BIOS can boot it as if it were a real disc (SYSTEM.CNF → BOOT.EXE).
+    // Region defaults to SCEE (EU). Call before init_from_image()/BIOS boot.
+    bool insert_virtual_exe_disc(const char* exe_path, char* err, size_t err_cap);
     void eject_disc();
 
     // MMIO: adresses absolues (0x1F801800..803)

@@ -461,6 +461,14 @@ void UPSX3DRenderComponent::RebuildMesh3D()
     int32 Tri3DCount = 0;
     int32 Skip2DCount = 0;
 
+    // ── Screen centre in game coordinate space (mirrors PSX2DRenderComponent) ──
+    // draw_env.offset places game(0,0) in VRAM; display centre = PsxW/2 - offset.
+    // We intentionally skip display_x/y to avoid double-buffer frame jumps.
+    const float Psx2DW = FMath::Max(1.0f, static_cast<float>(DL.display.width()));
+    const float Psx2DH = FMath::Max(1.0f, static_cast<float>(DL.display.height()));
+    const float CenterGx2D = Psx2DW * 0.5f - static_cast<float>(DL.draw_env.offset_x);
+    const float CenterGy2D = Psx2DH * 0.5f - static_cast<float>(DL.draw_env.offset_y);
+
     // ── Effective 2D parameters (auto-scale from previous frame's 3D bbox) ──
     float EffScale2D = WorldScale2D;
     float EffDepthBack = Depth2DBack;
@@ -639,9 +647,9 @@ void UPSX3DRenderComponent::RebuildMesh3D()
                 const float sx = static_cast<float>(V.x);
                 const float sy = static_cast<float>(V.y);
                 TriPos[j] = FVector(
-                    Depth2D,                                         // Depth from draw order
-                    sx * EffScale2D,                                 // Screen X centered
-                   -sy * EffScale2D                                  // Screen Y centered, flipped
+                    Depth2D,
+                    (sx - CenterGx2D) * EffScale2D,
+                   -(sy - CenterGy2D) * EffScale2D
                 );
             }
             TriPos[j] += WorldOffset;
@@ -865,8 +873,8 @@ void UPSX3DRenderComponent::RebuildMesh3D()
             DL.draw_env.clip_x2, DL.draw_env.clip_y2,
             DL.draw_env.texpage_raw);
         GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
-            "  Origin2D=raw-centered WorldScale=%.3f WorldScale2D=%.3f EffScale2D=%.4f",
-            WorldScale, WorldScale2D, EffScale2D);
+            "  Origin2D=center(%.1f,%.1f) psx=%ux%u WorldScale=%.3f WorldScale2D=%.3f EffScale2D=%.4f",
+            CenterGx2D, CenterGy2D, DL.display.width(), DL.display.height(), WorldScale, WorldScale2D, EffScale2D);
         GPU3D_NOISE_LOGF(emu::LogLevel::info, "GPU3D",
             "  Auto2D=%d DepthRange=[%.1f..%.1f] Last3D: X=[%.1f..%.1f] ExtY=%.1f",
             bAutoScale2D ? 1 : 0, EffDepthBack, EffDepthFront,

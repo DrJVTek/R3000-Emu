@@ -137,11 +137,12 @@ struct Cdrom::Disc
 {
     struct File
     {
-        std::FILE* f{nullptr};
-        uint32_t sector_size{0}; // 2048 or 2352
-        uint32_t num_sectors{0};
-        uint32_t start_lba{0}; // start of this file in "disc LBA"
-        char path[512]{};
+        std::FILE*    f{nullptr};
+        uint8_t*      mem_data{nullptr}; // in-memory alternative to f (malloc'd, freed by close())
+        uint32_t      sector_size{0};    // 2048 or 2352
+        uint32_t      num_sectors{0};
+        uint32_t      start_lba{0};      // start of this file in "disc LBA"
+        char          path[512]{};
     };
 
     struct Track
@@ -575,6 +576,11 @@ struct Cdrom::Disc
                 std::fclose(files[i].f);
                 files[i].f = nullptr;
             }
+            if (files[i].mem_data)
+            {
+                std::free(files[i].mem_data);
+                files[i].mem_data = nullptr;
+            }
         }
         std::free(this);
     }
@@ -606,18 +612,264 @@ struct Cdrom::Disc
             const uint32_t ss = fi.sector_size;
             if (ss == 0 || out_cap < ss)
                 return false;
-            const long off = (long)rel * (long)ss;
-            if (std::fseek(fi.f, off, SEEK_SET) != 0)
-                return false;
-            const size_t got = std::fread(out, 1, ss, fi.f);
-            if (got != ss)
-                return false;
+
+            if (fi.mem_data)
+            {
+                // In-memory virtual disc — simple memcpy
+                std::memcpy(out, fi.mem_data + (size_t)rel * ss, ss);
+            }
+            else
+            {
+                const long off = (long)rel * (long)ss;
+                if (std::fseek(fi.f, off, SEEK_SET) != 0)
+                    return false;
+                const size_t got = std::fread(out, 1, ss, fi.f);
+                if (got != ss)
+                    return false;
+            }
             if (out_sector_size)
                 *out_sector_size = ss;
             return true;
         }
 
         return false;
+    }
+
+    // Build a minimal ISO9660 image in memory containing SYSTEM.CNF + the
+    // given EXE, so the BIOS can boot it exactly like a real disc.
+    //
+    // Layout (all sectors are 2048 bytes):
+    //   LBA  0-15  : zeroed (system area)
+    //   LBA 16     : Primary Volume Descriptor
+    //   LBA 17     : Volume Descriptor Set Terminator
+    //   LBA 18     : L-path table
+    //   LBA 19     : M-path table
+    //   LBA 20     : Root directory record
+    //   LBA 21     : SYSTEM.CNF content
+    //   LBA 22+    : EXE content (as many 2048-byte sectors as needed)
+    //
+    // Returns a newly calloc'd Disc* on success, nullptr on failure.
+    static Disc* create_virtual_exe(const char* exe_path,
+                                    char* err, size_t err_cap)
+    {
+        // --- Read EXE file ---
+        std::FILE* ef = std::fopen(exe_path, "rb");
+        if (!ef) { set_err(err, err_cap, "virtual disc: cannot open EXE"); return nullptr; }
+        std::fseek(ef, 0, SEEK_END);
+        const long exe_file_size = std::ftell(ef);
+        std::fseek(ef, 0, SEEK_SET);
+        if (exe_file_size <= 0)
+        {
+            std::fclose(ef);
+            set_err(err, err_cap, "virtual disc: EXE is empty");
+            return nullptr;
+        }
+        const uint32_t exe_bytes = (uint32_t)exe_file_size;
+        const uint32_t exe_sectors = (exe_bytes + 2047u) / 2048u;
+
+        // --- ISO9660 constants ---
+        constexpr uint32_t kSS = 2048;
+        constexpr uint32_t kPvdLba  = 16;
+        constexpr uint32_t kVdtLba  = 17;
+        constexpr uint32_t kLptLba  = 18;
+        constexpr uint32_t kMptLba  = 19;
+        constexpr uint32_t kRootLba = 20;
+        constexpr uint32_t kSysCnfLba = 21;
+        constexpr uint32_t kExeLba  = 22;
+
+        const uint32_t total_sectors = kExeLba + exe_sectors;
+        const uint32_t total_bytes   = total_sectors * kSS;
+
+        uint8_t* img = (uint8_t*)std::calloc(1, total_bytes);
+        if (!img)
+        {
+            std::fclose(ef);
+            set_err(err, err_cap, "virtual disc: out of memory");
+            return nullptr;
+        }
+
+        // Helper lambdas for writing ISO9660 fields
+        auto w16l = [&](uint8_t* p, uint16_t v)
+        {
+            p[0] = v & 0xFF;
+            p[1] = (v >> 8) & 0xFF;
+        };
+        auto w16m = [&](uint8_t* p, uint16_t v)
+        {
+            p[0] = (v >> 8) & 0xFF;
+            p[1] = v & 0xFF;
+        };
+        auto w16both = [&](uint8_t* p, uint16_t v)
+        {
+            w16l(p, v);
+            w16m(p + 2, v);
+        };
+        auto w32l = [&](uint8_t* p, uint32_t v)
+        {
+            p[0] = v & 0xFF;
+            p[1] = (v >> 8) & 0xFF;
+            p[2] = (v >> 16) & 0xFF;
+            p[3] = (v >> 24) & 0xFF;
+        };
+        auto w32m = [&](uint8_t* p, uint32_t v)
+        {
+            p[0] = (v >> 24) & 0xFF;
+            p[1] = (v >> 16) & 0xFF;
+            p[2] = (v >> 8) & 0xFF;
+            p[3] = v & 0xFF;
+        };
+        auto w32both = [&](uint8_t* p, uint32_t v)
+        {
+            w32l(p, v);
+            w32m(p + 4, v);
+        };
+        auto strpad = [&](uint8_t* p, const char* s, size_t n)
+        {
+            size_t len = std::strlen(s);
+            if (len > n) len = n;
+            std::memcpy(p, s, len);
+            std::memset(p + len, 0x20, n - len); // pad with spaces
+        };
+
+        // --- SYSTEM.CNF content ---
+        // BOOT = cdrom:\\BOOT.EXE;1\nTCB = 4\nEVENT = 10\nSTACK = 801FFFF0\n
+        char syscnf[128];
+        const int syscnf_len = std::snprintf(syscnf, sizeof(syscnf),
+            "BOOT = cdrom:\\BOOT.EXE;1\nTCB = 4\nEVENT = 10\nSTACK = 801FFFF0\n");
+        const uint32_t syscnf_bytes   = (uint32_t)syscnf_len;
+        const uint32_t syscnf_sectors = 1; // always fits in one sector
+
+        // --- Directory entries ---
+        // We need: "." (self), ".." (parent=root), "SYSTEM.CNF;1", "BOOT.EXE;1"
+        // Each dir record: [len][ext_attr_len][LBA_LE+BE][size_LE+BE][date6][flags][unit][gap][volseq_LE+BE][name_len][name][pad]
+
+        auto make_dir_record = [&](uint8_t* p, bool is_dot, bool is_dotdot,
+                                   const char* name, uint32_t lba, uint32_t size,
+                                   bool is_dir) -> uint32_t
+        {
+            uint8_t name_len = is_dot ? 1 : (is_dotdot ? 1 : (uint8_t)std::strlen(name));
+            uint8_t rec_len = 33 + name_len;
+            if (rec_len & 1) rec_len++; // must be even
+            p[0] = rec_len;
+            p[1] = 0; // extended attr length
+            w32both(p + 2, lba);
+            w32both(p + 10, size);
+            // Date: 2026-04-15 00:00:00 UTC+0 (years since 1900, month, day, h, m, s, tz_offset)
+            p[18] = 126; // 2026 - 1900
+            p[19] = 4;   // April
+            p[20] = 15;  // 15th
+            p[21] = 0; p[22] = 0; p[23] = 0; p[24] = 0;
+            p[25] = is_dir ? 0x02 : 0x00; // flags: 0x02=directory
+            p[26] = 0; p[27] = 0; // unit size, gap size
+            w16both(p + 28, 1); // volume sequence number
+            p[32] = name_len;
+            if (is_dot)       p[33] = 0x00;
+            else if (is_dotdot) p[33] = 0x01;
+            else               std::memcpy(p + 33, name, name_len);
+            return rec_len;
+        };
+
+        // Build root directory sector
+        uint8_t* rootsec = img + kRootLba * kSS;
+        uint32_t rootsec_used = 0;
+        // "." — self reference → kRootLba, size=2048
+        rootsec_used += make_dir_record(rootsec + rootsec_used, true,  false, ".", kRootLba, kSS, true);
+        // ".." — parent (same as root for root dir)
+        rootsec_used += make_dir_record(rootsec + rootsec_used, false, true,  "..", kRootLba, kSS, true);
+        // SYSTEM.CNF;1
+        rootsec_used += make_dir_record(rootsec + rootsec_used, false, false, "SYSTEM.CNF;1",
+                                        kSysCnfLba, syscnf_bytes, false);
+        // BOOT.EXE;1
+        rootsec_used += make_dir_record(rootsec + rootsec_used, false, false, "BOOT.EXE;1",
+                                        kExeLba, exe_bytes, false);
+
+        // --- Primary Volume Descriptor (LBA 16) ---
+        uint8_t* pvd = img + kPvdLba * kSS;
+        pvd[0] = 0x01; // type: PVD
+        std::memcpy(pvd + 1, "CD001", 5);
+        pvd[6] = 0x01; // version
+        pvd[8] = 0x20; // unused (space)
+        strpad(pvd + 8,  " ", 32);  // system identifier
+        strpad(pvd + 40, "VIRTUAL_DISC", 32); // volume identifier
+        w32both(pvd + 80, total_sectors); // volume space size
+        w16both(pvd + 120, 1); // volume set size
+        w16both(pvd + 124, 1); // volume sequence number
+        w16both(pvd + 128, kSS); // logical block size = 2048
+        w32both(pvd + 132, 10); // path table size: 1 root entry = 10 bytes
+        // L-path table LBA (little-endian)
+        w32l(pvd + 140, kLptLba);
+        // M-path table LBA (big-endian)
+        w32m(pvd + 148, kMptLba);
+        // Root directory record (34 bytes at offset 156)
+        make_dir_record(pvd + 156, true, false, ".", kRootLba, kSS, true);
+        strpad(pvd + 190, " ", 128); // volume set identifier
+        strpad(pvd + 318, " ", 128); // publisher
+        strpad(pvd + 446, " ", 128); // data preparer
+        strpad(pvd + 574, " ", 128); // application identifier
+        pvd[881] = 0x01; // file structure version
+
+        // --- Volume Descriptor Set Terminator (LBA 17) ---
+        uint8_t* vdt = img + kVdtLba * kSS;
+        vdt[0] = 0xFF;
+        std::memcpy(vdt + 1, "CD001", 5);
+        vdt[6] = 0x01;
+
+        // --- Path tables (LBA 18 = L, LBA 19 = M) ---
+        // Minimal: one entry (root directory)
+        // Format: [name_len][ext_attr_len][LBA][parent_dir_num][name][pad]
+        {
+            uint8_t* lpt = img + kLptLba * kSS;
+            lpt[0] = 1;   // identifier length (root = "\x01", length 1)
+            lpt[1] = 0;   // extended attr length
+            w32l(lpt + 2, kRootLba);
+            w16l(lpt + 6, 1); // parent directory number (1 = root itself)
+            lpt[8] = 0x00; // identifier = \x00 (root)
+            lpt[9] = 0x00; // pad
+
+            uint8_t* mpt = img + kMptLba * kSS;
+            mpt[0] = 1;
+            mpt[1] = 0;
+            w32m(mpt + 2, kRootLba);
+            w16m(mpt + 6, 1);
+            mpt[8] = 0x00;
+            mpt[9] = 0x00;
+        }
+
+        // --- SYSTEM.CNF sector (LBA 21) ---
+        std::memcpy(img + kSysCnfLba * kSS, syscnf, syscnf_bytes);
+
+        // --- EXE sectors (LBA 22+) ---
+        const size_t got = std::fread(img + kExeLba * kSS, 1, exe_bytes, ef);
+        std::fclose(ef);
+        if (got != exe_bytes)
+        {
+            std::free(img);
+            set_err(err, err_cap, "virtual disc: failed to read EXE");
+            return nullptr;
+        }
+
+        // --- Build Disc struct ---
+        Disc* d = (Disc*)std::calloc(1, sizeof(Disc));
+        if (!d) { std::free(img); set_err(err, err_cap, "virtual disc: OOM"); return nullptr; }
+
+        d->file_count = 1;
+        d->files[0].mem_data    = img;
+        d->files[0].sector_size = kSS;
+        d->files[0].num_sectors = total_sectors;
+        d->files[0].start_lba   = 0;
+        std::snprintf(d->files[0].path, sizeof(d->files[0].path), "<virtual:%s>", exe_path);
+
+        d->track_count = 1;
+        d->tracks[0].number     = 1;
+        d->tracks[0].is_audio   = 0;
+        d->tracks[0].start_lba  = 0;
+        d->tracks[0].file_index = 0;
+
+        d->disc_sectors = total_sectors;
+        // Note: disc_region is stored on Cdrom, not Disc.
+        // insert_virtual_exe_disc sets cdrom_.disc_region_ after calling this.
+
+        return d;
     }
 };
 
@@ -803,6 +1055,41 @@ bool Cdrom::insert_disc(const char* path, char* err, size_t err_cap)
     // Set shell_close_sent_=1 to suppress the spurious INT5 that was causing
     // games to enter a shell-check loop (irq_en=0x18) and miss ReadTOC/GetID responses.
     shell_close_sent_ = 1;
+
+    return true;
+}
+
+bool Cdrom::insert_virtual_exe_disc(const char* exe_path, char* err, size_t err_cap)
+{
+    // Pick SCEE as default region — user's BIOS is EU (SCPH-7502).
+    // A future overload could accept an explicit region if needed.
+    DiscRegion region{};
+    region.letter = 'E';
+    std::memcpy(region.scex, "SCEE", 4);
+
+    eject_disc();
+    disc_ = Disc::create_virtual_exe(exe_path, err, err_cap);
+    if (!disc_)
+        return false;
+
+    disc_region_ = region;
+
+    cd_log(log_cd_, log_io_, clock_, has_clock_, flog::Level::info,
+        "virtual disc inserted for EXE: %s (region=%c)", exe_path, region.letter);
+
+    if (logger_)
+    {
+        rlog::logger_logf(logger_, rlog::Level::info, rlog::Category::exec,
+            "CDROM: virtual disc inserted for EXE boot (region=%c)", region.letter);
+    }
+
+    // Build LBA→filename map so log annotation works for virtual disc too.
+    build_file_map();
+
+    // Disc is present at cold boot — suppress spurious shell-close INT5.
+    shell_close_sent_ = 1;
+
+    set_secondary_idle(true);
 
     return true;
 }
@@ -1292,11 +1579,40 @@ void Cdrom::try_fill_data_fifo()
     // and to push the correct data format to FIFO.
     uint8_t raw[2352];
     uint32_t raw_ss = 0;
-    if (!disc_->read_sector_raw(data_lba, raw, sizeof(raw), &raw_ss) || raw_ss < 2352)
+    if (!disc_->read_sector_raw(data_lba, raw, sizeof(raw), &raw_ss) || raw_ss < 2048)
     {
         emu::logf(emu::LogLevel::warn, "CD",
             "try_fill: LBA=%u raw read failed (ss=%u)", data_lba, raw_ss);
         return;
+    }
+
+    // Virtual discs (and some ISO images) provide 2048-byte user data only.
+    // Synthesize a Mode 2 Form 1 sector frame so the rest of the pipeline is uniform.
+    if (raw_ss == 2048)
+    {
+        uint8_t user[2048];
+        std::memcpy(user, raw, 2048);
+        std::memset(raw, 0, sizeof(raw));
+        // Sync pattern
+        raw[0] = 0x00;
+        for (int si = 1; si <= 10; si++) raw[si] = 0xFF;
+        raw[11] = 0x00;
+        // MSF in BCD (LBA+150 = absolute)
+        {
+            const uint32_t abs_lba = data_lba + 150u;
+            const uint32_t m = abs_lba / (75u * 60u);
+            const uint32_t s = (abs_lba / 75u) % 60u;
+            const uint32_t f = abs_lba % 75u;
+            raw[12] = (uint8_t)(((m / 10u) << 4) | (m % 10u));
+            raw[13] = (uint8_t)(((s / 10u) << 4) | (s % 10u));
+            raw[14] = (uint8_t)(((f / 10u) << 4) | (f % 10u));
+        }
+        raw[15] = 0x02; // mode 2
+        // Subheader: file=0, channel=0, submode=0x08 (data+Form1), coding=0 (written twice)
+        raw[16] = 0; raw[17] = 0; raw[18] = 0x08; raw[19] = 0;
+        raw[20] = 0; raw[21] = 0; raw[22] = 0x08; raw[23] = 0;
+        std::memcpy(raw + 24, user, 2048);
+        raw_ss = 2352;
     }
 
     // Capture sector header (mm,ss,ff,mode) and subheader (file,channel,submode,coding)

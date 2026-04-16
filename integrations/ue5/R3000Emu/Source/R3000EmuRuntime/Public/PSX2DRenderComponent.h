@@ -273,7 +273,7 @@ private:
     void UpdatePsxCameraDebugActor();
     void DrawPsxScreenFrameDebug() const;
     AActor* ResolvePsxCameraDebugActor();
-    float GetEffectivePixelScaleForDisplay(const gpu::DisplayConfig* Disp) const;
+    void GetFixedScreenSize(float& OutW, float& OutH) const;
 
     gpu::Gpu* Gpu_{nullptr};
 

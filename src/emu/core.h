@@ -119,6 +119,16 @@ class Core
     // Requires init_from_image() first.
     bool fast_boot_from_exe(const char* exe_path, ExeBootMode mode, char* err, size_t err_cap);
 
+    // BIOS devkit boot: insert a virtual (or real) disc and let the BIOS boot
+    // normally from 0xBFC00000. The BIOS loads BOOT.EXE from the disc.
+    // - exe_path:  path to the PS-EXE to boot (always required)
+    // - cd_path:   optional real CD image; if nullptr a virtual disc is built
+    //              in memory from exe_path so the BIOS can read it
+    // Call before init_from_image(); the disc must be present before the BIOS
+    // runs its CD-ROM initialisation.
+    bool boot_bios_with_exe(const char* exe_path, const char* cd_path,
+                            const InitOptions& opt, char* err, size_t err_cap);
+
     // Set PSX EXE parameters (injected into scratchpad RAM before the EXE starts).
     // The ints are written at 0x1F800200 and $a1 is pointed there at boot.
     // Used for devkit mode to pass args to PSX demos (e.g. TREX attract mode).

@@ -51,64 +51,50 @@ void UPSX2DRenderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 }
 
 // ===================================================================
-// GetEffectivePixelScale - compute uniform HD scale or return manual
+// GetFixedScreenSize - fixed 4:3 CRT screen size in UE units
 // ===================================================================
-float UPSX2DRenderComponent::GetEffectivePixelScale() const
-{
-    return GetEffectivePixelScaleForDisplay(Gpu_ ? &Gpu_->display_config() : nullptr);
-}
-
-float UPSX2DRenderComponent::GetEffectivePixelScaleForDisplay(const gpu::DisplayConfig* Disp) const
+// Returns the CONSTANT physical screen dimensions regardless of PS1 resolution.
+// Every PS1 mode (256x240, 320x240, 640x480, 640x240…) maps onto this same
+// rectangle — exactly like a real CRT where the tube never changes size.
+// When bUniformHdScale=false, falls back to PixelScale * 320×240.
+void UPSX2DRenderComponent::GetFixedScreenSize(float& OutW, float& OutH) const
 {
     if (!bUniformHdScale)
     {
-        return PixelScale;
+        // Manual pixel scale: treat 320×240 as the reference size
+        OutW = 320.0f * PixelScale;
+        OutH = 240.0f * PixelScale;
+        return;
     }
 
-    // Get target resolution from HD definition preset
-    float TgtWidth, TgtHeight;
+    // 4:3 fixed size derived from the HD height preset
+    float FixedH;
     switch (HdDefinition)
     {
-        case EHdDefinition::HD_720p:
-            TgtWidth = 1280.0f;
-            TgtHeight = 720.0f;
-            break;
-        case EHdDefinition::HD_1080p:
-            TgtWidth = 1920.0f;
-            TgtHeight = 1080.0f;
-            break;
-        case EHdDefinition::HD_1440p:
-            TgtWidth = 2560.0f;
-            TgtHeight = 1440.0f;
-            break;
-        case EHdDefinition::HD_4K:
-            TgtWidth = 3840.0f;
-            TgtHeight = 2160.0f;
-            break;
+        case EHdDefinition::HD_720p:   FixedH =  720.0f; break;
+        case EHdDefinition::HD_1080p:  FixedH = 1080.0f; break;
+        case EHdDefinition::HD_1440p:  FixedH = 1440.0f; break;
+        case EHdDefinition::HD_4K:     FixedH = 2160.0f; break;
         case EHdDefinition::Custom:
         default:
-            TgtWidth = TargetWidth;
-            TgtHeight = TargetHeight;
-            break;
+            // Custom: user provides the exact 4:3 size directly
+            OutW = TargetWidth;
+            OutH = TargetHeight;
+            return;
     }
+    OutH = FixedH;
+    OutW = FixedH * (4.0f / 3.0f);  // always 4:3
+}
 
-    // Get PS1 display resolution
-    float Ps1Width = 320.0f;  // Default
-    float Ps1Height = 240.0f;
-
-    if (Disp)
-    {
-        Ps1Width = static_cast<float>(Disp->width());
-        Ps1Height = static_cast<float>(Disp->height());
-        // Clamp to sane values
-        if (Ps1Width < 1.0f) Ps1Width = 320.0f;
-        if (Ps1Height < 1.0f) Ps1Height = 240.0f;
-    }
-
-    // Scale to fit target while maintaining aspect ratio
-    const float ScaleX = TgtWidth / Ps1Width;
-    const float ScaleY = TgtHeight / Ps1Height;
-    return FMath::Min(ScaleX, ScaleY);
+// GetEffectivePixelScale — kept for Blueprint backward-compat.
+// Returns the Y scale factor that maps the current PS1 height onto the fixed screen.
+float UPSX2DRenderComponent::GetEffectivePixelScale() const
+{
+    float FixedW, FixedH;
+    GetFixedScreenSize(FixedW, FixedH);
+    const gpu::DisplayConfig* Disp = Gpu_ ? &Gpu_->display_config() : nullptr;
+    const float PsxH = (Disp && Disp->height() > 0) ? static_cast<float>(Disp->height()) : 240.0f;
+    return FixedH / PsxH;
 }
 
 // ===================================================================
@@ -189,15 +175,10 @@ void UPSX2DRenderComponent::UpdatePsxCameraDebugActor()
     if (!CameraActor)
         return;
 
-    gpu::FrameDrawList DrawListCopy;
-    if (Gpu_)
-        Gpu_->copy_ready_draw_list(DrawListCopy);
-    const gpu::DisplayConfig& Disp = DrawListCopy.display;
-    const float EffScale = GetEffectivePixelScaleForDisplay(Gpu_ ? &Disp : nullptr);
-    const float Width = Gpu_ ? static_cast<float>(Disp.width()) : 320.0f;
-    const float Height = Gpu_ ? static_cast<float>(Disp.height()) : 240.0f;
-    const float HalfWidth = 0.5f * Width * EffScale;
-    const float HalfHeight = 0.5f * Height * EffScale;
+    float FixedW, FixedH;
+    GetFixedScreenSize(FixedW, FixedH);
+    const float HalfWidth  = FixedW * 0.5f;
+    const float HalfHeight = FixedH * 0.5f;
     constexpr float DebugFovDeg = 60.0f;
     const float HalfFovRad = FMath::DegreesToRadians(DebugFovDeg * 0.5f);
     const float CameraDistance = FMath::Max(
@@ -222,10 +203,8 @@ void UPSX2DRenderComponent::UpdatePsxCameraDebugActor()
     {
         DebugActor->SetDebugColor(FColor(0, 220, 255));
         DebugActor->SetDebugText(FString::Printf(
-            TEXT("PSX 2D Cam\n%.0fx%.0f\nscale=%.2f"),
-            Width,
-            Height,
-            EffScale));
+            TEXT("PSX 2D Cam\n%.0fx%.0f (fixed)"),
+            FixedW, FixedH));
     }
 }
 
@@ -234,20 +213,15 @@ void UPSX2DRenderComponent::DrawPsxScreenFrameDebug() const
     if (!bShowPsxScreenFrameDebug || !GetWorld())
         return;
 
-    gpu::FrameDrawList DrawListCopy;
-    if (Gpu_)
-        Gpu_->copy_ready_draw_list(DrawListCopy);
-    const gpu::DisplayConfig& Disp = DrawListCopy.display;
-    const float EffScale = GetEffectivePixelScaleForDisplay(Gpu_ ? &Disp : nullptr);
-    const float Width = Gpu_ ? static_cast<float>(Disp.width()) : 320.0f;
-    const float Height = Gpu_ ? static_cast<float>(Disp.height()) : 240.0f;
+    float FixedW, FixedH;
+    GetFixedScreenSize(FixedW, FixedH);
 
     const FTransform PlaneTransform = GetComponentTransform();
     const FVector Center = PlaneTransform.GetLocation();
     const FVector Right = PlaneTransform.GetUnitAxis(EAxis::Y);
     const FVector Up = PlaneTransform.GetUnitAxis(EAxis::Z);
-    const FVector HalfRight = Right * (0.5f * Width * EffScale);
-    const FVector HalfUp = Up * (0.5f * Height * EffScale);
+    const FVector HalfRight = Right * (FixedW * 0.5f);
+    const FVector HalfUp    = Up    * (FixedH * 0.5f);
 
     const FVector P0 = Center - HalfRight - HalfUp;
     const FVector P1 = Center + HalfRight - HalfUp;
@@ -482,16 +456,29 @@ void UPSX2DRenderComponent::RebuildMesh()
     // scan-out half-size shifts the whole frame off the component pivot.
     // ─────────────────────────────────────────────────────────────────────
     const gpu::DisplayConfig& Disp = DrawList.display;
-    const float EffScale = GetEffectivePixelScaleForDisplay(&Disp);
+
+    // Fixed 4:3 CRT screen: every PS1 resolution maps onto the same UE5 rectangle.
+    // Separate ScaleX/ScaleY fill the fixed area exactly (like a real tube, no letterbox).
+    // PS1 screen centre → component origin (0,0) so camera placement never changes.
+    float FixedW, FixedH;
+    GetFixedScreenSize(FixedW, FixedH);
+    const float PsxW = FMath::Max(1.0f, static_cast<float>(Disp.width()));
+    const float PsxH = FMath::Max(1.0f, static_cast<float>(Disp.height()));
+    const float ScaleX  = FixedW / PsxW;   // may differ from ScaleY for non-4:3 PS1 modes
+    const float ScaleY  = FixedH / PsxH;
+    // Screen centre in game coordinate space:
+    //   draw_env.offset is where the GPU places game(0,0) in VRAM — so the display
+    //   centre in game coords = PsxW/2 - offset_x (avoid display_x: it flips with
+    //   double-buffering and would shift the whole image every other frame).
+    const float CenterGx = PsxW * 0.5f - static_cast<float>(DrawList.draw_env.offset_x);
+    const float CenterGy = PsxH * 0.5f - static_cast<float>(DrawList.draw_env.offset_y);
 
     if (bDebugMeshLog)
     {
-        const char* HdNames[] = {"720p", "1080p", "1440p", "4K", "Custom"};
-        const char* HdName = (static_cast<int>(HdDefinition) < 5) ? HdNames[static_cast<int>(HdDefinition)] : "?";
-        emu::logf(emu::LogLevel::info, "GPU", "MeshRebuild: %d tris | disp=(%u,%u)+(%ux%u) clip=(%u,%u)-(%u,%u) | EffScale=%.3f (HD=%s) Origin=raw-centered",
-            NumCmds, Disp.display_x, Disp.display_y, Disp.width(), Disp.height(),
-            DrawList.draw_env.clip_x1, DrawList.draw_env.clip_y1, DrawList.draw_env.clip_x2, DrawList.draw_env.clip_y2,
-            EffScale, HdName);
+        emu::logf(emu::LogLevel::info, "GPU",
+            "MeshRebuild: %d tris | psx=%ux%u | fixed=%.0fx%.0f | scaleX=%.3f scaleY=%.3f | center=(%.1f,%.1f) offset=(%d,%d)",
+            NumCmds, Disp.width(), Disp.height(), FixedW, FixedH, ScaleX, ScaleY,
+            CenterGx, CenterGy, DrawList.draw_env.offset_x, DrawList.draw_env.offset_y);
     }
 
     // Collect runs: walk draw list, flush section on material change
@@ -566,7 +553,9 @@ void UPSX2DRenderComponent::RebuildMesh()
 
             const float dx = static_cast<float>(V.x) + 0.5f;
             const float dy = static_cast<float>(V.y) + 0.5f;
-            Cur->Vertices.Add(FVector(Depth, dx * EffScale + DisplayOffset.X, -dy * EffScale + DisplayOffset.Y));
+            Cur->Vertices.Add(FVector(Depth,
+                (dx - CenterGx) * ScaleX + DisplayOffset.X,
+                -(dy - CenterGy) * ScaleY + DisplayOffset.Y));
 
             if (bDebugMeshLog)
             {

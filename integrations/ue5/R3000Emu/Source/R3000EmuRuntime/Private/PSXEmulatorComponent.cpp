@@ -747,8 +747,10 @@ void UPSXEmulatorComponent::InitEmulator()
     // Priority: bDevKitMode (EXE direct boot with HLE) > bFastBoot (CD fast boot) > BIOS boot.
     if (bDevKitMode)
     {
-        // DEV KIT MODE: init core (allocates RAM), then load EXE + HLE kernel.
-        // Like a real DTL-H2000: BIOS kernel is initialized, then EXE is loaded on top.
+        // DEV KIT MODE
+        // bHleVectors=false (default): BIOS boots for real from 0xBFC00000,
+        //   loads EXE from a virtual in-memory disc — no HLE interference.
+        // bHleVectors=true: skip BIOS entirely, fake PCB/TCB kernel bootstrap.
         if (ExePath.IsEmpty())
         {
             UE_LOG(LogPSXEmu, Error, TEXT("bDevKitMode=true but ExePath is empty!"));
@@ -756,49 +758,24 @@ void UPSXEmulatorComponent::InitEmulator()
             return;
         }
 
-        // Init core with dummy entry (will be overridden by fast_boot_from_exe)
-        loader::LoadedImage Img{};
-        Img.entry_pc = 0x80010000u;
-        Img.has_sp = 1;
-        Img.sp = 0x801FFFF0u;
-
-    emu::Core::InitOptions Opt{};
-    Opt.pretty = bTraceASM ? 1 : 0;
-    Opt.trace_io = bTraceIO ? 1 : 0;
-    Opt.hle_vectors = 1; // Dev kit always uses HLE
-    Opt.text_hle = bTextHle ? 1 : 0;
-    Opt.gte_backend = EffectiveGteBackend(GteBackendMode);
-    Opt.crash_trace_steps = static_cast<uint32>(FMath::Clamp(CpuCrashTraceSteps, 0, 2048));
-    Opt.watch_ram_range_phys = static_cast<uint32>(FMath::Max(WatchRamRangePhys, 0));
-    Opt.watch_ram_range_size = static_cast<uint32>(FMath::Max(WatchRamRangeSize, 0));
-    Opt.stack_watch_enabled = bEnableStackWatch ? 1 : 0;
-    Opt.stack_watch_phys = static_cast<uint32>(FMath::Max(StackWatchPhys, 0));
-    Opt.stack_watch_size = static_cast<uint32>(FMath::Clamp(StackWatchSize, 0, 0x10000));
-    Opt.stack_watch_target_enabled = bStackWatchTargetValueEnabled ? 1 : 0;
-    Opt.stack_watch_target_value = static_cast<uint32>(StackWatchTargetValue);
-    Opt.loop_detectors = bLoopDetectors ? 1 : 0;
+        emu::Core::InitOptions Opt{};
+        Opt.pretty = bTraceASM ? 1 : 0;
+        Opt.trace_io = bTraceIO ? 1 : 0;
+        Opt.text_hle = bTextHle ? 1 : 0;
+        Opt.gte_backend = EffectiveGteBackend(GteBackendMode);
+        Opt.crash_trace_steps = static_cast<uint32>(FMath::Clamp(CpuCrashTraceSteps, 0, 2048));
+        Opt.watch_ram_range_phys = static_cast<uint32>(FMath::Max(WatchRamRangePhys, 0));
+        Opt.watch_ram_range_size = static_cast<uint32>(FMath::Max(WatchRamRangeSize, 0));
+        Opt.stack_watch_enabled = bEnableStackWatch ? 1 : 0;
+        Opt.stack_watch_phys = static_cast<uint32>(FMath::Max(StackWatchPhys, 0));
+        Opt.stack_watch_size = static_cast<uint32>(FMath::Clamp(StackWatchSize, 0, 0x10000));
+        Opt.stack_watch_target_enabled = bStackWatchTargetValueEnabled ? 1 : 0;
+        Opt.stack_watch_target_value = static_cast<uint32>(StackWatchTargetValue);
+        Opt.loop_detectors = bLoopDetectors ? 1 : 0;
         Opt.bus_tick_batch = EffectiveBusTickBatch(bThreadedMode, BusTickBatch);
         Opt.cd_timing_mode = EffectiveCdTimingMode(CDTimingMode);
-        if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
-        {
-            UE_LOG(LogPSXEmu, Error, TEXT("Core init (devkit) failed: %hs"), err[0] ? err : "unknown error");
-            return;
-        }
 
-        // Load BIOS ROM data (if available) so PsyQ FntLoad can read the font.
-        // We don't EXECUTE the BIOS — HLE handles syscalls — but the ROM data
-        // must be mapped at 0xBFC00000 for library functions that read from it.
-        if (!BiosPath.IsEmpty())
-        {
-            BiosBytes_.Reset();
-            if (FFileHelper::LoadFileToArray(BiosBytes_, *BiosPath))
-            {
-                Core_->set_bios_copy(BiosBytes_.GetData(), (uint32)BiosBytes_.Num(), err, sizeof(err));
-                UE_LOG(LogPSXEmu, Log, TEXT("DevKit: BIOS ROM loaded for font data (%d bytes)"), BiosBytes_.Num());
-            }
-        }
-
-        // Parse and inject PSX EXE params (e.g. "1,30" for TREX attract mode)
+        // Parse and inject PSX EXE params before boot (both paths use them).
         if (!PsxParam.IsEmpty())
         {
             TArray<FString> Tokens;
@@ -816,16 +793,90 @@ void UPSXEmulatorComponent::InitEmulator()
             }
         }
 
-        // Load EXE + initialize HLE kernel (PCB/TCB, I_MASK, COP0)
         FTCHARToUTF8 ExeUtf8(*ExePath);
-        if (!Core_->fast_boot_from_exe(ExeUtf8.Get(), emu::Core::ExeBootMode::devkit_hle, err, sizeof(err)))
+        // FTCHARToUTF8 has no default ctor or move-assign; copy bytes into TArray
+        // so the pointer outlives the conditional block.
+        TArray<ANSICHAR> DiscUtf8Buf;
+        const char* CdUtf8 = nullptr;
+        if (!DiscPath.IsEmpty())
         {
-            UE_LOG(LogPSXEmu, Error, TEXT("Dev kit EXE boot failed: %hs"), err[0] ? err : "unknown error");
-            return;
+            FTCHARToUTF8 Tmp(*DiscPath);
+            const int32 Len = Tmp.Length();
+            DiscUtf8Buf.SetNum(Len + 1);
+            FMemory::Memcpy(DiscUtf8Buf.GetData(), Tmp.Get(), Len + 1);
+            CdUtf8 = DiscUtf8Buf.GetData();
         }
 
-        Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
-        UE_LOG(LogPSXEmu, Log, TEXT("Dev kit boot OK: %s → PC=0x%08X CDTiming=%s"), *ExePath, Core_->pc(), LexToString(CDTimingMode));
+        if (!bHleVectors)
+        {
+            // BIOS devkit: real BIOS boot from 0xBFC00000.
+            // boot_bios_with_exe handles disc insertion + init_from_image.
+            // BIOS must be loaded first.
+            if (!BiosPath.IsEmpty())
+            {
+                BiosBytes_.Reset();
+                if (FFileHelper::LoadFileToArray(BiosBytes_, *BiosPath))
+                {
+                    Core_->set_bios_copy(BiosBytes_.GetData(), (uint32)BiosBytes_.Num(), err, sizeof(err));
+                    UE_LOG(LogPSXEmu, Log, TEXT("DevKit: BIOS ROM loaded (%d bytes)"), BiosBytes_.Num());
+                }
+                else
+                {
+                    UE_LOG(LogPSXEmu, Error, TEXT("DevKit: failed to load BIOS from %s"), *BiosPath);
+                    return;
+                }
+            }
+            else
+            {
+                UE_LOG(LogPSXEmu, Error, TEXT("DevKit BIOS boot requires a BiosPath!"));
+                return;
+            }
+
+            if (!Core_->boot_bios_with_exe(ExeUtf8.Get(), CdUtf8, Opt, err, sizeof(err)))
+            {
+                UE_LOG(LogPSXEmu, Error, TEXT("DevKit BIOS boot failed: %hs"), err[0] ? err : "unknown error");
+                return;
+            }
+
+            Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
+            UE_LOG(LogPSXEmu, Log, TEXT("DevKit BIOS boot OK: %s → PC=0xBFC00000 (BIOS running)"), *ExePath);
+        }
+        else
+        {
+            // HLE devkit: skip BIOS, fake PCB/TCB kernel bootstrap.
+            Opt.hle_vectors = 1;
+
+            loader::LoadedImage Img{};
+            Img.entry_pc = 0x80010000u;
+            Img.has_sp = 1;
+            Img.sp = 0x801FFFF0u;
+
+            if (!Core_->init_from_image(Img, Opt, err, sizeof(err)))
+            {
+                UE_LOG(LogPSXEmu, Error, TEXT("Core init (devkit-hle) failed: %hs"), err[0] ? err : "unknown error");
+                return;
+            }
+
+            // Load BIOS ROM so PsyQ font functions can read from 0xBFC00000.
+            if (!BiosPath.IsEmpty())
+            {
+                BiosBytes_.Reset();
+                if (FFileHelper::LoadFileToArray(BiosBytes_, *BiosPath))
+                {
+                    Core_->set_bios_copy(BiosBytes_.GetData(), (uint32)BiosBytes_.Num(), err, sizeof(err));
+                    UE_LOG(LogPSXEmu, Log, TEXT("DevKit-HLE: BIOS ROM mapped for font data (%d bytes)"), BiosBytes_.Num());
+                }
+            }
+
+            if (!Core_->fast_boot_from_exe(ExeUtf8.Get(), emu::Core::ExeBootMode::devkit_hle, err, sizeof(err)))
+            {
+                UE_LOG(LogPSXEmu, Error, TEXT("DevKit-HLE EXE boot failed: %hs"), err[0] ? err : "unknown error");
+                return;
+            }
+
+            Core_->set_cycle_multiplier(static_cast<uint32>(FMath::Clamp(CycleMultiplier, 1, 10)));
+            UE_LOG(LogPSXEmu, Log, TEXT("DevKit-HLE boot OK: %s → PC=0x%08X"), *ExePath, Core_->pc());
+        }
     }
     else if (bFastBoot)
     {
