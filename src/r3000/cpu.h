@@ -39,6 +39,27 @@ class Cpu
         Bus::MemFault mem_fault{};
     };
 
+    // JIT-prep: result of running a basic block of instructions.
+    // interpret_block() is purely additive — it wraps step() in a bounded
+    // loop and reports why it stopped.  A future dynamic recompiler will
+    // replace this function's body when a compiled block is available for
+    // start_pc, but the signature and semantics stay the same.
+    struct BlockResult
+    {
+        enum class Reason : uint8_t
+        {
+            MaxInsnsReached,
+            BranchTaken,
+            ExceptionRaised,
+            StepNonOk,      // halted / mem_fault / illegal_instr
+            StopOnPc,
+        };
+        uint32_t final_pc{0};
+        uint32_t insns_executed{0};
+        Reason   reason{Reason::MaxInsnsReached};
+        StepResult last_step{};
+    };
+
     Cpu(Bus& bus, rlog::Logger* logger = nullptr);
 
     void reset(uint32_t reset_pc);
@@ -274,7 +295,24 @@ class Cpu
 
     StepResult step();
 
+    // JIT-prep: run step() in a bounded loop until a block boundary is hit.
+    // Does not change interpreter semantics — it's a wrapper.  A compiled JIT
+    // block will later replace this entry point without affecting callers.
+    BlockResult interpret_block(uint32_t start_pc, uint32_t max_insns);
+
+    // JIT-prep: monotonic tokens incremented when code-containing memory is
+    // modified.  A future JIT will snapshot these at block-compile time and
+    // invalidate compiled blocks on token change.  Interpreter reads them 0.
+    uint64_t icache_dirty_token() const { return icache_dirty_token_; }
+    uint64_t code_ram_dirty_token() const { return code_ram_dirty_token_; }
+
   private:
+    // JIT-prep: factored IRQ-taken check.  Returns true if an external
+    // interrupt was raised and step() should return early with ok/zero.
+    // Called at the top of step() and (future) at block boundaries by the
+    // dynamic recompiler.
+    bool check_and_raise_irq();
+
     // COP0 minimal (suffisant pour exceptions et quelques move).
     // On reste volontairement simple pour une démo: pas de TLB, pas de timing cycle-accurate.
     // NOTE: on supporte néanmoins un minimum d'IRQ (EXC_INT) pour permettre au BIOS d'avancer.
@@ -392,6 +430,15 @@ class Cpu
     // R3000A I-cache (4KB) - utilisé comme "data store" quand COP0.Status.Isc=1 (cache isolated).
     // Pour le bring-up BIOS, l'essentiel est que les boucles d'init cache n'écrasent pas la RAM.
     std::array<uint8_t, 4u * 1024u> icache_data_{};
+
+    // JIT-prep: monotonic invalidation tokens.
+    // icache_dirty_token_ is bumped on every write into icache_data_
+    // (cache_iso_write_*).  code_ram_dirty_token_ is bumped when a regular
+    // store lands in the PSX 2 MB main RAM window [0, 0x00200000).  The
+    // interpreter never reads them; they exist solely so a future block-based
+    // recompiler can detect SMC/DMA invalidations at block entry.
+    uint64_t icache_dirty_token_{0};
+    uint64_t code_ram_dirty_token_{0};
 
     // Trace ring-buffer (dernieres instructions fetchées) pour debug BIOS.
     // Utile quand on veut comprendre un IFETCH fault sans activer --pretty.

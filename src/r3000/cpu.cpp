@@ -468,6 +468,153 @@ void Cpu::commit_pending_load()
 // observe_camera_mtc2 / maybe_log_camera_candidates
 // camera_candidates_snapshot / restore_camera_candidates  moved to cpu_debug.cpp
 
+// JIT-prep: factored IRQ-taken check.  Returns true when an EXC_INT has been
+// raised (caller is step() which must bail out with StepResult::Kind::ok).
+//
+// Sur PS1, l'IRQ controller (I_STAT/I_MASK) drive une ligne d'interruption R3000.
+// Modèle minimal:
+// - on mappe (I_STAT & I_MASK) -> COP0.Cause.IP2 (bit10)
+// - si Status.IEc=1 et Status.IM2=1, on prend une exception EXC_INT.
+bool Cpu::check_and_raise_irq()
+{
+    // CDROM IRQ is now handled directly in bus.tick() via
+    // level-sensitive edge detection (rising edge → set I_STAT bit 2,
+    // low level → clear I_STAT bit 2).
+
+    const uint32_t pending = bus_.irq_pending_masked();
+    uint32_t cause = cop0_[COP0_CAUSE];
+    if (pending)
+        cause |= (1u << 10); // IP2
+    else
+        cause &= ~(1u << 10);
+    cop0_[COP0_CAUSE] = cause;
+
+    const uint32_t status = cop0_[COP0_STATUS];
+    const uint32_t ip = cause & 0xFF00u;
+    const uint32_t im = status & 0xFF00u;
+    const int iec = (status & 0x1u) ? 1 : 0;
+
+    if ((pending & 0x0004u) != 0u &&
+        pc_ >= 0xBFC0'0000u && pc_ < 0xBFC8'0000u &&
+        bios_cd_pending_log_count_ < 256u)
+    {
+        ++bios_cd_pending_log_count_;
+        emu::logf(emu::LogLevel::warn, "IRQ",
+            "BIOS CD pending pc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X ip=0x%04X im=0x%04X iec=%d (#%u)",
+            pc_,
+            cause,
+            status,
+            (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
+            (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
+            (unsigned)(pending & 0xFFFFu),
+            (unsigned)(ip & 0xFFFFu),
+            (unsigned)(im & 0xFFFFu),
+            iec,
+            bios_cd_pending_log_count_);
+    }
+
+    if (iec && (ip & im) != 0u)
+    {
+        if (irq_take_log_count_ < 256u)
+        {
+            ++irq_take_log_count_;
+            emu::logf(emu::LogLevel::warn, "IRQ",
+                "TAKE_IRQ pc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X ip=0x%04X im=0x%04X iec=%d (#%u)",
+                pc_,
+                cause,
+                status,
+                (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
+                (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
+                (unsigned)(pending & 0xFFFFu),
+                (unsigned)(ip & 0xFFFFu),
+                (unsigned)(im & 0xFFFFu),
+                iec,
+                irq_take_log_count_);
+        }
+        // Trace SIO0 IRQ delivery to CPU (first 10)
+        if (pending & (1u << 7))
+        {
+            static uint32_t sio0_exc_log = 0;
+            if (sio0_exc_log < 10)
+            {
+                ++sio0_exc_log;
+                emu::logf(emu::LogLevel::debug, "CPU",
+                    "SIO0 exception! PC=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
+                    pc_, bus_.irq_stat_raw(), bus_.irq_mask_raw(), sio0_exc_log);
+            }
+        }
+        raise_exception(EXC_INT, 0, pc_);
+        return true;
+    }
+    return false;
+}
+
+// JIT-prep: bounded-loop wrapper around step().  Semantically a thin shim —
+// runs instructions until a block-exit condition trips, then reports why.
+// A future dynamic recompiler will swap this body to dispatch into compiled
+// blocks when one exists for start_pc; callers stay oblivious.
+Cpu::BlockResult Cpu::interpret_block(uint32_t start_pc, uint32_t max_insns)
+{
+    BlockResult out{};
+    out.final_pc = pc_;
+    if (start_pc != pc_)
+    {
+        // Caller asked us to resume at a different PC than the CPU's current
+        // PC — set it (matches the intent: "run from start_pc for N insns").
+        pc_ = start_pc;
+        out.final_pc = pc_;
+    }
+
+    for (uint32_t i = 0; i < max_insns; ++i)
+    {
+        const uint32_t pc_before = pc_;
+        const bool branch_pending_before = branch_pending_;
+
+        StepResult sr = step();
+        out.last_step = sr;
+        out.insns_executed = i + 1;
+        out.final_pc = pc_;
+
+        if (sr.kind != StepResult::Kind::ok)
+        {
+            out.reason = BlockResult::Reason::StepNonOk;
+            return out;
+        }
+
+        // Exception raised inside step() (e.g. EXC_INT): sr.instr==0 is the
+        // convention set when check_and_raise_irq() forced an early return.
+        // We treat it as a block boundary so the JIT can re-enter a fresh
+        // dispatch after the exception handler reads EPC.
+        if (sr.instr == 0u && pc_ != pc_before + 4u)
+        {
+            out.reason = BlockResult::Reason::ExceptionRaised;
+            return out;
+        }
+
+        // Stop-on-PC watchpoint hit inside step().
+        if (stopped_on_pc_)
+        {
+            out.reason = BlockResult::Reason::StopOnPc;
+            return out;
+        }
+
+        // Branch taken: delay slot was executed in this step() and the next
+        // PC is no longer pc_before+4.  Either the branch was committed
+        // (branch_pending_before && !branch_pending_) OR a direct jump
+        // retargeted the PC non-sequentially.
+        const bool pc_is_sequential = (pc_ == pc_before + 4u);
+        const bool branch_committed = (branch_pending_before && !branch_pending_);
+        if (branch_committed || !pc_is_sequential)
+        {
+            out.reason = BlockResult::Reason::BranchTaken;
+            return out;
+        }
+    }
+
+    out.reason = BlockResult::Reason::MaxInsnsReached;
+    return out;
+}
+
 Cpu::StepResult Cpu::step()
 {
     // Une "step" = exécuter EXACTEMENT 1 instruction MIPS (plus éventuellement appliquer un
@@ -825,82 +972,12 @@ Cpu::StepResult Cpu::step()
     // -----------------------------
     // 0) IRQ (PS1) - check between instructions
     // -----------------------------
-    // Sur PS1, l'IRQ controller (I_STAT/I_MASK) drive une ligne d'interruption R3000.
-    // Modèle minimal:
-    // - on mappe (I_STAT & I_MASK) -> COP0.Cause.IP2 (bit10)
-    // - si Status.IEc=1 et Status.IM2=1, on prend une exception EXC_INT.
+    // Factored into Cpu::check_and_raise_irq() for future JIT block-boundary use.
+    if (check_and_raise_irq())
     {
-        // CDROM IRQ is now handled directly in bus.tick() via
-        // level-sensitive edge detection (rising edge → set I_STAT bit 2,
-        // low level → clear I_STAT bit 2).
-
-        const uint32_t pending = bus_.irq_pending_masked();
-        uint32_t cause = cop0_[COP0_CAUSE];
-        if (pending)
-            cause |= (1u << 10); // IP2
-        else
-            cause &= ~(1u << 10);
-        cop0_[COP0_CAUSE] = cause;
-
-        const uint32_t status = cop0_[COP0_STATUS];
-        const uint32_t ip = cause & 0xFF00u;
-        const uint32_t im = status & 0xFF00u;
-        const int iec = (status & 0x1u) ? 1 : 0;
-
-        if ((pending & 0x0004u) != 0u &&
-            pc_ >= 0xBFC0'0000u && pc_ < 0xBFC8'0000u &&
-            bios_cd_pending_log_count_ < 256u)
-        {
-            ++bios_cd_pending_log_count_;
-            emu::logf(emu::LogLevel::warn, "IRQ",
-                "BIOS CD pending pc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X ip=0x%04X im=0x%04X iec=%d (#%u)",
-                pc_,
-                cause,
-                status,
-                (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
-                (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
-                (unsigned)(pending & 0xFFFFu),
-                (unsigned)(ip & 0xFFFFu),
-                (unsigned)(im & 0xFFFFu),
-                iec,
-                bios_cd_pending_log_count_);
-        }
-
-        if (iec && (ip & im) != 0u)
-        {
-            if (irq_take_log_count_ < 256u)
-            {
-                ++irq_take_log_count_;
-                emu::logf(emu::LogLevel::warn, "IRQ",
-                    "TAKE_IRQ pc=0x%08X cause=0x%08X status=0x%08X i_stat=0x%04X i_mask=0x%04X pending=0x%04X ip=0x%04X im=0x%04X iec=%d (#%u)",
-                    pc_,
-                    cause,
-                    status,
-                    (unsigned)(bus_.irq_stat_raw() & 0xFFFFu),
-                    (unsigned)(bus_.irq_mask_raw() & 0xFFFFu),
-                    (unsigned)(pending & 0xFFFFu),
-                    (unsigned)(ip & 0xFFFFu),
-                    (unsigned)(im & 0xFFFFu),
-                    iec,
-                    irq_take_log_count_);
-            }
-            // Trace SIO0 IRQ delivery to CPU (first 10)
-            if (pending & (1u << 7))
-            {
-                static uint32_t sio0_exc_log = 0;
-                if (sio0_exc_log < 10)
-                {
-                    ++sio0_exc_log;
-                    emu::logf(emu::LogLevel::debug, "CPU",
-                        "SIO0 exception! PC=0x%08X i_stat=0x%04X i_mask=0x%04X (#%u)",
-                        pc_, bus_.irq_stat_raw(), bus_.irq_mask_raw(), sio0_exc_log);
-                }
-            }
-            raise_exception(EXC_INT, 0, pc_);
-            r.kind = StepResult::Kind::ok;
-            r.instr = 0;
-            return r;
-        }
+        r.kind = StepResult::Kind::ok;
+        r.instr = 0;
+        return r;
     }
 
     // HLE (bring-up) : vecteurs BIOS A0/B0/C0.
@@ -3230,6 +3307,7 @@ Cpu::StepResult Cpu::step()
     {
         const uint32_t idx = virt_to_phys(vaddr) & 0x0FFFu;
         icache_data_[idx] = v;
+        ++icache_dirty_token_; // JIT-prep: signal ICache write for future block invalidation
         return 1;
     };
     auto cache_iso_write_u16 = [&](uint32_t vaddr, uint16_t v) -> int
@@ -3237,6 +3315,7 @@ Cpu::StepResult Cpu::step()
         const uint32_t idx = virt_to_phys(vaddr) & 0x0FFFu;
         icache_data_[idx & 0x0FFFu] = (uint8_t)(v & 0xFFu);
         icache_data_[(idx + 1u) & 0x0FFFu] = (uint8_t)((v >> 8) & 0xFFu);
+        ++icache_dirty_token_; // JIT-prep: signal ICache write for future block invalidation
         return 1;
     };
     auto cache_iso_write_u32 = [&](uint32_t vaddr, uint32_t v) -> int
@@ -3246,6 +3325,7 @@ Cpu::StepResult Cpu::step()
         icache_data_[(idx + 1u) & 0x0FFFu] = (uint8_t)((v >> 8) & 0xFFu);
         icache_data_[(idx + 2u) & 0x0FFFu] = (uint8_t)((v >> 16) & 0xFFu);
         icache_data_[(idx + 3u) & 0x0FFFu] = (uint8_t)((v >> 24) & 0xFFu);
+        ++icache_dirty_token_; // JIT-prep: signal ICache write for future block invalidation
         return 1;
     };
     auto load_u8 = [&](uint32_t vaddr, uint8_t& out) -> int
@@ -3324,6 +3404,9 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
+        // JIT-prep: store into main-RAM code window → bump invalidation token
+        if (paddr < 0x00200000u)
+            ++code_ram_dirty_token_;
         if (face_token != kNoFaceToken)
         {
             bus_.set_ram_face_token(paddr, face_token);
@@ -3345,6 +3428,9 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
+        // JIT-prep: store into main-RAM code window → bump invalidation token
+        if (paddr < 0x00200000u)
+            ++code_ram_dirty_token_;
         if (face_token != kNoFaceToken)
         {
             bus_.set_ram_face_token(paddr, face_token);
@@ -3366,6 +3452,9 @@ Cpu::StepResult Cpu::step()
             raise_exception(EXC_ADES, vaddr, r.pc);
             return 0;
         }
+        // JIT-prep: store into main-RAM code window → bump invalidation token
+        if (paddr < 0x00200000u)
+            ++code_ram_dirty_token_;
         bus_.set_ram_face_token(paddr, face_token);
         remember_callctx_face(face_token);
         return 1;
