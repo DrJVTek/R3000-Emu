@@ -358,6 +358,7 @@ void Gpu::push_triangle(
         {
             cmd3d.origin = PrimOrigin::origin_3d;
             const auto& snap = corr->snapshot;
+            cmd3d.source_pc = snap.source_pc;
             if (!swapped)
             {
                 for (int i = 0; i < 3; ++i)

@@ -72,6 +72,25 @@ public:
     virtual bool list_logs(uint64_t since_seq, bool has_min_level, uint32_t min_level,
         const char* tag, const char* contains, uint32_t max_entries, std::string& out_json, std::string& err) const = 0;
     virtual bool clear_logs(uint32_t& cleared_count, std::string& err) = 0;
+    virtual bool get_gte_trace_summary(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_dma2_nohint_summary(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_draw_list_summary(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_camera_candidates(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_linked_poly_groups(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_transform_roots(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_group_transform_links(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_mesh_cache_candidates(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_pad_state(std::string& out_json, std::string& err) const = 0;
+    virtual bool set_pad_state(uint16_t buttons_mask, std::string& out_json, std::string& err) = 0;
+    virtual bool tap_pad_buttons(uint16_t press_mask, uint32_t hold_steps, uint32_t release_steps, std::string& out_json, std::string& err) = 0;
+    virtual bool tap_pad_named_buttons(const char* names_csv, uint32_t hold_steps, uint32_t release_steps, std::string& out_json, std::string& err) = 0;
+    virtual bool get_scene_vector_snapshot(uint32_t max_groups, uint32_t max_roots, bool include_hud, bool include_raw_triangles, std::string& out_json, std::string& err) const = 0;
+    virtual bool get_scene_delta(uint32_t max_groups, std::string& out_json, std::string& err) = 0;
+    virtual bool get_object_candidates(uint32_t max_objects, std::string& out_json, std::string& err) const = 0;
+    virtual bool get_scene_salience_summary(uint32_t max_targets, std::string& out_json, std::string& err) const = 0;
+    virtual bool get_hierarchy_candidates(uint32_t max_nodes, std::string& out_json, std::string& err) const = 0;
+    virtual bool get_focus_candidate(std::string& out_json, std::string& err) const = 0;
+    virtual bool step_with_pad_observation(const char* names_csv, uint32_t hold_steps, uint32_t observe_steps, uint32_t max_groups, uint32_t max_targets, std::string& out_json, std::string& err) = 0;
     virtual bool set_psx3d_mode(const char* mode, std::string& err) = 0;
     virtual bool request_psx3d_refresh(const char* reason, const char* scope, uint32_t& id, std::string& err) = 0;
     virtual bool set_gte_trace_window(uint32_t pc_start, uint32_t pc_end, uint32_t start_frame, uint32_t end_frame, bool enabled, std::string& err) = 0;

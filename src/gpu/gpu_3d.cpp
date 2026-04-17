@@ -1250,6 +1250,7 @@ static void fill_cmd3d_from_face(DrawCmd3D& cmd3d, const gte::GteCacheFace* face
         cmd3d.sz[j] = face->sz[k];
     }
     cmd3d.transform = face->transform;
+    cmd3d.source_pc = face->source_pc;
 }
 
 static void fill_cmd3d_from_quad(DrawCmd3D& cmd3d, const gte::GteCacheQuad* qc,
@@ -1266,6 +1267,7 @@ static void fill_cmd3d_from_quad(DrawCmd3D& cmd3d, const gte::GteCacheQuad* qc,
         cmd3d.sz[j] = qc->sz[k];
     }
     cmd3d.transform = qc->transform;
+    cmd3d.source_pc = qc->source_pc;
 }
 
 static bool same_transform(const gte::GteTransform& a, const gte::GteTransform& b)
@@ -1379,6 +1381,7 @@ void Gpu3D::push_triangle(
             cmd3d.nx[1] = v1->nx; cmd3d.ny[1] = v1->ny; cmd3d.nz[1] = v1->nz; cmd3d.sz[1] = v1->sz;
             cmd3d.nx[2] = v2->nx; cmd3d.ny[2] = v2->ny; cmd3d.nz[2] = v2->nz; cmd3d.sz[2] = v2->sz;
             cmd3d.transform = v0->transform;
+            cmd3d.source_pc = v0->source_pc;
             ++vtx_lookup_hits_;
         }
         else
@@ -2112,6 +2115,7 @@ void Gpu3D::push_quad(
         cmd3d.face_idx = face_idx;
         cmd3d.origin = origin;
         cmd3d.ot_z = current_ot_z_;
+        cmd3d.source_pc = producer_pc;
 
         if (is_3d)
         {
@@ -2124,6 +2128,7 @@ void Gpu3D::push_quad(
                 cmd3d.nx[1] = vtx[1]->nx; cmd3d.ny[1] = vtx[1]->ny; cmd3d.nz[1] = vtx[1]->nz; cmd3d.sz[1] = vtx[1]->sz;
                 cmd3d.nx[2] = vtx[2]->nx; cmd3d.ny[2] = vtx[2]->ny; cmd3d.nz[2] = vtx[2]->nz; cmd3d.sz[2] = vtx[2]->sz;
                 cmd3d.transform = vtx[0]->transform;
+                cmd3d.source_pc = vtx[0]->source_pc;
             }
             else if (quad_mode == QuadBuildMode::cache)
             {
@@ -2141,6 +2146,10 @@ void Gpu3D::push_quad(
                 }
                 if (edge_transform)
                     cmd3d.transform = *edge_transform;
+                if (packet_edge_face_a)
+                    cmd3d.source_pc = packet_edge_face_a->source_pc;
+                else if (face)
+                    cmd3d.source_pc = face->source_pc;
             }
             else
                 fill_cmd3d_from_face(cmd3d, face, 0, 1, 2);
@@ -2174,6 +2183,7 @@ void Gpu3D::push_quad(
         cmd3d.face_idx = face_idx;
         cmd3d.origin = origin;
         cmd3d.ot_z = current_ot_z_;
+        cmd3d.source_pc = producer_pc;
 
         if (is_3d)
         {
@@ -2186,6 +2196,7 @@ void Gpu3D::push_quad(
                 cmd3d.nx[1] = vtx[3]->nx; cmd3d.ny[1] = vtx[3]->ny; cmd3d.nz[1] = vtx[3]->nz; cmd3d.sz[1] = vtx[3]->sz;
                 cmd3d.nx[2] = vtx[2]->nx; cmd3d.ny[2] = vtx[2]->ny; cmd3d.nz[2] = vtx[2]->nz; cmd3d.sz[2] = vtx[2]->sz;
                 cmd3d.transform = vtx[0]->transform;
+                cmd3d.source_pc = vtx[0]->source_pc;
             }
             else if (quad_mode == QuadBuildMode::cache)
             {
@@ -2203,6 +2214,10 @@ void Gpu3D::push_quad(
                 }
                 if (edge_transform)
                     cmd3d.transform = *edge_transform;
+                if (packet_edge_face_a)
+                    cmd3d.source_pc = packet_edge_face_a->source_pc;
+                else if (face)
+                    cmd3d.source_pc = face->source_pc;
             }
             else if (quad_mode == QuadBuildMode::face_pair)
             {
@@ -2213,6 +2228,7 @@ void Gpu3D::push_quad(
                 cmd3d.verts_3d[2] = {face->vx[2], face->vy[2], face->vz[2]};
                 cmd3d.nx[2] = face->nx[2]; cmd3d.ny[2] = face->ny[2]; cmd3d.nz[2] = face->nz[2];
                 cmd3d.transform = face->transform;
+                cmd3d.source_pc = face->source_pc;
             }
             else
             {

@@ -137,6 +137,7 @@ enum class PrimOrigin : uint8_t
 struct DrawCmd3D
 {
     PrimOrigin origin{PrimOrigin::origin_2d_hud};
+    uint32_t source_pc{0};          // Source GTE or producer PC when known
 
     // Inline 3D data (populated from face cache when origin == origin_3d)
     gte::GteVertex3D verts_3d[3]; // Original 3D vertices (model space)

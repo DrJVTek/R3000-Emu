@@ -292,6 +292,23 @@ class Cpu
             gte_trace_op_hist_.clear();
         }
     }
+    GteTraceConfig gte_trace_config() const { return gte_trace_; }
+    std::vector<std::pair<uint32_t, uint32_t>> gte_trace_pc_hist_snapshot() const
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> out;
+        out.reserve(gte_trace_pc_hist_.size());
+        for (const auto& kv : gte_trace_pc_hist_)
+            out.push_back(kv);
+        return out;
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> gte_trace_op_hist_snapshot() const
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> out;
+        out.reserve(gte_trace_op_hist_.size());
+        for (const auto& kv : gte_trace_op_hist_)
+            out.push_back(kv);
+        return out;
+    }
 
     StepResult step();
 

@@ -156,6 +156,7 @@ class Core
 
     // Controller input (thread-safe, forwarded to Bus).
     void set_pad_buttons(uint16_t v);
+    uint16_t pad_buttons() const;
 
     // Cycle multiplier for timing accuracy (1=simplified, 2=approximate real R3000)
     void set_cycle_multiplier(uint32_t n);
@@ -186,6 +187,10 @@ class Core
     const std::string& psx3d_profile_path() const { return psx3d_profile_path_; }
     const std::string& psx3d_profile_game_id() const { return psx3d_profile_game_id_; }
     bool psx3d_profile_override() const { return psx3d_profile_override_; }
+    std::vector<ProvenanceHotspotProfiler::PcSnapshot> provenance_hotspots_snapshot() const
+    {
+        return provenance_profiler_.snapshot();
+    }
     // Internal hook dispatchers (registered in Core::init_from_image).
     void on_psx3d_vblank(uint32_t vblank_count);
     void on_psx3d_step_pc(uint32_t pc);

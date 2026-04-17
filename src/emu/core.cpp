@@ -729,6 +729,11 @@ void Core::set_pad_buttons(uint16_t v)
         bus_->set_pad_buttons(v);
 }
 
+uint16_t Core::pad_buttons() const
+{
+    return bus_ ? bus_->pad_buttons() : 0xFFFFu;
+}
+
 void Core::set_cycle_multiplier(uint32_t n)
 {
     if (cpu_)

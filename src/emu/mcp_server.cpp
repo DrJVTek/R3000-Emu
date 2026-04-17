@@ -361,6 +361,101 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
         "},"
         "{"
+        "\"name\":\"emu.get_gte_trace_summary\","
+        "\"description\":\"Returns the current GTE trace window config plus aggregated top PCs and opcode counts.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_dma2_nohint_summary\","
+        "\"description\":\"Returns the latest DMA2 nohint summary and learned hotspot PCs for display-pipeline discovery.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_draw_list_summary\","
+        "\"description\":\"Returns a summary of the latest ready draw list with 2D/3D origin, textured, semi-transparent and OT depth counts.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_camera_candidates\","
+        "\"description\":\"Returns candidate matrix/camera root addresses inferred from GTE MTC2 traffic.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_linked_poly_groups\","
+        "\"description\":\"Returns heuristic groups of linked 3D polygons from the latest draw list, grouped by face index and OT depth.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_transform_roots\","
+        "\"description\":\"Returns ranked transform-root candidates inferred from GTE matrix traffic.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_group_transform_links\","
+        "\"description\":\"Returns heuristic links between linked polygon groups and transform-root candidates.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_mesh_cache_candidates\","
+        "\"description\":\"Returns heuristic mesh-cache candidates accumulated across frames in the current MCP session.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_pad_state\","
+        "\"description\":\"Returns the current digital controller state for the CLI emulator session.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.set_pad_state\","
+        "\"description\":\"Sets the full digital controller mask (active-low: cleared bits are pressed).\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"buttons_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535}},\"required\":[\"buttons_mask\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.tap_pad_buttons\","
+        "\"description\":\"Presses one or more digital pad buttons for a short step window, then releases them.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"press_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000}},\"required\":[\"press_mask\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.tap_pad_named_buttons\","
+        "\"description\":\"Presses one or more digital pad buttons given by comma-separated names like 'cross,left,start'.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000}},\"required\":[\"names\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_scene_vector_snapshot\","
+        "\"description\":\"Returns a compact vector-style scene snapshot for the current CLI analysis frame.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_roots\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64},\"include_hud\":{\"type\":\"boolean\"},\"include_raw_triangles\":{\"type\":\"boolean\"}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_scene_delta\","
+        "\"description\":\"Returns a delta between the previous saved scene snapshot and the current one.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_object_candidates\","
+        "\"description\":\"Returns the most promising object-like candidates derived from the current scene vector snapshot.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_objects\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_scene_salience_summary\","
+        "\"description\":\"Returns a compact attention-oriented summary of the most important current scene targets.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_targets\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_hierarchy_candidates\","
+        "\"description\":\"Returns heuristic parent/child hierarchy candidates derived from current scene groups and transform roots.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_nodes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_focus_candidate\","
+        "\"description\":\"Returns the single best current scene focus candidate for decision-making.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.step_with_pad_observation\","
+        "\"description\":\"Presses named pad buttons, steps the emulator, then returns scene snapshot, delta and salience in one call.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"observe_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_targets\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32}},\"required\":[\"names\"],\"additionalProperties\":false}"
+        "},"
+        "{"
         "\"name\":\"emu.set_psx3d_mode\","
         "\"description\":\"Sets the PSX3D run mode to game or analysis.\","
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"mode\":{\"type\":\"string\",\"enum\":[\"game\",\"analysis\"]}},\"required\":[\"mode\"],\"additionalProperties\":false}"
@@ -755,6 +850,221 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
             return json_error(id_raw, -32028, err.empty() ? "clear logs failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("logs cleared",
             std::string("{\"cleared_count\":") + std::to_string(cleared_count) + "}"));
+    }
+
+    if (name == "emu.get_gte_trace_summary")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_gte_trace_summary(data, err))
+            return json_error(id_raw, -32029, err.empty() ? "gte trace summary failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("gte trace summary", data));
+    }
+
+    if (name == "emu.get_dma2_nohint_summary")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_dma2_nohint_summary(data, err))
+            return json_error(id_raw, -32030, err.empty() ? "dma2 nohint summary failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("dma2 nohint summary", data));
+    }
+
+    if (name == "emu.get_draw_list_summary")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_draw_list_summary(data, err))
+            return json_error(id_raw, -32031, err.empty() ? "draw list summary failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("draw list summary", data));
+    }
+
+    if (name == "emu.get_camera_candidates")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_camera_candidates(data, err))
+            return json_error(id_raw, -32032, err.empty() ? "camera candidates failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("camera candidates", data));
+    }
+
+    if (name == "emu.get_linked_poly_groups")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_linked_poly_groups(data, err))
+            return json_error(id_raw, -32033, err.empty() ? "linked poly groups failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("linked poly groups", data));
+    }
+
+    if (name == "emu.get_transform_roots")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_transform_roots(data, err))
+            return json_error(id_raw, -32034, err.empty() ? "transform roots failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("transform roots", data));
+    }
+
+    if (name == "emu.get_group_transform_links")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_group_transform_links(data, err))
+            return json_error(id_raw, -32035, err.empty() ? "group transform links failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("group transform links", data));
+    }
+
+    if (name == "emu.get_mesh_cache_candidates")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_mesh_cache_candidates(data, err))
+            return json_error(id_raw, -32036, err.empty() ? "mesh cache candidates failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("mesh cache candidates", data));
+    }
+
+    if (name == "emu.get_pad_state")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_pad_state(data, err))
+            return json_error(id_raw, -32037, err.empty() ? "get pad state failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad state", data));
+    }
+
+    if (name == "emu.set_pad_state")
+    {
+        uint32_t buttons_mask = 0;
+        if (!extract_json_uint32(json, "buttons_mask", buttons_mask))
+            return json_error(id_raw, -32602, "missing buttons_mask");
+        std::string data;
+        std::string err;
+        if (!backend_.set_pad_state((uint16_t)(buttons_mask & 0xFFFFu), data, err))
+            return json_error(id_raw, -32038, err.empty() ? "set pad state failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad state set", data));
+    }
+
+    if (name == "emu.tap_pad_buttons")
+    {
+        uint32_t press_mask = 0;
+        if (!extract_json_uint32(json, "press_mask", press_mask))
+            return json_error(id_raw, -32602, "missing press_mask");
+        uint32_t hold_steps = 200000;
+        uint32_t release_steps = 0;
+        extract_json_uint32(json, "hold_steps", hold_steps);
+        extract_json_uint32(json, "release_steps", release_steps);
+        std::string data;
+        std::string err;
+        if (!backend_.tap_pad_buttons((uint16_t)(press_mask & 0xFFFFu), hold_steps, release_steps, data, err))
+            return json_error(id_raw, -32039, err.empty() ? "tap pad buttons failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad buttons tapped", data));
+    }
+
+    if (name == "emu.tap_pad_named_buttons")
+    {
+        const std::string names = extract_json_string(json, "names");
+        if (names.empty())
+            return json_error(id_raw, -32602, "missing names");
+        uint32_t hold_steps = 200000;
+        uint32_t release_steps = 0;
+        extract_json_uint32(json, "hold_steps", hold_steps);
+        extract_json_uint32(json, "release_steps", release_steps);
+        std::string data;
+        std::string err;
+        if (!backend_.tap_pad_named_buttons(names.c_str(), hold_steps, release_steps, data, err))
+            return json_error(id_raw, -32040, err.empty() ? "tap pad named buttons failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad buttons tapped by name", data));
+    }
+
+    if (name == "emu.get_scene_vector_snapshot")
+    {
+        uint32_t max_groups = 24;
+        uint32_t max_roots = 12;
+        bool include_hud = false;
+        bool include_raw_triangles = false;
+        extract_json_uint32(json, "max_groups", max_groups);
+        extract_json_uint32(json, "max_roots", max_roots);
+        extract_json_bool(json, "include_hud", include_hud);
+        extract_json_bool(json, "include_raw_triangles", include_raw_triangles);
+        std::string data;
+        std::string err;
+        if (!backend_.get_scene_vector_snapshot(max_groups, max_roots, include_hud, include_raw_triangles, data, err))
+            return json_error(id_raw, -32041, err.empty() ? "scene vector snapshot failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("scene vector snapshot", data));
+    }
+
+    if (name == "emu.get_scene_delta")
+    {
+        uint32_t max_groups = 24;
+        extract_json_uint32(json, "max_groups", max_groups);
+        std::string data;
+        std::string err;
+        if (!backend_.get_scene_delta(max_groups, data, err))
+            return json_error(id_raw, -32042, err.empty() ? "scene delta failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("scene delta", data));
+    }
+
+    if (name == "emu.get_object_candidates")
+    {
+        uint32_t max_objects = 12;
+        extract_json_uint32(json, "max_objects", max_objects);
+        std::string data;
+        std::string err;
+        if (!backend_.get_object_candidates(max_objects, data, err))
+            return json_error(id_raw, -32043, err.empty() ? "object candidates failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("object candidates", data));
+    }
+
+    if (name == "emu.get_scene_salience_summary")
+    {
+        uint32_t max_targets = 6;
+        extract_json_uint32(json, "max_targets", max_targets);
+        std::string data;
+        std::string err;
+        if (!backend_.get_scene_salience_summary(max_targets, data, err))
+            return json_error(id_raw, -32044, err.empty() ? "scene salience failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("scene salience summary", data));
+    }
+
+    if (name == "emu.get_hierarchy_candidates")
+    {
+        uint32_t max_nodes = 12;
+        extract_json_uint32(json, "max_nodes", max_nodes);
+        std::string data;
+        std::string err;
+        if (!backend_.get_hierarchy_candidates(max_nodes, data, err))
+            return json_error(id_raw, -32045, err.empty() ? "hierarchy candidates failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("hierarchy candidates", data));
+    }
+
+    if (name == "emu.get_focus_candidate")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_focus_candidate(data, err))
+            return json_error(id_raw, -32047, err.empty() ? "focus candidate failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("focus candidate", data));
+    }
+
+    if (name == "emu.step_with_pad_observation")
+    {
+        const std::string names = extract_json_string(json, "names");
+        if (names.empty())
+            return json_error(id_raw, -32602, "missing names");
+        uint32_t hold_steps = 200000;
+        uint32_t observe_steps = 0;
+        uint32_t max_groups = 24;
+        uint32_t max_targets = 6;
+        extract_json_uint32(json, "hold_steps", hold_steps);
+        extract_json_uint32(json, "observe_steps", observe_steps);
+        extract_json_uint32(json, "max_groups", max_groups);
+        extract_json_uint32(json, "max_targets", max_targets);
+        std::string data;
+        std::string err;
+        if (!backend_.step_with_pad_observation(names.c_str(), hold_steps, observe_steps, max_groups, max_targets, data, err))
+            return json_error(id_raw, -32046, err.empty() ? "step with pad observation failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("step with pad observation", data));
     }
 
     if (name == "emu.set_psx3d_mode")

@@ -800,6 +800,14 @@ bool Bus::consume_dma2_nohint_summary(Dma2NoHintSummary& out)
     return true;
 }
 
+bool Bus::peek_dma2_nohint_summary(Dma2NoHintSummary& out) const
+{
+    if (!dma2_nohint_last_valid_)
+        return false;
+    out = dma2_nohint_last_;
+    return true;
+}
+
 bool Bus::is_in_ram(uint32_t addr, uint32_t size) const
 {
     if (addr > ram_size_)

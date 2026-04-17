@@ -252,6 +252,7 @@ class Bus
         std::vector<std::pair<uint32_t, uint32_t>> top_pcs{};
     };
     bool consume_dma2_nohint_summary(Dma2NoHintSummary& out);
+    bool peek_dma2_nohint_summary(Dma2NoHintSummary& out) const;
 
   private:
     void dma_finish(int ch);

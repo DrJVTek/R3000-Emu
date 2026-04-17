@@ -37,6 +37,15 @@ Useful runtime signals are:
   - other reconstruction modes
 - optional GTE trace summaries limited to a known frame window
 
+In practice, these runtime analysis steps should be driven mainly from the CLI
+emulator MCP path, not from UE5.
+
+The reference analysis path is:
+
+- `r3000_emu.exe --mcp-stdio` for discovery and summaries
+- Ghidra for structural confirmation
+- UE5 only afterwards for render-side validation when needed
+
 For Ridge Racer intro flag, this method identified:
 
 - hot producer instruction: `0x800264B0`
@@ -78,6 +87,13 @@ Typical helper patterns:
 - packet write loop
 - `addPrim()`-style OT insertion
 
+Important:
+
+- this is a place where Ghidra may be more efficient than runtime-only tooling
+- especially for custom engines with macro-ized OT insertion or packet builders
+- the runtime should tell us which producer zone matters
+- Ghidra should explain the actual structure of that zone
+
 ## Step 4: Define The Link Rule
 
 Once the GTE and GPU zones are known, define the link rule explicitly.
@@ -91,6 +107,12 @@ Examples:
 
 The link rule must be deterministic and describable in code and in the game
 profile.
+
+If the runtime evidence is still ambiguous, use Ghidra to confirm:
+
+- whether two packet segments come from one logical object or two
+- whether a helper writes one primitive family or several
+- whether a matrix root or object struct is shared across the packet flow
 
 ## Step 5: Create An Explicit Mode
 
@@ -182,3 +204,7 @@ It is:
 - Temporary debug recovery must be clearly marked and disabled by default.
 - Prefer explicit generic modes.
 - Use the profile to select the validated mode for a given game/scene family.
+- Let the LLM choose the tool:
+  - runtime first when the question is "what is active now?"
+  - Ghidra first when the question is "what is this structure?"
+  - both when building a durable mode or future object/mesh cache
