@@ -313,6 +313,36 @@ class Cpu
     // dynamic recompiler.
     bool check_and_raise_irq();
 
+    // Context passed from step() to the pretty-print disassembler.
+    // Only populated when pretty_ is on — zero cost in shipping builds.
+    struct DasmContext
+    {
+        uint32_t pc{0};
+        uint32_t instr{0};
+        uint32_t opcode{0};
+        // Writeback observed this step (GPR modified by the instruction).
+        int      wb_valid{0};
+        uint32_t wb_reg{0};
+        uint32_t wb_old{0};
+        uint32_t wb_new{0};
+        // Memory op issued this step (store or load), pre-delay.
+        int         mem_valid{0};
+        const char* mem_op{nullptr};
+        uint32_t    mem_addr{0};
+        uint32_t    mem_val{0};
+        // Load-delay slot scheduled this step (target will be written next step).
+        int         ld_valid{0};
+        const char* ld_op{nullptr};
+        uint32_t    ld_reg{0};
+        uint32_t    ld_val{0};
+        // Load-delay slot committed THIS step (from a previous step's schedule).
+        int      wb2_valid{0};
+        uint32_t wb2_reg{0};
+        uint32_t wb2_old{0};
+        uint32_t wb2_new{0};
+    };
+    void emit_dasm_line(const DasmContext& ctx) const;
+
     // COP0 minimal (suffisant pour exceptions et quelques move).
     // On reste volontairement simple pour une démo: pas de TLB, pas de timing cycle-accurate.
     // NOTE: on supporte néanmoins un minimum d'IRQ (EXC_INT) pour permettre au BIOS d'avancer.

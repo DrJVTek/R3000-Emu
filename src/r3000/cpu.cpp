@@ -5807,185 +5807,30 @@ Cpu::StepResult Cpu::step()
 
     if (pretty_)
     {
-        // Mode lisible "désassemblage":
-        // On reconstruit une string à la volée pour l'affichage live.
-        // Important: ce n'est PAS un désassembleur complet, juste les instructions qu'on supporte.
-        char line[256];
-        line[0] = '\0';
-
-        // Désassemblage minimal pour les opcodes supportés.
-        const uint32_t o = opcode;
-        if (o == 0x0F)
-        {
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  LUI  %s, 0x%04X",
-                r.pc,
-                reg_name(rt(instr)),
-                imm_u(instr)
-            );
-        }
-        else if (o == 0x0D)
-        {
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  ORI  %s, %s, 0x%04X",
-                r.pc,
-                reg_name(rt(instr)),
-                reg_name(rs(instr)),
-                imm_u(instr)
-            );
-        }
-        else if (o == 0x09)
-        {
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  ADDIU %s, %s, %d",
-                r.pc,
-                reg_name(rt(instr)),
-                reg_name(rs(instr)),
-                (int)(int16_t)imm_s(instr)
-            );
-        }
-        else if (o == 0x08)
-        {
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  ADDI %s, %s, %d",
-                r.pc,
-                reg_name(rt(instr)),
-                reg_name(rs(instr)),
-                (int)(int16_t)imm_s(instr)
-            );
-        }
-        else if (o == 0x2B)
-        {
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  SW   %s, %d(%s)",
-                r.pc,
-                reg_name(rt(instr)),
-                (int)(int16_t)imm_s(instr),
-                reg_name(rs(instr))
-            );
-        }
-        else if (o == 0x23)
-        {
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  LW   %s, %d(%s)",
-                r.pc,
-                reg_name(rt(instr)),
-                (int)(int16_t)imm_s(instr),
-                reg_name(rs(instr))
-            );
-        }
-        else if (o == 0x05)
-        {
-            const int16_t off = (int16_t)imm_s(instr);
-            const uint32_t target = (r.pc + 4) + ((uint32_t)((int32_t)off << 2));
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  BNE  %s, %s, 0x%08X",
-                r.pc,
-                reg_name(rs(instr)),
-                reg_name(rt(instr)),
-                target
-            );
-        }
-        else if (o == 0x04)
-        {
-            const int16_t off = (int16_t)imm_s(instr);
-            const uint32_t target = (r.pc + 4) + ((uint32_t)((int32_t)off << 2));
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  BEQ  %s, %s, 0x%08X",
-                r.pc,
-                reg_name(rs(instr)),
-                reg_name(rt(instr)),
-                target
-            );
-        }
-        else if (o == 0x02)
-        {
-            const uint32_t target = ((r.pc + 4) & 0xF000'0000u) | (jidx(instr) << 2);
-            std::snprintf(line, sizeof(line), "PC=%08X  J    0x%08X", r.pc, target);
-        }
-        else if (o == 0x00 && funct(instr) == 0x08)
-        {
-            std::snprintf(line, sizeof(line), "PC=%08X  JR   %s", r.pc, reg_name(rs(instr)));
-        }
-        else if (o == 0x00 && funct(instr) == 0x00)
-        {
-            std::snprintf(
-                line,
-                sizeof(line),
-                "PC=%08X  SLL  %s, %s, %u",
-                r.pc,
-                reg_name(rd(instr)),
-                reg_name(rt(instr)),
-                shamt(instr)
-            );
-        }
-        else if (o == 0x00 && funct(instr) == 0x0D)
-        {
-            std::snprintf(line, sizeof(line), "PC=%08X  BREAK", r.pc);
-        }
-        else
-        {
-            std::snprintf(line, sizeof(line), "PC=%08X  INSTR 0x%08X", r.pc, instr);
-        }
-
-        if (wb_valid)
-        {
-            char tmp[128];
-            std::snprintf(
-                tmp, sizeof(tmp), "  ; %s:0x%08X->0x%08X", reg_name(wb_reg), wb_old, wb_new
-            );
-            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
-        }
-
-        if (mem_valid)
-        {
-            char tmp[128];
-            std::snprintf(tmp, sizeof(tmp), "  ; %s [0x%08X]=0x%08X", mem_op, mem_addr, mem_val);
-            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
-        }
-
-        if (ld_valid)
-        {
-            char tmp[128];
-            std::snprintf(
-                tmp, sizeof(tmp), "  ; (LD sched) %s -> %s=0x%08X", ld_op, reg_name(ld_reg), ld_val
-            );
-            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
-        }
-
-        if (wb2_valid)
-        {
-            char tmp[128];
-            std::snprintf(
-                tmp,
-                sizeof(tmp),
-                "  ; (LD commit) %s:0x%08X->0x%08X",
-                reg_name(wb2_reg),
-                wb2_old,
-                wb2_new
-            );
-            ::strncat_s(line, sizeof(line), tmp, _TRUNCATE);
-        }
-
-        emu::logf(emu::LogLevel::debug, "CPU_DASM", "%s", line);
+        // Pretty-print disassembler extracted to cpu_dasm.cpp (Phase 1C).
+        // Only populate context when pretty_ is on (cold path — dev/debug only).
+        DasmContext dctx{};
+        dctx.pc = r.pc;
+        dctx.instr = instr;
+        dctx.opcode = opcode;
+        dctx.wb_valid = wb_valid;
+        dctx.wb_reg = wb_reg;
+        dctx.wb_old = wb_old;
+        dctx.wb_new = wb_new;
+        dctx.mem_valid = mem_valid;
+        dctx.mem_op = mem_op;
+        dctx.mem_addr = mem_addr;
+        dctx.mem_val = mem_val;
+        dctx.ld_valid = ld_valid;
+        dctx.ld_op = ld_op;
+        dctx.ld_reg = ld_reg;
+        dctx.ld_val = ld_val;
+        dctx.wb2_valid = wb2_valid;
+        dctx.wb2_reg = wb2_reg;
+        dctx.wb2_old = wb2_old;
+        dctx.wb2_new = wb2_new;
+        emit_dasm_line(dctx);
     }
-
     // Debug log "exec"
     if (logger_ && rlog::logger_enabled(logger_, rlog::Level::debug, rlog::Category::exec))
     {
