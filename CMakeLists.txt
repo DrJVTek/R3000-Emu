@@ -44,6 +44,7 @@ set(CORE_SOURCES
   src/mdec/mdec.cpp
   src/r3000/bus.cpp
   src/r3000/cpu.cpp
+  src/r3000/cpu_debug.cpp
   src/r3000/cpu_provenance_analyzer.cpp
 )
 
