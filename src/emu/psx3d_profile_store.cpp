@@ -13,10 +13,28 @@ static Psx3dProfileData::ModeKind parse_mode_kind(const char* s)
 {
     if (!s)
         return Psx3dProfileData::ModeKind::unknown;
+    // Type A
+    if (std::strcmp(s, "ot_classic_rtpt") == 0)
+        return Psx3dProfileData::ModeKind::ot_classic_rtpt;
     if (std::strcmp(s, "paired_edge_rtpt_gt4") == 0)
         return Psx3dProfileData::ModeKind::paired_edge_rtpt_gt4;
+    // Type B
+    if (std::strcmp(s, "direct_dma_submission") == 0)
+        return Psx3dProfileData::ModeKind::direct_dma_submission;
+    // Type C
+    if (std::strcmp(s, "chained_polygon_stream") == 0)
+        return Psx3dProfileData::ModeKind::chained_polygon_stream;
+    // Type D
+    if (std::strcmp(s, "skinned_cpu_transform") == 0)
+        return Psx3dProfileData::ModeKind::skinned_cpu_transform;
+    // Type E
+    if (std::strcmp(s, "tmd_compiled") == 0)
+        return Psx3dProfileData::ModeKind::tmd_compiled;
     if (std::strcmp(s, "subdivided_ft4_intpl_rtpt") == 0)
         return Psx3dProfileData::ModeKind::subdivided_ft4_intpl_rtpt;
+    // Type F
+    if (std::strcmp(s, "billboard_radial") == 0)
+        return Psx3dProfileData::ModeKind::billboard_radial;
     return Psx3dProfileData::ModeKind::unknown;
 }
 
@@ -24,10 +42,22 @@ static const char* format_mode_kind(Psx3dProfileData::ModeKind mode)
 {
     switch (mode)
     {
+    case Psx3dProfileData::ModeKind::ot_classic_rtpt:
+        return "ot_classic_rtpt";
     case Psx3dProfileData::ModeKind::paired_edge_rtpt_gt4:
         return "paired_edge_rtpt_gt4";
+    case Psx3dProfileData::ModeKind::direct_dma_submission:
+        return "direct_dma_submission";
+    case Psx3dProfileData::ModeKind::chained_polygon_stream:
+        return "chained_polygon_stream";
+    case Psx3dProfileData::ModeKind::skinned_cpu_transform:
+        return "skinned_cpu_transform";
+    case Psx3dProfileData::ModeKind::tmd_compiled:
+        return "tmd_compiled";
     case Psx3dProfileData::ModeKind::subdivided_ft4_intpl_rtpt:
         return "subdivided_ft4_intpl_rtpt";
+    case Psx3dProfileData::ModeKind::billboard_radial:
+        return "billboard_radial";
     default:
         return "unknown";
     }

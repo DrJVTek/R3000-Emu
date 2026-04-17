@@ -91,6 +91,11 @@ public:
     virtual bool get_hierarchy_candidates(uint32_t max_nodes, std::string& out_json, std::string& err) const = 0;
     virtual bool get_focus_candidate(std::string& out_json, std::string& err) const = 0;
     virtual bool step_with_pad_observation(const char* names_csv, uint32_t hold_steps, uint32_t observe_steps, uint32_t max_groups, uint32_t max_targets, std::string& out_json, std::string& err) = 0;
+    // Aggregates existing observations (GTE trace, DMA2, scene, producer, transform roots)
+    // into a single render-loop fingerprint JSON that the LLM consumes for classification
+    // against the 6 canonical types documented in docs/PSX_RENDER_LOOP_PLAYBOOK.md.
+    // Does NOT classify server-side — the LLM applies the decision tree §4 on the fingerprint.
+    virtual bool match_render_pattern(uint32_t max_candidates, std::string& out_json, std::string& err) const = 0;
     virtual bool set_psx3d_mode(const char* mode, std::string& err) = 0;
     virtual bool request_psx3d_refresh(const char* reason, const char* scope, uint32_t& id, std::string& err) = 0;
     virtual bool set_gte_trace_window(uint32_t pc_start, uint32_t pc_end, uint32_t start_frame, uint32_t end_frame, bool enabled, std::string& err) = 0;

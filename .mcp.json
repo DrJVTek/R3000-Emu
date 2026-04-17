@@ -14,6 +14,13 @@
         "-3",
         "C:/tmp/GhidraMCP-release-1-4/bridge_mcp_ghidra.py"
       ]
+    },
+    "r3000": {
+      "command": "E:/Projects/github/Live/R3000-Emu/lib/Release/r3000_mcp.exe",
+      "args": [
+        "--port",
+        "9742"
+      ]
     }
   }
 }

@@ -10,11 +10,37 @@ namespace emu
 
 struct Psx3dProfileData
 {
+    // Render-loop pattern taxonomy.
+    // See docs/PSX_RENDER_LOOP_PLAYBOOK.md for the full specification of each
+    // value, its MIPS signature, observable signals, and which game(s) use it.
+    // The 6 canonical types (A-F in the playbook) cover ~95% of commercial
+    // PS1 games; the specific variants (paired_edge_rtpt_gt4, etc.) are
+    // concrete sub-patterns observed on real games.
+    //
+    // When adding a new value here:
+    //   1. Document it in the playbook first (§3 + §7)
+    //   2. Wire parse/format in psx3d_profile_store.cpp (parse_mode_kind,
+    //      format_mode_kind — both symmetrical)
+    //   3. Propagate mode-specific behaviour in Gpu3D / PSX3DRenderComponent
     enum class ModeKind : uint8_t
     {
         unknown = 0,
+        // Type A — OT classic RTPT (vanilla PSYQ AddPrim + RTPT)
+        ot_classic_rtpt,
+        // Type A variant — edge-reuse GT4 (Ridge Racer flag: DrawFlag@0x80026110)
         paired_edge_rtpt_gt4,
+        // Type B — Direct DMA submission, no OT
+        direct_dma_submission,
+        // Type C — Chained polygon stream, next-pointer embedded in poly struct
+        chained_polygon_stream,
+        // Type D — Skinned / software CPU transform, GTE used only for projection
+        skinned_cpu_transform,
+        // Type E — TMD compiled / generic DivPolygon helpers
+        tmd_compiled,
+        // Type E variant — INTPL subdivision (Ridge Racer gameplay: DivPloyFT4@0x80047E38)
         subdivided_ft4_intpl_rtpt,
+        // Type F — Billboard / radial (1 vertex RTPS + CPU quad construction)
+        billboard_radial,
     };
 
     enum class LinkRule : uint8_t

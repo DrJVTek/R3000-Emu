@@ -456,6 +456,11 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"observe_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_targets\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32}},\"required\":[\"names\"],\"additionalProperties\":false}"
         "},"
         "{"
+        "\"name\":\"emu.match_render_pattern\","
+        "\"description\":\"Aggregates current observations (GTE/DMA/scene/producer) into a structured render-loop fingerprint. Consumed by the LLM to classify the game's render loop against the 6 canonical types (A-F) documented in docs/PSX_RENDER_LOOP_PLAYBOOK.md. Does not classify server-side.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_candidates\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":8}},\"additionalProperties\":false}"
+        "},"
+        "{"
         "\"name\":\"emu.set_psx3d_mode\","
         "\"description\":\"Sets the PSX3D run mode to game or analysis.\","
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"mode\":{\"type\":\"string\",\"enum\":[\"game\",\"analysis\"]}},\"required\":[\"mode\"],\"additionalProperties\":false}"
@@ -1045,6 +1050,17 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
         if (!backend_.get_focus_candidate(data, err))
             return json_error(id_raw, -32047, err.empty() ? "focus candidate failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("focus candidate", data));
+    }
+
+    if (name == "emu.match_render_pattern")
+    {
+        uint32_t max_candidates = 3;
+        extract_json_uint32(json, "max_candidates", max_candidates);
+        std::string data;
+        std::string err;
+        if (!backend_.match_render_pattern(max_candidates, data, err))
+            return json_error(id_raw, -32048, err.empty() ? "match_render_pattern failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("render pattern fingerprint", data));
     }
 
     if (name == "emu.step_with_pad_observation")

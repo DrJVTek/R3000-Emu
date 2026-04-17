@@ -1365,6 +1365,78 @@ public:
         return true;
     }
 
+    // v1 aggregator: composes existing observations into a single fingerprint JSON.
+    // Consumer: LLM applying the decision tree §4 of docs/PSX_RENDER_LOOP_PLAYBOOK.md.
+    // Each sub-section is a self-contained JSON object so the LLM can also query them
+    // individually via their native endpoints if it needs more resolution.
+    // Server-side scoring (candidate_classifications with confidences) is left empty
+    // in v1 — the LLM reads the fingerprint and classifies. See playbook §4 JSON output
+    // format for what the LLM should produce.
+    bool match_render_pattern(uint32_t max_candidates, std::string& out_json, std::string& err) const override
+    {
+        (void)max_candidates; // reserved for v2 server-side scoring
+
+        const r3000::Cpu* cpu = core_.cpu();
+        if (!cpu)
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+
+        // Current PC for context ("where are we right now").
+        const uint32_t pc = cpu->pc();
+
+        // Aggregate the 5 most relevant observations.  Each of these already
+        // exists as a first-class MCP endpoint; we compose them in one round-trip.
+        std::string gte_trace_json;
+        std::string dma2_json;
+        std::string drawlist_json;
+        std::string scene_snapshot_json;
+        std::string focus_json;
+        std::string sub_err;
+
+        if (!get_gte_trace_summary(gte_trace_json, sub_err))
+            gte_trace_json = std::string("{\"error\":\"") + emu::McpServer::json_escape(sub_err) + "\"}";
+        sub_err.clear();
+        if (!get_dma2_nohint_summary(dma2_json, sub_err))
+            dma2_json = std::string("{\"error\":\"") + emu::McpServer::json_escape(sub_err) + "\"}";
+        sub_err.clear();
+        if (!get_draw_list_summary(drawlist_json, sub_err))
+            drawlist_json = std::string("{\"error\":\"") + emu::McpServer::json_escape(sub_err) + "\"}";
+        sub_err.clear();
+
+        // Scene snapshot (includes dominant_kind, roots, groups — key for classification).
+        SceneVectorSnapshot snapshot{};
+        if (!build_scene_vector_snapshot(24u, 12u, false, false, snapshot, sub_err))
+            scene_snapshot_json = std::string("{\"error\":\"") + emu::McpServer::json_escape(sub_err) + "\"}";
+        else
+            scene_snapshot_json = scene_vector_snapshot_to_json(snapshot);
+        sub_err.clear();
+
+        focus_json = focus_candidate_to_json(snapshot);
+
+        // Emit the fingerprint.  Structure is stable (schema versioned) so the
+        // LLM / scripts can parse it reliably across sessions.
+        char pc_buf[24];
+        std::snprintf(pc_buf, sizeof(pc_buf), "\"0x%08X\"", pc);
+
+        out_json =
+            std::string("{") +
+            "\"schema_version\":\"match_render_pattern/v1\"" +
+            ",\"playbook_ref\":\"docs/PSX_RENDER_LOOP_PLAYBOOK.md\"" +
+            ",\"cpu_pc\":" + pc_buf +
+            ",\"gte_trace\":" + gte_trace_json +
+            ",\"dma2\":" + dma2_json +
+            ",\"drawlist\":" + drawlist_json +
+            ",\"scene_snapshot\":" + scene_snapshot_json +
+            ",\"focus_candidate\":" + focus_json +
+            ",\"candidate_classifications\":[]" + // reserved for v2 server-side scoring
+            ",\"classification_hint\":\"Apply playbook decision tree §4 on the signals above. Start at Q1 (RTPT dominance), branch down to Q4. Emit the output JSON format shown in playbook §4.\"" +
+            ",\"timing\":" + make_observation_timing_json(snapshot.frame_id) +
+            "}";
+        return true;
+    }
+
     bool run_until_mem_watch(uint32_t max_steps, uint64_t& event_seq, uint32_t& watch_id,
         uint32_t& hit_pc, uint32_t& hit_phys_addr, uint32_t& hit_value, uint32_t& hit_size,
         uint32_t& steps_done, bool& hit, std::string& err) override
