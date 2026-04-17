@@ -47,6 +47,7 @@ set(CORE_SOURCES
   src/r3000/cpu_dasm.cpp
   src/r3000/cpu_debug.cpp
   src/r3000/cpu_provenance_analyzer.cpp
+  src/r3000/hle_bios.cpp
 )
 
 # CLI emulator — links core sources directly (no separate library needed)

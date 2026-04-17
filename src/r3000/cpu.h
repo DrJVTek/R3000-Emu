@@ -343,6 +343,18 @@ class Cpu
     };
     void emit_dasm_line(const DasmContext& ctx) const;
 
+    // HLE BIOS bring-up: emulated vectors A0/B0/C0 + text-HLE printf path.
+    // Body lives in hle_bios.cpp.  Only entered when step()'s preamble
+    // computes hle_vec_gate || text_hle_gate.
+    //
+    // Returns true when the call was handled — writes r.kind/r.instr and
+    // CPU v0/pc_; caller (step) must immediately return r.
+    // Returns false when the call was NOT handled — fall through to the
+    // normal fetch-decode path (case where text_hle_gate is on but the
+    // BIOS stub is already installed and the function is neither A(3Fh)
+    // printf nor B(3Dh) putchar, so the real stub should run).
+    bool handle_hle_bios(StepResult& r, int hle_vec_gate, int text_hle_gate);
+
     // COP0 minimal (suffisant pour exceptions et quelques move).
     // On reste volontairement simple pour une démo: pas de TLB, pas de timing cycle-accurate.
     // NOTE: on supporte néanmoins un minimum d'IRQ (EXC_INT) pour permettre au BIOS d'avancer.
