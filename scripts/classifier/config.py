@@ -90,6 +90,10 @@ class WorkflowConfig:
     gte_trap_frame_chunk: int = 30
     gte_trap_buttons: str = "start,cross,triangle,circle"
     gte_trap_max_pcs: int = 12
+    bios_gte_trap_enabled: bool = True
+    bios_gte_trap_max_steps: int = 100_000_000
+    bios_gte_trap_step_chunk: int = 2_000_000
+    bios_gte_trap_max_pcs: int = 8
 
 
 @dataclass
@@ -168,7 +172,11 @@ def _apply_env_overrides(cfg: Config) -> None:
         "WORKFLOW_GTE_TRAP_MAX_FRAMES":  ("workflow", "gte_trap_max_frames", int),
         "WORKFLOW_GTE_TRAP_FRAME_CHUNK": ("workflow", "gte_trap_frame_chunk", int),
         "WORKFLOW_GTE_TRAP_BUTTONS":     ("workflow", "gte_trap_buttons", str),
-        "WORKFLOW_GTE_TRAP_MAX_PCS":     ("workflow", "gte_trap_max_pcs", int),
+        "WORKFLOW_GTE_TRAP_MAX_PCS":          ("workflow", "gte_trap_max_pcs", int),
+        "WORKFLOW_BIOS_GTE_TRAP_ENABLED":     ("workflow", "bios_gte_trap_enabled", _to_bool),
+        "WORKFLOW_BIOS_GTE_TRAP_MAX_STEPS":   ("workflow", "bios_gte_trap_max_steps", int),
+        "WORKFLOW_BIOS_GTE_TRAP_STEP_CHUNK":  ("workflow", "bios_gte_trap_step_chunk", int),
+        "WORKFLOW_BIOS_GTE_TRAP_MAX_PCS":     ("workflow", "bios_gte_trap_max_pcs", int),
         "TTS_ENABLED":      ("tts", "enabled", _to_bool),
         "TTS_COMMAND":      ("tts", "command_template", str),
         "TTS_VOICE":        ("tts", "voice", str),

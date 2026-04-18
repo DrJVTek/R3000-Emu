@@ -9,6 +9,7 @@ Phases:
     p2_gte_discovery : list GTE-producing functions (Ghidra + runtime cross-ref)
     p3_loop_discovery: walk xrefs to find outer display loops
     p3b_gte_trap     : widen GTE trace window + inject pad inputs to trigger 3D
+    p3c_bios_gte_trap: GTE trap on BIOS ROM range (steps-only, no VBlank needed)
     p4_classify      : per-loop LLM classification against the playbook
     p5_profile       : serialize accepted classifications into .psx3dprof
 """

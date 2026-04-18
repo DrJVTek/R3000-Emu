@@ -13,7 +13,7 @@ from .mcp.ghidra_http import GhidraHttpClient
 from .mcp.llm_litellm import LlmClient
 from .narrator import Narrator
 from .notes import add_note
-from .phases import p1_boot, p2_gte_discovery, p3_loop_discovery, p3b_gte_trap, p4_classify, p5_profile
+from .phases import p1_boot, p2_gte_discovery, p3_loop_discovery, p3b_gte_trap, p3c_bios_gte_trap, p4_classify, p5_profile
 from .report import build_markdown, write_report
 
 
@@ -185,6 +185,29 @@ class ClassifierOrchestrator:
                 reasons=readiness.get("reasons", []),
             )
 
+    def _run_bios_gte_trap_if_needed(self, ctx: dict) -> None:
+        if not self.cfg.workflow.bios_gte_trap_enabled:
+            return
+        pc_raw = ctx["boot_info"].get("pc", "0x0")
+        try:
+            pc = int(pc_raw, 16) if isinstance(pc_raw, str) else int(pc_raw)
+        except Exception:
+            pc = 0
+        if not (0xBFC00000 <= pc <= 0xBFC80000):
+            return
+        self.narrator.speak(
+            "bios_gte",
+            "Je suis encore dans le BIOS, je trace les PCs GTE du logo PlayStation via le GTE trap BIOS.",
+        )
+        ctx["bios_gte_trap"] = p3c_bios_gte_trap.run(ctx)
+        log_mod.log(
+            "orchestrator",
+            "bios_gte_trap_done",
+            triggered=ctx["bios_gte_trap"]["triggered"],
+            discovered=ctx["bios_gte_trap"]["discovered_pcs"],
+            steps=ctx["bios_gte_trap"]["steps_done"],
+        )
+
     def _run_gte_trap_if_needed(self, ctx: dict) -> None:
         if not self.cfg.workflow.gte_trap_enabled:
             return
@@ -285,11 +308,13 @@ class ClassifierOrchestrator:
             )
             self._write_memory_snapshot(ctx, "boot")
 
+            ctx["ghidra"] = self.ghidra
+            self._run_bios_gte_trap_if_needed(ctx)
+
             if not self.cfg.workflow.static_first and self.cfg.workflow.resume_after_static:
                 self._maybe_resume_runtime(ctx)
 
             self.narrator.speak("static", "Je corrèle Ghidra et les MCP pour repérer GTE, DrawOT et les premiers points d'entrée du rendu.")
-            ctx["ghidra"] = self.ghidra
             ctx["static_discovery"] = p2_gte_discovery.run(ctx)
             add_note(
                 ctx,

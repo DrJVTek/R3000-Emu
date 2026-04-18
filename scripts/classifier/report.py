@@ -135,6 +135,23 @@ def build_markdown(ctx: dict) -> str:
                 )
         lines.append("")
 
+    bios_gte_trap = ctx.get("bios_gte_trap")
+    if bios_gte_trap:
+        lines.extend(["## BIOS GTE Trap", ""])
+        lines.append(f"- Triggered: `{bios_gte_trap.get('triggered', False)}`")
+        lines.append(f"- Steps advanced: `{bios_gte_trap.get('steps_done', 0)}`")
+        for pc in list(bios_gte_trap.get("discovered_pcs", []) or []):
+            lines.append(f"- BIOS PC: `{pc}`")
+        for op in list(bios_gte_trap.get("top_ops", []) or [])[:8]:
+            if isinstance(op, dict):
+                lines.append(f"- GTE op: `{op.get('name', op.get('op', '?'))}` × {op.get('count', 0)}")
+        for fn in list(bios_gte_trap.get("ghidra_functions", []) or []):
+            if isinstance(fn, dict):
+                lines.append(
+                    f"- Ghidra: `{fn.get('function', '')}` at `{fn.get('function_addr', '')}` (caller PC `{fn.get('pc', '')}`)"
+                )
+        lines.append("")
+
     gte_trap = ctx.get("gte_trap")
     if gte_trap:
         lines.extend(["## GTE Trap", ""])

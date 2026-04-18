@@ -84,6 +84,10 @@ workflow:
   gte_trap_frame_chunk: 30
   gte_trap_buttons: start,cross,triangle,circle
   gte_trap_max_pcs: 12
+  bios_gte_trap_enabled: true
+  bios_gte_trap_max_steps: 100000000
+  bios_gte_trap_step_chunk: 2000000
+  bios_gte_trap_max_pcs: 8
 
 tts:
   enabled: true
