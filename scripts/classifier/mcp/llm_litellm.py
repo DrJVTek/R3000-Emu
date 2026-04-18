@@ -89,6 +89,7 @@ class LlmClient:
             ],
             "temperature": self._cfg.temperature,
             "max_tokens": self._cfg.max_tokens,
+            "timeout": 180,
         }
         if self._cfg.api_base.strip():
             kwargs["api_base"] = self._cfg.api_base.strip()
