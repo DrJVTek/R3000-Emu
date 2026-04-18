@@ -38,7 +38,7 @@ llm:
   # litellm provider selector.  Options: openrouter, ollama, lmstudio, anthropic, openai, ...
   provider: openrouter
   # Model identifier passed to litellm.completion(model=...).
-  model: qwen/qwen3.6-plus-preview:free
+  model: nvidia/nemotron-nano-9b-v2:free
   # Environment variable holding the API key.  For Ollama/local, leave as-is
   # (litellm ignores absent keys for local providers).
   api_key_env: OPENROUTER_API_KEY

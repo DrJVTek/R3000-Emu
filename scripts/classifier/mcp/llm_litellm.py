@@ -40,6 +40,8 @@ class LlmClient:
             return f"ollama/{model}"
         if provider in {"lmstudio", "openai_like", "openai-compatible", "openai_compatible"} and "/" not in model:
             return f"openai/{model}"
+        if provider in {"openrouter"} and not model.startswith("openrouter/"):
+            return f"openrouter/{model}"
         return model
 
     def _default_local_api_key(self) -> str | None:
@@ -113,7 +115,10 @@ class LlmClient:
                 last_error = exc
                 if attempt >= retries:
                     break
-                time.sleep(1.5 * (attempt + 1))
+                # Rate-limit errors need long backoff; other errors use short delay.
+                exc_name = type(exc).__name__
+                delay = 30.0 if "RateLimit" in exc_name else 1.5 * (attempt + 1)
+                time.sleep(delay)
         raise LlmError(str(last_error))
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> tuple[dict[str, Any], str]:
