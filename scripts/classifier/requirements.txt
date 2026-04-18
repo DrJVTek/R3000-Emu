@@ -1,0 +1,10 @@
+# Minimal dependencies for the classifier orchestrator.
+# Install with:  pip install -r scripts/classifier/requirements.txt
+
+# YAML config parsing (used by config.py).
+PyYAML>=6.0
+
+# Provider-agnostic LLM client (OpenRouter, Ollama, Anthropic, OpenAI, ...).
+# Only required for phase 4 (LLM classification).  Phase 1 skeleton can run
+# without it.
+litellm>=1.0

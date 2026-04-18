@@ -1,0 +1,88 @@
+# Default config for the PSX render-loop classifier orchestrator.
+#
+# Every field here can be overridden by:
+#   - CLASSIFIER_<SECTION>_<KEY> environment variables
+#   - CLI args (highest priority)
+#
+# See scripts/classifier/config.py for the full list of supported env vars.
+
+emu:
+  # Path to r3000_emu.exe built from this repo (Release).
+  exe: E:/Projects/github/Live/R3000-Emu/lib/Release/r3000_emu.exe
+  # Legacy bridge path kept for compatibility. The classifier now launches
+  # r3000_emu.exe directly in native --mcp-stdio mode.
+  mcp_bridge: E:/Projects/github/Live/R3000-Emu/lib/Release/r3000_mcp.exe
+  # PSX BIOS image (SCPH-compatible).
+  bios: E:/Projects/github/Live/R3000-Emu/bios/ps1_bios.bin
+  # Legacy TCP port for old workflows. Native stdio mode ignores it.
+  port: 9742
+  # Max seconds to wait for the emu to leave the BIOS region after launch.
+  boot_timeout_s: 60
+  # paused = pause after BIOS hands off to the loaded EXE/menu runtime.
+  # pause_immediate = stop at startup before any BIOS/game progress.
+  launch_mode: paused
+  pause_pc: 0xBFC00000
+  step_chunk: 50000
+  observe_steps: 20000
+  track_runtime_modules: false
+
+ghidra:
+  # GhidraMCP plugin HTTP endpoint (see .mcp.json).  Must be reachable before
+  # phases 2-3 can run; phase 1 doesn't need it.
+  base_url: http://localhost:8080
+  # If true, the orchestrator fails hard when Ghidra is unreachable.  If false,
+  # phases 2-3 degrade to runtime-only heuristics.
+  required: false
+
+llm:
+  # litellm provider selector.  Options: openrouter, ollama, lmstudio, anthropic, openai, ...
+  provider: openrouter
+  # Model identifier passed to litellm.completion(model=...).
+  model: qwen/qwen3.6-plus-preview:free
+  # Environment variable holding the API key.  For Ollama/local, leave as-is
+  # (litellm ignores absent keys for local providers).
+  api_key_env: OPENROUTER_API_KEY
+  # For LM Studio/OpenAI-compatible local backends, e.g. http://127.0.0.1:1234/v1
+  api_base: ""
+  # Temperature 0 for reproducibility across runs.  Bump to 0.3 for exploration.
+  temperature: 0.0
+  # Upper bound on tokens per LLM reply.  Render-loop classifications are small.
+  max_tokens: 4000
+  enabled: true
+
+playbook:
+  # The taxonomy + decision-tree document injected as LLM system prompt.
+  path: E:/Projects/github/Live/R3000-Emu/docs/PSX_RENDER_LOOP_PLAYBOOK.md
+
+output:
+  # Where generated .psx3dprof files land.  Suffix `.generated.psx3dprof` is
+  # added automatically to avoid overwriting manually-authored profiles.
+  profiles_dir: E:/Projects/github/Live/R3000-Emu/psx3dprof
+  # Markdown summary reports, one per session.
+  reports_dir: E:/Projects/github/Live/R3000-Emu/logs/classifier_reports
+  # JSONL structured event logs, one file per session.
+  jsonl_dir: E:/Projects/github/Live/R3000-Emu/logs/classifier
+  # Structured memory snapshots written after each major phase.
+  memory_dir: E:/Projects/github/Live/R3000-Emu/logs/classifier_memory
+
+workflow:
+  static_first: true
+  resume_after_static: true
+  analysis_passes: 3
+  ghidra_branch_depth: 2
+  ghidra_branch_fanout: 6
+  ghidra_static_seed_limit: 16
+  advance_frames_before_snapshot: 30
+  signal_seek_enabled: true
+  signal_seek_max_passes: 20
+  signal_seek_min_score: 4.0
+  dynamic_probe_enabled: true
+  dynamic_probe_buttons: start,cross
+  max_dynamic_probes: 2
+  min_confidence: 0.70
+
+tts:
+  enabled: true
+  command_template: ""
+  voice: nova
+  language: auto
