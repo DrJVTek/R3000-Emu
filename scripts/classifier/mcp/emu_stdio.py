@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +37,8 @@ class EmuMcp:
         self._proc: Optional[subprocess.Popen[bytes]] = None
         self._next_id = 1
         self._startup_wait_ms = startup_wait_ms
+        self._stderr_lines: collections.deque[str] = collections.deque(maxlen=200)
+        self._stderr_thread: Optional[threading.Thread] = None
 
     def __enter__(self) -> "EmuMcp":
         self.start()
@@ -61,6 +65,14 @@ class EmuMcp:
             stderr=subprocess.PIPE,
             bufsize=0,
         )
+        # Drain stderr in a background thread to prevent pipe-buffer deadlock.
+        # The emu's --stop-on-pc handler writes large register dumps to stderr;
+        # without a concurrent reader the 4KB pipe buffer fills and the emu
+        # blocks before it can send the MCP response on stdout.
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_drain_loop, daemon=True, name="emu-stderr-drain"
+        )
+        self._stderr_thread.start()
         time.sleep(self._startup_wait_ms / 1000.0)
         if self._proc.poll() is not None:
             stderr_tail = self._drain_stderr()
@@ -130,13 +142,18 @@ class EmuMcp:
         except json.JSONDecodeError as exc:
             raise EmuMcpError(f"malformed JSON body: {exc}")
 
-    def _drain_stderr(self) -> str:
+    def _stderr_drain_loop(self) -> None:
         if self._proc is None or self._proc.stderr is None:
-            return ""
+            return
         try:
-            return self._proc.stderr.read(4096).decode("utf-8", errors="replace")
+            for raw in self._proc.stderr:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                self._stderr_lines.append(line)
         except Exception:
-            return ""
+            pass
+
+    def _drain_stderr(self) -> str:
+        return "\n".join(self._stderr_lines)
 
     def _rpc(self, method: str, params: Optional[dict] = None) -> dict[str, Any]:
         req_id = self._next_id

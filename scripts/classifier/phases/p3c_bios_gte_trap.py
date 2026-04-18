@@ -1,13 +1,10 @@
 """Phase 3c — BIOS GTE trap: trace GTE caller PCs inside the BIOS ROM.
 
 The PlayStation BIOS renders the Sony/PlayStation logo using GTE (RTPS/NCLIP).
-This phase activates the GTE trace window over the BIOS ROM range and advances
-the emulator with steps only (max_frames=0, no VBlank wait) so it works cleanly
-at cold BIOS start before the GPU is fully initialized.
-
-When GTE-caller PCs are found at BIOS addresses (0xBFC00000-0xBFC80000), they
-can be correlated with a BIOS binary loaded in Ghidra to identify the rendering
-functions.
+This phase activates the GTE trace with no PC filter (pc_start=0, pc_end=0 =
+global capture) so it catches BIOS code regardless of whether it executes from
+KSEG1 (0xBFC00000, uncached) or KSEG0 (0x9FC00000, cached). Python then filters
+top_pcs for both BIOS mirrors.
 
 Trigger condition (orchestrator): PC is in BIOS range after p1_boot.
 """
@@ -17,11 +14,12 @@ from __future__ import annotations
 from typing import Any
 
 from .. import log as log_mod
-from ..mcp.ghidra_http import GhidraHttpClient, GhidraHttpError
 
 
-BIOS_START = 0xBFC00000
-BIOS_END   = 0xBFC80000
+BIOS_KSEG0_START = 0x9FC00000
+BIOS_KSEG0_END   = 0x9FC80000
+BIOS_KSEG1_START = 0xBFC00000
+BIOS_KSEG1_END   = 0xBFC80000
 
 
 def _as_int(value: Any) -> int:
@@ -35,6 +33,11 @@ def _as_int(value: Any) -> int:
             return int(s, 16)
     except Exception:
         return 0
+
+
+def _is_bios_pc(pc: int) -> bool:
+    return (BIOS_KSEG0_START <= pc <= BIOS_KSEG0_END or
+            BIOS_KSEG1_START <= pc <= BIOS_KSEG1_END)
 
 
 def _extract_top_pcs(summary: dict[str, Any]) -> list[int]:
@@ -57,83 +60,31 @@ def _extract_top_pcs(summary: dict[str, Any]) -> list[int]:
     return [p for p, _ in pairs]
 
 
-def _correlate_ghidra(
-    ghidra: GhidraHttpClient | None,
-    pcs: list[int],
-) -> list[dict[str, str]]:
-    """Map discovered BIOS PCs to Ghidra function names (BIOS must be loaded)."""
-    if not ghidra or not pcs:
-        return []
-    try:
-        functions = ghidra.list_functions_parsed()
-    except GhidraHttpError:
-        return []
-    if not functions:
-        return []
-
-    # Include both BIOS ROM range and any mirrored/RAM range functions.
-    parsed: list[tuple[int, str, str]] = []
-    for fn in functions:
-        addr_int = _as_int(fn.get("address", ""))
-        if addr_int:
-            parsed.append((addr_int, fn.get("name", ""), fn.get("address", "")))
-    parsed.sort(key=lambda x: x[0])
-
-    results: list[dict[str, str]] = []
-    seen: set[int] = set()
-    for pc in pcs:
-        best: tuple[int, str, str] | None = None
-        for entry in reversed(parsed):
-            if entry[0] <= pc:
-                best = entry
-                break
-        if best and best[0] not in seen:
-            seen.add(best[0])
-            results.append({
-                "pc": f"0x{pc:08X}",
-                "function": best[1],
-                "function_addr": best[2],
-            })
-    return results
-
-
-def _advance_steps_only(emu: Any, steps: int) -> dict[str, Any]:
-    """Advance using steps only — max_frames=0 means no VBlank limit."""
-    try:
-        return emu.call_tool_json("emu.resume", {
-            "max_steps": steps,
-            "max_frames": 0,
-            "stop_on_breakpoint": True,
-        }) or {}
-    except Exception as exc:
-        log_mod.log("p3c_bios_gte_trap", "resume_failed", error=str(exc))
-        return {"error": str(exc)}
-
-
 def run(ctx: dict) -> dict:
     """
-    Trace GTE caller PCs inside the BIOS ROM by advancing with steps only.
+    Trace GTE caller PCs inside the BIOS ROM.
+
+    3 MCP calls:
+      1. set_gte_trace_window  — arm global GTE trace (pc_start=0, pc_end=0)
+      2. emu.resume            — run the full step budget in one shot (no VBlank wait)
+      3. get_gte_trace_summary — read top_pcs accumulated during the run
 
     Must be called while the PC is still in BIOS range (0xBFC00000-0xBFC80000).
-    Uses max_frames=0 so there is no dependency on GPU VBlank initialization.
-
-    Returns dict with: discovered_pcs, top_ops, steps_done, ghidra_functions,
-    triggered.
+    max_frames=0 means the resume stops only on max_steps (no VBlank dependency).
+    pc_start=0/pc_end=0 means capture ALL GTE ops; Python filters for BIOS addresses.
     """
     cfg = ctx["config"]
     emu = ctx["emu"]
     w = cfg.workflow
-    ghidra: GhidraHttpClient | None = ctx.get("ghidra")
 
     max_steps = max(1, int(w.bios_gte_trap_max_steps))
-    step_chunk = max(1, int(w.bios_gte_trap_step_chunk))
     max_pcs = max(1, int(w.bios_gte_trap_max_pcs))
 
-    # 1. Open GTE trace window over the entire BIOS ROM.
+    # 1. Arm global GTE trace (no PC range filter — catches both KSEG0 and KSEG1).
     try:
         emu.call_tool_json("emu.set_gte_trace_window", {
-            "pc_start": BIOS_START,
-            "pc_end": BIOS_END,
+            "pc_start": 0,
+            "pc_end": 0,
             "start_frame": 0,
             "end_frame": 0,
             "enabled": True,
@@ -141,63 +92,60 @@ def run(ctx: dict) -> dict:
     except Exception as exc:
         log_mod.log("p3c_bios_gte_trap", "set_window_failed", error=str(exc))
         return {
-            "discovered_pcs": [],
-            "top_ops": [],
-            "steps_done": 0,
-            "ghidra_functions": [],
-            "triggered": False,
-            "error": str(exc),
+            "discovered_pcs": [], "top_ops": [], "steps_done": 0,
+            "triggered": False, "error": str(exc),
         }
 
-    discovered_pcs: list[int] = []
-    steps_done = 0
+    # 2. Single resume — GTE trace accumulates during execution.
+    # The --stop-on-pc=0xBFC00000 breakpoint fires on the very first step when
+    # pause_immediate mode is used (stopped_on_pc_ starts at 0).  The emu
+    # returns a "step stopped kind=1" error for that one step, then clears the
+    # internal flag so subsequent resumes proceed normally.  Retry once.
+    resume_result: dict[str, Any] = {}
+    try:
+        resume_result = emu.call_tool_json("emu.resume", {
+            "max_steps": max_steps,
+            "max_frames": 0,
+        }) or {}
+    except Exception as exc:
+        exc_str = str(exc)
+        if "step stopped" in exc_str or "kind=1" in exc_str or "halted" in exc_str.lower():
+            log_mod.log("p3c_bios_gte_trap", "stop_on_pc_cleared", note="retrying resume")
+            try:
+                resume_result = emu.call_tool_json("emu.resume", {
+                    "max_steps": max_steps,
+                    "max_frames": 0,
+                }) or {}
+            except Exception as exc2:
+                log_mod.log("p3c_bios_gte_trap", "resume_failed", error=str(exc2))
+        else:
+            log_mod.log("p3c_bios_gte_trap", "resume_failed", error=exc_str)
+
+    steps_done = int(resume_result.get("steps_done", 0) or 0)
+    log_mod.log("p3c_bios_gte_trap", "resume_done", steps_done=steps_done)
+
+    # 3. Read the GTE trace — top_pcs populated from the run above.
     summary: dict[str, Any] = {}
+    try:
+        summary = emu.call_tool_json("emu.get_gte_trace_summary") or {}
+    except Exception as exc:
+        log_mod.log("p3c_bios_gte_trap", "summary_failed", error=str(exc))
 
-    # 2. Advance in step chunks (no VBlank wait), sampling GTE trace after each.
-    while steps_done < max_steps:
-        chunk = min(step_chunk, max_steps - steps_done)
-        result = _advance_steps_only(emu, chunk)
-        steps_done += chunk
-
-        if result.get("error"):
-            break
-
-        try:
-            summary = emu.call_tool_json("emu.get_gte_trace_summary") or {}
-        except Exception as exc:
-            log_mod.log("p3c_bios_gte_trap", "summary_failed", steps_done=steps_done, error=str(exc))
-            continue
-
-        top_pcs = _extract_top_pcs(summary)
-        bios_pcs = [p for p in top_pcs if BIOS_START <= p <= BIOS_END]
-
-        log_mod.log(
-            "p3c_bios_gte_trap",
-            "chunk_done",
-            steps_done=steps_done,
-            bios_pcs_found=len(bios_pcs),
-            top_pcs_total=len(top_pcs),
-        )
-
-        if bios_pcs:
-            discovered_pcs = bios_pcs[:max_pcs]
-            break
-
-    ghidra_functions = _correlate_ghidra(ghidra, discovered_pcs)
+    top_pcs = _extract_top_pcs(summary)
+    bios_pcs = [p for p in top_pcs if _is_bios_pc(p)]
+    discovered_pcs = bios_pcs[:max_pcs]
 
     result_out: dict[str, Any] = {
         "discovered_pcs": [f"0x{p:08X}" for p in discovered_pcs],
         "top_ops": summary.get("top_ops", []),
         "steps_done": steps_done,
-        "ghidra_functions": ghidra_functions,
         "triggered": len(discovered_pcs) > 0,
     }
     log_mod.log(
-        "p3c_bios_gte_trap",
-        "done",
+        "p3c_bios_gte_trap", "done",
         triggered=result_out["triggered"],
         discovered_pcs=result_out["discovered_pcs"],
         steps_done=steps_done,
-        ghidra_functions_count=len(ghidra_functions),
+        all_top_pcs=[f"0x{p:08X}" for p in top_pcs],
     )
     return result_out

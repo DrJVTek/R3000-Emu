@@ -92,7 +92,6 @@ class WorkflowConfig:
     gte_trap_max_pcs: int = 12
     bios_gte_trap_enabled: bool = True
     bios_gte_trap_max_steps: int = 100_000_000
-    bios_gte_trap_step_chunk: int = 2_000_000
     bios_gte_trap_max_pcs: int = 8
 
 
@@ -175,7 +174,6 @@ def _apply_env_overrides(cfg: Config) -> None:
         "WORKFLOW_GTE_TRAP_MAX_PCS":          ("workflow", "gte_trap_max_pcs", int),
         "WORKFLOW_BIOS_GTE_TRAP_ENABLED":     ("workflow", "bios_gte_trap_enabled", _to_bool),
         "WORKFLOW_BIOS_GTE_TRAP_MAX_STEPS":   ("workflow", "bios_gte_trap_max_steps", int),
-        "WORKFLOW_BIOS_GTE_TRAP_STEP_CHUNK":  ("workflow", "bios_gte_trap_step_chunk", int),
         "WORKFLOW_BIOS_GTE_TRAP_MAX_PCS":     ("workflow", "bios_gte_trap_max_pcs", int),
         "TTS_ENABLED":      ("tts", "enabled", _to_bool),
         "TTS_COMMAND":      ("tts", "command_template", str),
