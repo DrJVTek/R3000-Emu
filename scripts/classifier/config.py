@@ -85,6 +85,11 @@ class WorkflowConfig:
     dynamic_probe_buttons: str = "start,cross"
     max_dynamic_probes: int = 2
     min_confidence: float = 0.70
+    gte_trap_enabled: bool = True
+    gte_trap_max_frames: int = 300
+    gte_trap_frame_chunk: int = 30
+    gte_trap_buttons: str = "start,cross,triangle,circle"
+    gte_trap_max_pcs: int = 12
 
 
 @dataclass
@@ -159,6 +164,11 @@ def _apply_env_overrides(cfg: Config) -> None:
         "WORKFLOW_DYNAMIC_PROBE_BUTTONS": ("workflow", "dynamic_probe_buttons", str),
         "WORKFLOW_MAX_DYNAMIC_PROBES": ("workflow", "max_dynamic_probes", int),
         "WORKFLOW_MIN_CONFIDENCE": ("workflow", "min_confidence", float),
+        "WORKFLOW_GTE_TRAP_ENABLED":     ("workflow", "gte_trap_enabled", _to_bool),
+        "WORKFLOW_GTE_TRAP_MAX_FRAMES":  ("workflow", "gte_trap_max_frames", int),
+        "WORKFLOW_GTE_TRAP_FRAME_CHUNK": ("workflow", "gte_trap_frame_chunk", int),
+        "WORKFLOW_GTE_TRAP_BUTTONS":     ("workflow", "gte_trap_buttons", str),
+        "WORKFLOW_GTE_TRAP_MAX_PCS":     ("workflow", "gte_trap_max_pcs", int),
         "TTS_ENABLED":      ("tts", "enabled", _to_bool),
         "TTS_COMMAND":      ("tts", "command_template", str),
         "TTS_VOICE":        ("tts", "voice", str),

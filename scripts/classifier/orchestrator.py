@@ -13,7 +13,7 @@ from .mcp.ghidra_http import GhidraHttpClient
 from .mcp.llm_litellm import LlmClient
 from .narrator import Narrator
 from .notes import add_note
-from .phases import p1_boot, p2_gte_discovery, p3_loop_discovery, p4_classify, p5_profile
+from .phases import p1_boot, p2_gte_discovery, p3_loop_discovery, p3b_gte_trap, p4_classify, p5_profile
 from .report import build_markdown, write_report
 
 
@@ -59,7 +59,16 @@ class ClassifierOrchestrator:
             return
         self.narrator.speak("resume", "Je reprends l'émulateur pour collecter les signaux runtime du pipeline d'affichage.")
         launch_mode = str(ctx["boot_info"].get("launch_mode", ""))
-        if launch_mode == "pause_after_exe_load":
+        if launch_mode == "pause_immediate":
+            # Clear the --stop-on-pc breakpoint so emu.resume can advance past it.
+            try:
+                ctx["emu"].call_tool_json("emu.clear_breakpoint_pc", {"pc": int(self.cfg.emu.pause_pc)})
+            except Exception:
+                pass
+            ctx["boot_info"]["paused"] = False
+            ctx["resume_info"] = {"pc": ctx["boot_info"].get("pc", "0x00000000")}
+            return
+        elif launch_mode == "pause_after_exe_load":
             resume_info = p1_boot.advance_runtime(
                 emu=ctx["emu"],
                 max_steps=2_000_000,  # PSX ≈ 1.1M instr/frame; observe_steps (20K) too small
@@ -176,11 +185,35 @@ class ClassifierOrchestrator:
                 reasons=readiness.get("reasons", []),
             )
 
+    def _run_gte_trap_if_needed(self, ctx: dict) -> None:
+        if not self.cfg.workflow.gte_trap_enabled:
+            return
+        score = self._readiness_score(ctx.get("dynamic_discovery", {}))
+        if score >= float(self.cfg.workflow.signal_seek_min_score):
+            return
+        self.narrator.speak(
+            "gte_trap",
+            "Le signal reste faible après la recherche. Je lance le GTE trap pour trouver les PCs 3D par injection pad.",
+        )
+        ctx["gte_trap"] = p3b_gte_trap.run(ctx)
+        log_mod.log(
+            "orchestrator",
+            "gte_trap_done",
+            triggered=ctx["gte_trap"]["triggered"],
+            discovered=ctx["gte_trap"]["discovered_pcs"],
+            frames=ctx["gte_trap"]["frames_done"],
+        )
+        if ctx["gte_trap"]["triggered"]:
+            ctx["static_discovery"].setdefault("gte_trap_pcs", []).extend(
+                ctx["gte_trap"]["discovered_pcs"]
+            )
+
     def _run_multi_pass_analysis(self, ctx: dict) -> None:
         total_passes = max(1, int(self.cfg.workflow.analysis_passes))
         ctx.setdefault("analysis_passes", [])
         ctx["dynamic_discovery"] = p3_loop_discovery.run(ctx)
         self._seek_runtime_signal_if_needed(ctx)
+        self._run_gte_trap_if_needed(ctx)
         self._classify_current_state(ctx)
 
         for pass_index in range(2, total_passes + 1):

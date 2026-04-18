@@ -79,6 +79,11 @@ workflow:
   dynamic_probe_buttons: start,cross
   max_dynamic_probes: 2
   min_confidence: 0.70
+  gte_trap_enabled: true
+  gte_trap_max_frames: 300
+  gte_trap_frame_chunk: 30
+  gte_trap_buttons: start,cross,triangle,circle
+  gte_trap_max_pcs: 12
 
 tts:
   enabled: true

@@ -135,6 +135,23 @@ def build_markdown(ctx: dict) -> str:
                 )
         lines.append("")
 
+    gte_trap = ctx.get("gte_trap")
+    if gte_trap:
+        lines.extend(["## GTE Trap", ""])
+        lines.append(f"- Triggered: `{gte_trap.get('triggered', False)}`")
+        lines.append(f"- Frames advanced: `{gte_trap.get('frames_done', 0)}`")
+        for pc in list(gte_trap.get("discovered_pcs", []) or []):
+            lines.append(f"- Discovered PC: `{pc}`")
+        for op in list(gte_trap.get("top_ops", []) or [])[:8]:
+            if isinstance(op, dict):
+                lines.append(f"- GTE op: `{op.get('name', op.get('op', '?'))}` × {op.get('count', 0)}")
+        for fn in list(gte_trap.get("ghidra_functions", []) or []):
+            if isinstance(fn, dict):
+                lines.append(
+                    f"- Ghidra: `{fn.get('function', '')}` at `{fn.get('function_addr', '')}` (caller PC `{fn.get('pc', '')}`)"
+                )
+        lines.append("")
+
     signal_seek_passes = ctx.get("signal_seek_passes", []) or []
     if signal_seek_passes:
         lines.extend(["## Signal Seek Passes", ""])

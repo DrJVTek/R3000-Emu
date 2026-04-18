@@ -24,6 +24,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     src = p.add_mutually_exclusive_group(required=False)
     src.add_argument("--cd", help="Path to CD image (.cue/.bin).  Loaded via --cd=...")
     src.add_argument("--exe", help="Path to PS-EXE.  Loaded via --load=...")
+    p.add_argument("--bios-only", action="store_true", help="Boot BIOS without a disc (e.g. to classify the PlayStation logo).")
     p.add_argument("--devkit-hle", action="store_true", help="Pass --devkit-hle to the emu (PS-EXE mode).")
     p.add_argument("--hle", action="store_true", help="Pass --hle to the emu.")
     p.add_argument("--config", type=Path, default=None, help="Path to config YAML.  Defaults to scripts/classifier/config.yaml")
@@ -109,9 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.hle:
         rom_args.append("--hle")
 
-    if not rom_args:
+    if not rom_args and not getattr(args, "bios_only", False):
         log_mod.log("session", "error", reason="no rom source specified")
-        sys.stderr.write("error: either --cd or --exe is required\n")
+        sys.stderr.write("error: either --cd, --exe, or --bios-only is required\n")
         return 2
 
     try:
