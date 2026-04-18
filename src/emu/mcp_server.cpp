@@ -271,6 +271,41 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}"
         "},"
         "{"
+        "\"name\":\"emu.get_run_state\","
+        "\"description\":\"Returns the cooperative MCP run state (paused/resume metadata).\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_boot_exe_info\","
+        "\"description\":\"Returns the detected boot PS-X EXE header/info for the current session (disc or direct EXE load).\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_boot_exe_history\","
+        "\"description\":\"Returns the history of recognized boot EXE/runtime events for the current session.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}"
+        "},"
+        "{"
+        "\"name\":\"emu.get_runtime_module_history\","
+        "\"description\":\"Returns stable transitions between coarse runtime code regions during the current session.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}"
+        "},"
+        "{"
+        "\"name\":\"emu.pause\","
+        "\"description\":\"Marks the cooperative MCP run state as paused.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.resume\","
+        "\"description\":\"Runs the emulator cooperatively for a step/frame budget and then returns to paused state.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"max_frames\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":1000000},\"stop_on_breakpoint\":{\"type\":\"boolean\"}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.resume_until_boot_exe\","
+        "\"description\":\"Runs until the detected boot EXE entry point is reached or the step budget is exhausted.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000}},\"additionalProperties\":false}"
+        "},"
+        "{"
         "\"name\":\"emu.step\","
         "\"description\":\"Executes one or more CPU steps in the current emulation session.\","
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000}},\"additionalProperties\":false}"
@@ -418,7 +453,7 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "{"
         "\"name\":\"emu.tap_pad_named_buttons\","
         "\"description\":\"Presses one or more digital pad buttons given by comma-separated names like 'cross,left,start'.\","
-        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000}},\"required\":[\"names\"],\"additionalProperties\":false}"
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000}},\"additionalProperties\":false}"
         "},"
         "{"
         "\"name\":\"emu.get_scene_vector_snapshot\","
@@ -453,7 +488,7 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "{"
         "\"name\":\"emu.step_with_pad_observation\","
         "\"description\":\"Presses named pad buttons, steps the emulator, then returns scene snapshot, delta and salience in one call.\","
-        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"observe_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_targets\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32}},\"required\":[\"names\"],\"additionalProperties\":false}"
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"observe_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_targets\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32}},\"additionalProperties\":false}"
         "},"
         "{"
         "\"name\":\"emu.match_render_pattern\","
@@ -563,6 +598,88 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
         }
         data += "]}";
         return json_result(id_raw, mcp_text_result("cpu", data));
+    }
+
+    if (name == "emu.get_run_state")
+    {
+        McpRunState s{};
+        if (!backend_.get_run_state(s))
+            return json_error(id_raw, -32018, "run state unavailable");
+        const std::string data =
+            std::string("{") +
+            "\"paused\":" + (s.paused ? std::string("true") : std::string("false")) +
+            ",\"last_pc\":" + std::to_string(s.last_pc) +
+            ",\"last_steps\":" + std::to_string(s.last_steps) +
+            ",\"last_frames\":" + std::to_string(s.last_frames) +
+            ",\"last_hit_breakpoint\":" + (s.last_hit_breakpoint ? std::string("true") : std::string("false")) +
+            ",\"last_hit_pc\":" + std::to_string(s.last_hit_pc) +
+            "}";
+        return json_result(id_raw, mcp_text_result("run_state", data));
+    }
+
+    if (name == "emu.get_boot_exe_info")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_boot_exe_info(data, err))
+            return json_error(id_raw, -32049, err.empty() ? "boot exe info unavailable" : err.c_str());
+        return json_result(id_raw, mcp_text_result("boot_exe_info", data));
+    }
+
+    if (name == "emu.get_boot_exe_history")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_boot_exe_history(data, err))
+            return json_error(id_raw, -32051, err.empty() ? "boot exe history unavailable" : err.c_str());
+        return json_result(id_raw, mcp_text_result("boot_exe_history", data));
+    }
+
+    if (name == "emu.get_runtime_module_history")
+    {
+        std::string data;
+        std::string err;
+        if (!backend_.get_runtime_module_history(data, err))
+            return json_error(id_raw, -32052, err.empty() ? "runtime module history unavailable" : err.c_str());
+        return json_result(id_raw, mcp_text_result("runtime_module_history", data));
+    }
+
+    if (name == "emu.pause")
+    {
+        std::string err;
+        if (!backend_.pause(err))
+            return json_error(id_raw, -32019, err.empty() ? "pause failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("paused", "{\"paused\":true}"));
+    }
+
+    if (name == "emu.resume")
+    {
+        uint32_t max_steps = 100000;
+        uint32_t max_frames = 0;
+        bool stop_on_breakpoint = true;
+        extract_json_uint32(json, "max_steps", max_steps);
+        extract_json_uint32(json, "max_frames", max_frames);
+        extract_json_bool(json, "stop_on_breakpoint", stop_on_breakpoint);
+        if (max_steps == 0 && max_frames == 0)
+            return json_error(id_raw, -32602, "max_steps and max_frames cannot both be zero");
+        std::string data;
+        std::string err;
+        if (!backend_.resume(max_steps, max_frames, stop_on_breakpoint, data, err))
+            return json_error(id_raw, -32020, err.empty() ? "resume failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("resume", data));
+    }
+
+    if (name == "emu.resume_until_boot_exe")
+    {
+        uint32_t max_steps = 100000000;
+        extract_json_uint32(json, "max_steps", max_steps);
+        if (max_steps == 0)
+            max_steps = 1;
+        std::string data;
+        std::string err;
+        if (!backend_.resume_until_boot_exe(max_steps, data, err))
+            return json_error(id_raw, -32050, err.empty() ? "resume_until_boot_exe failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("resume_until_boot_exe", data));
     }
 
     if (name == "emu.step")
@@ -968,9 +1085,11 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
 
     if (name == "emu.tap_pad_named_buttons")
     {
-        const std::string names = extract_json_string(json, "names");
+        std::string names = extract_json_string(json, "names_csv");
         if (names.empty())
-            return json_error(id_raw, -32602, "missing names");
+            names = extract_json_string(json, "names");
+        if (names.empty())
+            return json_error(id_raw, -32602, "missing names_csv");
         uint32_t hold_steps = 200000;
         uint32_t release_steps = 0;
         extract_json_uint32(json, "hold_steps", hold_steps);
@@ -1065,9 +1184,11 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
 
     if (name == "emu.step_with_pad_observation")
     {
-        const std::string names = extract_json_string(json, "names");
+        std::string names = extract_json_string(json, "names_csv");
         if (names.empty())
-            return json_error(id_raw, -32602, "missing names");
+            names = extract_json_string(json, "names");
+        if (names.empty())
+            return json_error(id_raw, -32602, "missing names_csv");
         uint32_t hold_steps = 200000;
         uint32_t observe_steps = 0;
         uint32_t max_groups = 24;

@@ -332,6 +332,269 @@ public:
         return true;
     }
 
+    bool get_run_state(emu::McpRunState& out) const override
+    {
+        out = run_state_;
+        if (const r3000::Cpu* cpu = core_.cpu())
+            out.last_pc = cpu->pc();
+        return true;
+    }
+
+    bool get_boot_exe_info(std::string& out_json, std::string& err) const override
+    {
+        (void)err;
+        emu::Core::BootExeInfo info{};
+        const bool has_info = core_.get_boot_exe_info(info);
+        out_json =
+            std::string("{") +
+            "\"valid\":" + (has_info ? std::string("true") : std::string("false")) +
+            ",\"loaded_to_ram\":" + (info.loaded_to_ram ? std::string("true") : std::string("false")) +
+            ",\"reached_entry_pc\":" + (info.reached_entry_pc ? std::string("true") : std::string("false")) +
+            ",\"source\":\"" + emu::McpServer::json_escape(info.source) + "\"" +
+            ",\"boot_path\":\"" + emu::McpServer::json_escape(info.boot_path) + "\"" +
+            ",\"disc_lba\":" + std::to_string(info.disc_lba) +
+            ",\"file_size\":" + std::to_string(info.file_size) +
+            ",\"entry_pc\":" + std::to_string(info.entry_pc) +
+            ",\"gp0\":" + std::to_string(info.gp0) +
+            ",\"t_addr\":" + std::to_string(info.t_addr) +
+            ",\"t_size\":" + std::to_string(info.t_size) +
+            ",\"b_addr\":" + std::to_string(info.b_addr) +
+            ",\"b_size\":" + std::to_string(info.b_size) +
+            ",\"sp_addr\":" + std::to_string(info.sp_addr) +
+            ",\"sp_size\":" + std::to_string(info.sp_size) +
+            "}";
+        return true;
+    }
+
+    bool get_boot_exe_history(std::string& out_json, std::string& err) const override
+    {
+        (void)err;
+        const auto history = core_.boot_exe_history();
+        out_json = "{\"count\":" + std::to_string((uint32_t)history.size()) + ",\"events\":[";
+        for (size_t i = 0; i < history.size(); ++i)
+        {
+            const auto& ev = history[i];
+            if (i)
+                out_json += ",";
+            out_json +=
+                std::string("{") +
+                "\"step_index\":" + std::to_string(ev.step_index) +
+                ",\"stage\":\"" + emu::McpServer::json_escape(ev.stage) + "\"" +
+                ",\"source\":\"" + emu::McpServer::json_escape(ev.source) + "\"" +
+                ",\"boot_path\":\"" + emu::McpServer::json_escape(ev.boot_path) + "\"" +
+                ",\"pc\":" + std::to_string(ev.pc) +
+                ",\"entry_pc\":" + std::to_string(ev.entry_pc) +
+                ",\"loaded_to_ram\":" + (ev.loaded_to_ram ? std::string("true") : std::string("false")) +
+                ",\"reached_entry_pc\":" + (ev.reached_entry_pc ? std::string("true") : std::string("false")) +
+                "}";
+        }
+        out_json += "]}";
+        return true;
+    }
+
+    bool get_runtime_module_history(std::string& out_json, std::string& err) const override
+    {
+        (void)err;
+        const auto history = core_.runtime_module_history();
+        out_json = "{\"count\":" + std::to_string((uint32_t)history.size()) + ",\"events\":[";
+        for (size_t i = 0; i < history.size(); ++i)
+        {
+            const auto& ev = history[i];
+            if (i)
+                out_json += ",";
+            out_json +=
+                std::string("{") +
+                "\"step_index\":" + std::to_string(ev.step_index) +
+                ",\"kind\":\"" + emu::McpServer::json_escape(ev.kind) + "\"" +
+                ",\"label\":\"" + emu::McpServer::json_escape(ev.label) + "\"" +
+                ",\"pc\":" + std::to_string(ev.pc) +
+                ",\"base\":" + std::to_string(ev.base) +
+                ",\"span\":" + std::to_string(ev.span) +
+                ",\"reason\":\"" + emu::McpServer::json_escape(ev.reason) + "\"" +
+                "}";
+        }
+        out_json += "]}";
+        return true;
+    }
+
+    bool pause(std::string& err) override
+    {
+        (void)err;
+        run_state_.paused = true;
+        if (const r3000::Cpu* cpu = core_.cpu())
+            run_state_.last_pc = cpu->pc();
+        return true;
+    }
+
+    bool resume(uint32_t max_steps, uint32_t max_frames, bool stop_on_breakpoint, std::string& out_json, std::string& err) override
+    {
+        if (!core_.cpu())
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+
+        auto* cpu = core_.cpu();
+        const auto current_frame_count = [&]() -> uint32_t
+        {
+            if (core_.gpu_3d())
+                return core_.gpu_3d()->frame_count();
+            return 0u;
+        };
+        const uint32_t start_frame = current_frame_count();
+        uint32_t steps_done = 0;
+        uint32_t frames_done = 0;
+        uint32_t hit_pc = 0;
+        bool hit_breakpoint = false;
+        run_state_.paused = false;
+
+        while (true)
+        {
+            const uint32_t pc_before = cpu->pc();
+            if (stop_on_breakpoint)
+            {
+                for (auto& bp : breakpoints_)
+                {
+                    if (bp.enabled && bp.pc == pc_before)
+                    {
+                        bp.hit_count++;
+                        hit_pc = pc_before;
+                        hit_breakpoint = true;
+                        goto resume_done;
+                    }
+                }
+            }
+
+            if (max_steps != 0 && steps_done >= max_steps)
+                break;
+
+            const auto res = core_.step();
+            if (res.kind != r3000::Cpu::StepResult::Kind::ok)
+            {
+                char msg[160];
+                std::snprintf(msg, sizeof(msg), "step stopped kind=%d pc=0x%08X", (int)res.kind, res.pc);
+                err = msg;
+                run_state_.paused = true;
+                run_state_.last_pc = res.pc;
+                run_state_.last_steps = steps_done;
+                run_state_.last_frames = current_frame_count() - start_frame;
+                run_state_.last_hit_breakpoint = false;
+                run_state_.last_hit_pc = 0;
+                return false;
+            }
+
+            ++steps_done;
+            frames_done = current_frame_count() - start_frame;
+
+            if (stop_on_breakpoint)
+            {
+                const uint32_t pc_after = cpu->pc();
+                for (auto& bp : breakpoints_)
+                {
+                    if (bp.enabled && bp.pc == pc_after)
+                    {
+                        bp.hit_count++;
+                        hit_pc = pc_after;
+                        hit_breakpoint = true;
+                        goto resume_done;
+                    }
+                }
+            }
+
+            if (max_frames != 0 && frames_done >= max_frames)
+                break;
+            if (max_steps == 0 && max_frames == 0)
+                break;
+        }
+
+resume_done:
+        run_state_.paused = true;
+        run_state_.last_pc = cpu->pc();
+        run_state_.last_steps = steps_done;
+        run_state_.last_frames = frames_done;
+        run_state_.last_hit_breakpoint = hit_breakpoint;
+        run_state_.last_hit_pc = hit_pc;
+
+        out_json =
+            std::string("{") +
+            "\"paused\":true" +
+            ",\"steps_done\":" + std::to_string(steps_done) +
+            ",\"frames_done\":" + std::to_string(frames_done) +
+            ",\"hit_breakpoint\":" + (hit_breakpoint ? std::string("true") : std::string("false")) +
+            ",\"hit_pc\":" + std::to_string(hit_pc) +
+            ",\"pc\":" + std::to_string(cpu->pc()) +
+            "}";
+        return true;
+    }
+
+    bool resume_until_boot_exe(uint32_t max_steps, std::string& out_json, std::string& err) override
+    {
+        if (!core_.cpu())
+        {
+            err = "cpu not initialized";
+            return false;
+        }
+
+        emu::Core::BootExeInfo info{};
+        if (!core_.get_boot_exe_info(info) || !info.valid)
+        {
+            err = "boot exe info unavailable";
+            return false;
+        }
+
+        auto* cpu = core_.cpu();
+        uint32_t steps_done = 0;
+        bool hit = false;
+        uint32_t hit_pc = 0;
+        run_state_.paused = false;
+
+        while (steps_done < max_steps || max_steps == 0)
+        {
+            emu::Core::BootExeInfo cur{};
+            core_.get_boot_exe_info(cur);
+            if ((cur.valid && cur.reached_entry_pc) || cpu->pc() == info.entry_pc)
+            {
+                hit = true;
+                hit_pc = info.entry_pc;
+                break;
+            }
+
+            const auto res = core_.step();
+            if (res.kind != r3000::Cpu::StepResult::Kind::ok)
+            {
+                char msg[160];
+                std::snprintf(msg, sizeof(msg), "step stopped kind=%d pc=0x%08X", (int)res.kind, res.pc);
+                err = msg;
+                run_state_.paused = true;
+                run_state_.last_pc = res.pc;
+                run_state_.last_steps = steps_done;
+                run_state_.last_frames = 0;
+                run_state_.last_hit_breakpoint = false;
+                run_state_.last_hit_pc = 0;
+                return false;
+            }
+            ++steps_done;
+        }
+
+        run_state_.paused = true;
+        run_state_.last_pc = cpu->pc();
+        run_state_.last_steps = steps_done;
+        run_state_.last_frames = 0;
+        run_state_.last_hit_breakpoint = hit;
+        run_state_.last_hit_pc = hit_pc;
+
+        out_json =
+            std::string("{") +
+            "\"paused\":true" +
+            ",\"hit\":" + (hit ? std::string("true") : std::string("false")) +
+            ",\"steps_done\":" + std::to_string(steps_done) +
+            ",\"entry_pc\":" + std::to_string(info.entry_pc) +
+            ",\"pc\":" + std::to_string(cpu->pc()) +
+            ",\"boot_path\":\"" + emu::McpServer::json_escape(info.boot_path) + "\"" +
+            "}";
+        return true;
+    }
+
     bool step(uint32_t count, std::string& err) override
     {
         if (!core_.cpu())
@@ -350,6 +613,13 @@ public:
                 return false;
             }
         }
+        run_state_.paused = true;
+        if (const r3000::Cpu* cpu = core_.cpu())
+            run_state_.last_pc = cpu->pc();
+        run_state_.last_steps = count;
+        run_state_.last_frames = 0;
+        run_state_.last_hit_breakpoint = false;
+        run_state_.last_hit_pc = 0;
         return true;
     }
 
@@ -2674,6 +2944,7 @@ private:
     }
 
     emu::Core& core_;
+    emu::McpRunState run_state_{};
     std::vector<emu::McpBreakpoint> breakpoints_{};
     std::vector<StepHookRule> step_hooks_{};
     struct MemWatchRule
@@ -3183,6 +3454,7 @@ static void print_usage(void)
         "  --pc-sample=N         Print PC every N steps\n"
         "  --bus-tick-batch=N    Tick HW every N CPU steps (1=accurate, 32=fast)\n"
         "  --cd-timing=MODE      CD seek/spin-up timing: realistic|compat\n"
+        "  --track-runtime-modules  Record coarse runtime code-region transitions for MCP analysis\n"
         "  --stop-on-pc=ADDR     Stop when PC hits ADDR (hex ok)\n"
         "  --emu-log-level=LVL   Set emu log level (error|warn|info|debug|trace)\n"
         "  --watch-addr=ADDR     Watch RAM address (physical, hex ok) — log changes each VBlank\n"
@@ -3576,6 +3848,7 @@ int main(int argc, char** argv)
             emu::logf(emu::LogLevel::error, "MAIN", "Load failed: %s", err[0] ? err : "unknown error");
             return 1;
         }
+        core.remember_boot_exe_from_file(load_path, "direct_load", true);
         // Devkit mode: derive psx3dprof identity from the EXE path so any
         // per-game quirks (e.g. force_gte_geom_offset_zero for TREX) are
         // auto-applied. Mirrors what Core::fast_boot_from_exe() does for the
@@ -3635,6 +3908,7 @@ int main(int argc, char** argv)
     core_opt.trace_io = trace_io ? 1 : 0;
     core_opt.hle_vectors = has_flag(argc, argv, "--hle") ? 1 : 0;
     core_opt.text_hle = has_flag(argc, argv, "--text-hle") ? 1 : 0;
+    core_opt.track_runtime_modules = has_flag(argc, argv, "--track-runtime-modules") ? 1 : 0;
     if (is_hle_devkit)
         core_opt.hle_vectors = 1;  // HLE devkit needs syscall interception
     // is_bios_devkit: real BIOS installs its own vectors — hle_vectors stays 0

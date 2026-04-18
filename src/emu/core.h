@@ -68,6 +68,49 @@ class Core
         uint32_t bus_tick_batch{1}; // bus tick batching (1=accurate, 32=fast)
         int cd_timing_mode{1}; // 0=realistic, 1=compatibility-fast
         uint32_t crash_trace_steps{512}; // default ON for current crash-debug phase
+        int track_runtime_modules{0}; // opt-in coarse runtime module transition tracking
+    };
+
+    struct BootExeInfo
+    {
+        bool valid{false};
+        bool loaded_to_ram{false};
+        bool reached_entry_pc{false};
+        std::string source{};
+        std::string boot_path{};
+        uint32_t disc_lba{0};
+        uint32_t file_size{0};
+        uint32_t entry_pc{0};
+        uint32_t gp0{0};
+        uint32_t t_addr{0};
+        uint32_t t_size{0};
+        uint32_t b_addr{0};
+        uint32_t b_size{0};
+        uint32_t sp_addr{0};
+        uint32_t sp_size{0};
+    };
+
+    struct BootExeEvent
+    {
+        uint64_t step_index{0};
+        std::string stage{};
+        std::string source{};
+        std::string boot_path{};
+        uint32_t pc{0};
+        uint32_t entry_pc{0};
+        bool loaded_to_ram{false};
+        bool reached_entry_pc{false};
+    };
+
+    struct RuntimeModuleEvent
+    {
+        uint64_t step_index{0};
+        std::string kind{};
+        std::string label{};
+        uint32_t pc{0};
+        uint32_t base{0};
+        uint32_t span{0};
+        std::string reason{};
     };
 
     Core(rlog::Logger* logger);
@@ -182,6 +225,14 @@ class Core
         set_psx3d_profile_identity_from_path(exe_path);
         try_load_psx3d_profile();
     }
+    void remember_boot_exe_from_file(const char* path, const char* source, bool loaded_to_ram);
+    bool get_boot_exe_info(BootExeInfo& out) const
+    {
+        out = boot_exe_info_;
+        return out.valid;
+    }
+    std::vector<BootExeEvent> boot_exe_history() const { return boot_exe_history_; }
+    std::vector<RuntimeModuleEvent> runtime_module_history() const { return runtime_module_history_; }
 
     Psx3dModeManager& psx3d_mode_manager() { return psx3d_mode_mgr_; }
     const std::string& psx3d_profile_path() const { return psx3d_profile_path_; }
@@ -212,6 +263,11 @@ class Core
 
   private:
     void clear_psx3d_profile_identity();
+    void clear_boot_exe_info();
+    void record_boot_exe_event(const char* stage, uint32_t pc);
+    void track_runtime_module_pc(uint32_t pc);
+    bool inspect_boot_exe_from_disc(char* err, size_t err_cap);
+    bool inspect_boot_exe_from_file(const char* path, const char* source, bool loaded_to_ram, char* err, size_t err_cap);
     void set_err(char* err, size_t err_cap, const char* msg) const;
     void set_psx3d_profile_identity_from_game_id(const char* game_id);
     void set_psx3d_profile_identity_from_path(const char* path);
@@ -280,6 +336,17 @@ class Core
 
     // PSX EXE params (devkit mode, written to scratchpad at boot)
     std::vector<int32_t> psx_params_{};
+    BootExeInfo boot_exe_info_{};
+    std::vector<BootExeEvent> boot_exe_history_{};
+    bool track_runtime_modules_{false};
+    std::vector<RuntimeModuleEvent> runtime_module_history_{};
+    uint32_t runtime_module_current_base_{0};
+    std::string runtime_module_current_kind_{};
+    std::string runtime_module_current_label_{};
+    uint32_t runtime_module_pending_base_{0};
+    std::string runtime_module_pending_kind_{};
+    std::string runtime_module_pending_label_{};
+    uint32_t runtime_module_pending_count_{0};
     int init_hle_vectors_{0};
     int init_text_hle_{0};
 };

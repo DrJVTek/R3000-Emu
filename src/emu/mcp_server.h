@@ -42,6 +42,16 @@ struct McpBreakpoint
     uint64_t hit_count = 0;
 };
 
+struct McpRunState
+{
+    bool paused = true;
+    uint32_t last_pc = 0;
+    uint32_t last_steps = 0;
+    uint32_t last_frames = 0;
+    bool last_hit_breakpoint = false;
+    uint32_t last_hit_pc = 0;
+};
+
 class IMcpBackend
 {
 public:
@@ -50,6 +60,14 @@ public:
     virtual McpFrontendKind frontend_kind() const = 0;
     virtual bool get_status(McpStatus& out) const = 0;
     virtual bool get_cpu_state(McpCpuState& out) const = 0;
+    virtual bool get_run_state(McpRunState& out) const = 0;
+    virtual bool get_boot_exe_info(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_boot_exe_history(std::string& out_json, std::string& err) const = 0;
+    virtual bool get_runtime_module_history(std::string& out_json, std::string& err) const = 0;
+    virtual bool pause(std::string& err) = 0;
+    virtual bool resume(uint32_t max_steps, uint32_t max_frames, bool stop_on_breakpoint,
+        std::string& out_json, std::string& err) = 0;
+    virtual bool resume_until_boot_exe(uint32_t max_steps, std::string& out_json, std::string& err) = 0;
     virtual bool step(uint32_t count, std::string& err) = 0;
     virtual bool read_ram_u32(uint32_t phys_addr, uint32_t& out, std::string& err) const = 0;
     virtual bool read_cop0(uint32_t reg, uint32_t& out, std::string& err) const = 0;

@@ -59,6 +59,51 @@ static void set_errf(char* err, size_t cap, const char* fmt, const char* a = nul
         std::snprintf(err, cap, "%s", fmt);
 }
 
+static uint32_t read_u32_le_local(const uint8_t* p)
+{
+    return (uint32_t)p[0]
+        | ((uint32_t)p[1] << 8)
+        | ((uint32_t)p[2] << 16)
+        | ((uint32_t)p[3] << 24);
+}
+
+static uint32_t virt_to_phys_ps1_local(uint32_t vaddr)
+{
+    if ((vaddr & 0xE000'0000u) == 0x8000'0000u || (vaddr & 0xE000'0000u) == 0xA000'0000u)
+        return vaddr & 0x1FFF'FFFFu;
+    return vaddr;
+}
+
+static bool parse_psx_exe_header_fields(
+    const uint8_t* buf,
+    size_t size,
+    emu::Core::BootExeInfo& out,
+    char* err,
+    size_t err_cap)
+{
+    if (!buf || size < 0x800)
+    {
+        set_errf(err, err_cap, "PS-X EXE too small");
+        return false;
+    }
+    if (std::memcmp(buf, "PS-X EXE", 8) != 0)
+    {
+        set_errf(err, err_cap, "PS-X EXE magic not found");
+        return false;
+    }
+
+    out.valid = true;
+    out.entry_pc = read_u32_le_local(buf + 0x10);
+    out.gp0 = read_u32_le_local(buf + 0x14);
+    out.t_addr = read_u32_le_local(buf + 0x18);
+    out.t_size = read_u32_le_local(buf + 0x1C);
+    out.b_addr = read_u32_le_local(buf + 0x28);
+    out.b_size = read_u32_le_local(buf + 0x2C);
+    out.sp_addr = read_u32_le_local(buf + 0x30);
+    out.sp_size = read_u32_le_local(buf + 0x34);
+    return true;
+}
+
 Core::Core(rlog::Logger* logger) : logger_(logger), cdrom_(logger), gpu_(logger)
 {
     emu::logf(emu::LogLevel::debug, "CORE", "Core created");
@@ -168,6 +213,257 @@ void Core::set_err(char* err, size_t err_cap, const char* msg) const
     set_errf(err, err_cap, msg);
 }
 
+void Core::clear_boot_exe_info()
+{
+    boot_exe_info_ = BootExeInfo{};
+}
+
+void Core::record_boot_exe_event(const char* stage, uint32_t pc)
+{
+    if (!boot_exe_info_.valid)
+        return;
+    BootExeEvent ev{};
+    ev.step_index = g_step_count;
+    ev.stage = stage ? stage : "unknown";
+    ev.source = boot_exe_info_.source;
+    ev.boot_path = boot_exe_info_.boot_path;
+    ev.pc = pc;
+    ev.entry_pc = boot_exe_info_.entry_pc;
+    ev.loaded_to_ram = boot_exe_info_.loaded_to_ram;
+    ev.reached_entry_pc = boot_exe_info_.reached_entry_pc;
+    boot_exe_history_.push_back(ev);
+    if (boot_exe_history_.size() > 64)
+        boot_exe_history_.erase(boot_exe_history_.begin(), boot_exe_history_.begin() + (ptrdiff_t)(boot_exe_history_.size() - 64));
+}
+
+void Core::track_runtime_module_pc(uint32_t pc)
+{
+    if (!track_runtime_modules_)
+        return;
+
+    struct ModuleSig
+    {
+        std::string kind{};
+        std::string label{};
+        uint32_t base{0};
+        uint32_t span{0};
+    };
+
+    auto classify = [this](uint32_t pc_value) -> ModuleSig {
+        ModuleSig sig{};
+        sig.span = 0x00010000u;
+        if (pc_value >= 0xBFC00000u && pc_value < 0xBFC80000u)
+        {
+            sig.kind = "bios_rom";
+            sig.base = 0xBFC00000u;
+            sig.span = 0x00080000u;
+            sig.label = "bios_rom";
+            return sig;
+        }
+        if (boot_exe_info_.valid && boot_exe_info_.entry_pc != 0)
+        {
+            const uint32_t entry_block = boot_exe_info_.entry_pc & 0xFFFF0000u;
+            const uint32_t pc_block = pc_value & 0xFFFF0000u;
+            if (pc_block == entry_block)
+            {
+                sig.kind = "boot_exe";
+                sig.base = entry_block;
+                sig.label = "boot_exe";
+                return sig;
+            }
+        }
+        if (pc_value >= 0x80000000u && pc_value < 0x80200000u)
+        {
+            sig.kind = "kseg0_ram";
+            sig.base = pc_value & 0xFFFF0000u;
+            sig.label = "kseg0_64k";
+            return sig;
+        }
+        if (pc_value >= 0xA0000000u && pc_value < 0xA0200000u)
+        {
+            sig.kind = "kseg1_ram";
+            sig.base = pc_value & 0xFFFF0000u;
+            sig.label = "kseg1_64k";
+            return sig;
+        }
+        if (pc_value < 0x00200000u)
+        {
+            sig.kind = "kuseg_ram";
+            sig.base = pc_value & 0xFFFF0000u;
+            sig.label = "kuseg_64k";
+            return sig;
+        }
+        sig.kind = "other";
+        sig.base = pc_value & 0xFFFF0000u;
+        sig.label = "other_64k";
+        return sig;
+    };
+
+    const ModuleSig sig = classify(pc);
+    const bool same_as_current =
+        sig.base == runtime_module_current_base_ &&
+        sig.kind == runtime_module_current_kind_;
+    if (same_as_current)
+    {
+        runtime_module_pending_count_ = 0;
+        runtime_module_pending_base_ = 0;
+        runtime_module_pending_kind_.clear();
+        runtime_module_pending_label_.clear();
+        return;
+    }
+
+    const bool same_as_pending =
+        sig.base == runtime_module_pending_base_ &&
+        sig.kind == runtime_module_pending_kind_;
+    if (same_as_pending)
+    {
+        ++runtime_module_pending_count_;
+    }
+    else
+    {
+        runtime_module_pending_base_ = sig.base;
+        runtime_module_pending_kind_ = sig.kind;
+        runtime_module_pending_label_ = sig.label;
+        runtime_module_pending_count_ = 1;
+    }
+
+    constexpr uint32_t kConfirmSteps = 32u;
+    if (runtime_module_pending_count_ < kConfirmSteps)
+        return;
+
+    runtime_module_current_base_ = sig.base;
+    runtime_module_current_kind_ = sig.kind;
+    runtime_module_current_label_ = sig.label;
+    runtime_module_pending_count_ = 0;
+    runtime_module_pending_base_ = 0;
+    runtime_module_pending_kind_.clear();
+    runtime_module_pending_label_.clear();
+
+    RuntimeModuleEvent ev{};
+    ev.step_index = g_step_count;
+    ev.kind = sig.kind;
+    ev.label = sig.label;
+    ev.pc = pc;
+    ev.base = sig.base;
+    ev.span = sig.span;
+    ev.reason = "stable_pc_region_transition";
+    runtime_module_history_.push_back(ev);
+    if (runtime_module_history_.size() > 128)
+        runtime_module_history_.erase(runtime_module_history_.begin(), runtime_module_history_.begin() + (ptrdiff_t)(runtime_module_history_.size() - 128));
+}
+
+bool Core::inspect_boot_exe_from_file(const char* path, const char* source, bool loaded_to_ram, char* err, size_t err_cap)
+{
+    clear_boot_exe_info();
+    if (!path || !*path)
+    {
+        set_err(err, err_cap, "invalid exe path");
+        return false;
+    }
+
+    std::FILE* f = std::fopen(path, "rb");
+    if (!f)
+    {
+        set_err(err, err_cap, "cannot open EXE file");
+        return false;
+    }
+    uint8_t hdr[0x800]{};
+    const size_t got = std::fread(hdr, 1, sizeof(hdr), f);
+    std::fclose(f);
+    if (got < sizeof(hdr))
+    {
+        set_err(err, err_cap, "failed to read EXE header");
+        return false;
+    }
+
+    BootExeInfo info{};
+    if (!parse_psx_exe_header_fields(hdr, got, info, err, err_cap))
+        return false;
+    info.source = source ? source : "file";
+    info.boot_path = path;
+    info.loaded_to_ram = loaded_to_ram;
+    info.reached_entry_pc = false;
+    boot_exe_info_ = info;
+    record_boot_exe_event("inspect_file", 0);
+    return true;
+}
+
+void Core::remember_boot_exe_from_file(const char* path, const char* source, bool loaded_to_ram)
+{
+    char err[128]{};
+    if (!inspect_boot_exe_from_file(path, source, loaded_to_ram, err, sizeof(err)))
+    {
+        emu::logf(emu::LogLevel::debug, "CORE", "remember_boot_exe_from_file skipped: %s", err);
+    }
+}
+
+bool Core::inspect_boot_exe_from_disc(char* err, size_t err_cap)
+{
+    clear_boot_exe_info();
+    char boot_file[128]{};
+    uint32_t cnf_lba = 0, cnf_size = 0;
+    uint8_t cnf_buf[2048]{};
+    if (!cdrom_.iso9660_find_file("\\SYSTEM.CNF;1", &cnf_lba, &cnf_size) ||
+        cnf_lba == 0 ||
+        !cdrom_.read_sector_2048(cnf_lba, cnf_buf))
+    {
+        set_err(err, err_cap, "SYSTEM.CNF not found on disc");
+        return false;
+    }
+
+    const char* cnf = reinterpret_cast<const char*>(cnf_buf);
+    const char* p = std::strstr(cnf, "BOOT");
+    if (!p)
+    {
+        set_err(err, err_cap, "BOOT entry not found in SYSTEM.CNF");
+        return false;
+    }
+    p += 4;
+    while (*p == ' ' || *p == '\t' || *p == '=') ++p;
+    if (std::strncmp(p, "cdrom:", 6) == 0)
+        p += 6;
+    while (*p == '\\') ++p;
+
+    size_t i = 0;
+    while (*p && *p != '\r' && *p != '\n' && *p != ';' && i < sizeof(boot_file) - 1)
+        boot_file[i++] = *p++;
+    boot_file[i] = '\0';
+    if (!boot_file[0])
+    {
+        set_err(err, err_cap, "empty BOOT filename in SYSTEM.CNF");
+        return false;
+    }
+
+    char iso_path[140]{};
+    std::snprintf(iso_path, sizeof(iso_path), "\\%s;1", boot_file);
+    uint32_t exe_lba = 0, exe_size = 0;
+    if (!cdrom_.iso9660_find_file(iso_path, &exe_lba, &exe_size))
+    {
+        set_err(err, err_cap, "boot EXE not found on disc");
+        return false;
+    }
+
+    uint8_t hdr[2048]{};
+    if (!cdrom_.read_sector_2048(exe_lba, hdr))
+    {
+        set_err(err, err_cap, "failed to read boot EXE header sector");
+        return false;
+    }
+
+    BootExeInfo info{};
+    if (!parse_psx_exe_header_fields(hdr, sizeof(hdr), info, err, err_cap))
+        return false;
+    info.source = "disc_system_cnf";
+    info.boot_path = boot_file;
+    info.disc_lba = exe_lba;
+    info.file_size = exe_size;
+    info.loaded_to_ram = false;
+    info.reached_entry_pc = false;
+    boot_exe_info_ = info;
+    record_boot_exe_event("inspect_disc", 0);
+    return true;
+}
+
 bool Core::alloc_ram(uint32_t bytes, char* err, size_t err_cap)
 {
     if (ram_)
@@ -259,6 +555,8 @@ bool Core::insert_disc(const char* path, char* err, size_t err_cap)
     if (ok)
     {
         clear_psx3d_profile_identity();
+        clear_boot_exe_info();
+        boot_exe_history_.clear();
         char boot_file[128]{};
         uint32_t cnf_lba = 0, cnf_size = 0;
         uint8_t cnf_buf[2048]{};
@@ -287,6 +585,11 @@ bool Core::insert_disc(const char* path, char* err, size_t err_cap)
         {
             set_psx3d_profile_identity_from_game_id(boot_file);
             try_load_psx3d_profile();
+        }
+        char inspect_err[128]{};
+        if (!inspect_boot_exe_from_disc(inspect_err, sizeof(inspect_err)))
+        {
+            emu::logf(emu::LogLevel::debug, "CORE", "boot EXE inspect skipped: %s", inspect_err);
         }
     }
     return ok;
@@ -355,6 +658,7 @@ bool Core::init_from_image(const loader::LoadedImage& img, const InitOptions& op
         return false;
     }
     cpu_->set_gte_backend_kind(opt.gte_backend);
+    track_runtime_modules_ = (opt.track_runtime_modules != 0);
 
     // Hook system: pass hooks to Bus for VBlank/write dispatch.
     bus_->set_hooks(&hooks_);
@@ -506,12 +810,43 @@ r3000::Cpu::StepResult Core::step()
     {
         g_boot_start = std::chrono::steady_clock::now();
         g_boot_start_set = true;
+        boot_exe_history_.clear();
+        runtime_module_history_.clear();
+        runtime_module_current_base_ = 0;
+        runtime_module_current_kind_.clear();
+        runtime_module_current_label_.clear();
+        runtime_module_pending_base_ = 0;
+        runtime_module_pending_kind_.clear();
+        runtime_module_pending_label_.clear();
+        runtime_module_pending_count_ = 0;
         emu::logf(emu::LogLevel::info, "MILESTONE", "=== BOOT START (step 0) ===");
     }
 
     const uint32_t pc_before = cpu_->pc();
+    track_runtime_module_pc(pc_before);
+    if (boot_exe_info_.valid && !boot_exe_info_.reached_entry_pc && pc_before == boot_exe_info_.entry_pc)
+    {
+        boot_exe_info_.reached_entry_pc = true;
+        boot_exe_info_.loaded_to_ram = true;
+        record_boot_exe_event("entry_reached", pc_before);
+        emu::logf(emu::LogLevel::info, "CORE", "boot EXE entry reached: pc=0x%08X source=%s path=%s",
+            boot_exe_info_.entry_pc,
+            boot_exe_info_.source.c_str(),
+            boot_exe_info_.boot_path.c_str());
+    }
     const auto res = cpu_->step();
     ++g_step_count;
+    track_runtime_module_pc(cpu_->pc());
+    if (boot_exe_info_.valid && !boot_exe_info_.reached_entry_pc && cpu_->pc() == boot_exe_info_.entry_pc)
+    {
+        boot_exe_info_.reached_entry_pc = true;
+        boot_exe_info_.loaded_to_ram = true;
+        record_boot_exe_event("entry_reached", cpu_->pc());
+        emu::logf(emu::LogLevel::info, "CORE", "boot EXE entry reached: pc=0x%08X source=%s path=%s",
+            boot_exe_info_.entry_pc,
+            boot_exe_info_.source.c_str(),
+            boot_exe_info_.boot_path.c_str());
+    }
 
     // PSX3D analysis refresh trigger (manual queue).
     if (psx3d_mode_mgr_.analysis_enabled() &&
@@ -1345,22 +1680,29 @@ bool Core::fast_boot_from_cd(char* err, size_t err_cap)
         return false;
     }
 
-    auto read_u32_le = [](const uint8_t* p) -> uint32_t {
-        return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-    };
+    BootExeInfo exe_info{};
+    if (!parse_psx_exe_header_fields(exe_buf.get(), sector_count * 2048u, exe_info, err, err_cap))
+        return false;
+    exe_info.source = "fast_boot_cd";
+    exe_info.boot_path = boot_file;
+    exe_info.disc_lba = exe_lba;
+    exe_info.file_size = exe_size;
+    exe_info.loaded_to_ram = true;
+    exe_info.reached_entry_pc = false;
+    boot_exe_info_ = exe_info;
 
-    const uint32_t pc0 = read_u32_le(exe_buf.get() + 0x10);
-    const uint32_t gp0 = read_u32_le(exe_buf.get() + 0x14);
-    const uint32_t t_addr = read_u32_le(exe_buf.get() + 0x18);
-    const uint32_t t_size = read_u32_le(exe_buf.get() + 0x1C);
-    const uint32_t b_addr = read_u32_le(exe_buf.get() + 0x28);
-    const uint32_t b_size = read_u32_le(exe_buf.get() + 0x2C);
-    const uint32_t sp_addr = read_u32_le(exe_buf.get() + 0x30);
-    const uint32_t sp_size = read_u32_le(exe_buf.get() + 0x34);
+    const uint32_t pc0 = exe_info.entry_pc;
+    const uint32_t gp0 = exe_info.gp0;
+    const uint32_t t_addr = exe_info.t_addr;
+    const uint32_t t_size = exe_info.t_size;
+    const uint32_t b_addr = exe_info.b_addr;
+    const uint32_t b_size = exe_info.b_size;
+    const uint32_t sp_addr = exe_info.sp_addr;
+    const uint32_t sp_size = exe_info.sp_size;
 
     // Convert KSEG0/KSEG1 to physical
     auto virt_to_phys = [](uint32_t v) -> uint32_t {
-        return v & 0x1FFF'FFFFu;
+        return virt_to_phys_ps1_local(v);
     };
 
     const uint32_t t_phys = virt_to_phys(t_addr);
@@ -1489,6 +1831,12 @@ bool Core::fast_boot_from_exe(const char* exe_path, ExeBootMode mode, char* err,
     }
     set_psx3d_profile_identity_from_path(exe_path);
     try_load_psx3d_profile();
+    (void)inspect_boot_exe_from_file(
+        exe_path,
+        (mode == ExeBootMode::devkit_hle) ? "fast_boot_exe_devkit_hle" : "fast_boot_exe_devkit",
+        true,
+        err,
+        err_cap);
 
     // 1. Load EXE file into RAM
     loader::LoadedImage img{};
@@ -1593,6 +1941,13 @@ bool Core::boot_bios_with_exe(const char* exe_path, const char* cd_path,
         set_err(err, err_cap, "boot_bios_with_exe: BIOS must be set before calling this");
         return false;
     }
+
+    (void)inspect_boot_exe_from_file(
+        exe_path,
+        (cd_path && *cd_path) ? "bios_with_exe_real_cd" : "bios_with_exe_virtual_cd",
+        false,
+        err,
+        err_cap);
 
     // Insert disc: real CD (for runtime reads) or in-memory virtual disc.
     // The virtual disc exposes SYSTEM.CNF pointing to BOOT.EXE so the BIOS
