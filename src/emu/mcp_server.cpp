@@ -10,7 +10,8 @@
 namespace emu
 {
 
-McpServer::McpServer(IMcpBackend& backend) : backend_(backend)
+McpServer::McpServer(IMcpBackend& backend, IMcpCallGuard* call_guard)
+    : backend_(backend), call_guard_(call_guard)
 {
 }
 
@@ -437,27 +438,52 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "},"
         "{"
         "\"name\":\"emu.get_pad_state\","
-        "\"description\":\"Returns the current digital controller state for the CLI emulator session.\","
-        "\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+        "\"description\":\"Returns the current digital controller state for the emulator session.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"additionalProperties\":false}"
         "},"
         "{"
         "\"name\":\"emu.set_pad_state\","
-        "\"description\":\"Sets the full digital controller mask (active-low: cleared bits are pressed).\","
-        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"buttons_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535}},\"required\":[\"buttons_mask\"],\"additionalProperties\":false}"
+        "\"description\":\"Sets the full digital controller mask for a hardware pad slot (active-low: cleared bits are pressed; slot defaults to 0).\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"buttons_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"required\":[\"buttons_mask\"],\"additionalProperties\":false}"
         "},"
         "{"
         "\"name\":\"emu.tap_pad_buttons\","
         "\"description\":\"Presses one or more digital pad buttons for a short step window, then releases them.\","
-        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"press_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000}},\"required\":[\"press_mask\"],\"additionalProperties\":false}"
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"press_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"required\":[\"press_mask\"],\"additionalProperties\":false}"
         "},"
         "{"
         "\"name\":\"emu.tap_pad_named_buttons\","
         "\"description\":\"Presses one or more digital pad buttons given by comma-separated names like 'cross,left,start'.\","
-        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000}},\"additionalProperties\":false}"
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"release_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.hold_pad_buttons\","
+        "\"description\":\"Holds one or more digital pad buttons until another pad command changes/releases them.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"press_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"required\":[\"press_mask\"],\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.hold_pad_named_buttons\","
+        "\"description\":\"Holds one or more digital pad buttons by comma-separated names like 'left,cross'.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.release_pad_buttons\","
+        "\"description\":\"Releases digital pad buttons by mask; omit release_mask to release all buttons.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"release_mask\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.release_pad_named_buttons\","
+        "\"description\":\"Releases digital pad buttons by comma-separated names like 'left,cross'.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"additionalProperties\":false}"
+        "},"
+        "{"
+        "\"name\":\"emu.release_pad\","
+        "\"description\":\"Releases all digital pad buttons.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"additionalProperties\":false}"
         "},"
         "{"
         "\"name\":\"emu.get_scene_vector_snapshot\","
-        "\"description\":\"Returns a compact vector-style scene snapshot for the current CLI analysis frame.\","
+        "\"description\":\"Returns a compact vector-style scene snapshot for the current analysis frame.\","
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_roots\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64},\"include_hud\":{\"type\":\"boolean\"},\"include_raw_triangles\":{\"type\":\"boolean\"}},\"additionalProperties\":false}"
         "},"
         "{"
@@ -488,7 +514,7 @@ std::string McpServer::handle_tools_list(const std::string& id_raw) const
         "{"
         "\"name\":\"emu.step_with_pad_observation\","
         "\"description\":\"Presses named pad buttons, steps the emulator, then returns scene snapshot, delta and salience in one call.\","
-        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"observe_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_targets\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32}},\"additionalProperties\":false}"
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"names_csv\":{\"type\":\"string\"},\"names\":{\"type\":\"string\"},\"hold_steps\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100000000},\"observe_steps\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000000},\"max_groups\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128},\"max_targets\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32},\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7}},\"additionalProperties\":false}"
         "},"
         "{"
         "\"name\":\"emu.match_render_pattern\","
@@ -1048,9 +1074,11 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
 
     if (name == "emu.get_pad_state")
     {
+        uint32_t slot = 0;
+        extract_json_uint32(json, "slot", slot);
         std::string data;
         std::string err;
-        if (!backend_.get_pad_state(data, err))
+        if (!backend_.get_pad_state(slot, data, err))
             return json_error(id_raw, -32037, err.empty() ? "get pad state failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("pad state", data));
     }
@@ -1060,9 +1088,11 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
         uint32_t buttons_mask = 0;
         if (!extract_json_uint32(json, "buttons_mask", buttons_mask))
             return json_error(id_raw, -32602, "missing buttons_mask");
+        uint32_t slot = 0;
+        extract_json_uint32(json, "slot", slot);
         std::string data;
         std::string err;
-        if (!backend_.set_pad_state((uint16_t)(buttons_mask & 0xFFFFu), data, err))
+        if (!backend_.set_pad_state(slot, (uint16_t)(buttons_mask & 0xFFFFu), data, err))
             return json_error(id_raw, -32038, err.empty() ? "set pad state failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("pad state set", data));
     }
@@ -1074,11 +1104,13 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
             return json_error(id_raw, -32602, "missing press_mask");
         uint32_t hold_steps = 200000;
         uint32_t release_steps = 0;
+        uint32_t slot = 0;
         extract_json_uint32(json, "hold_steps", hold_steps);
         extract_json_uint32(json, "release_steps", release_steps);
+        extract_json_uint32(json, "slot", slot);
         std::string data;
         std::string err;
-        if (!backend_.tap_pad_buttons((uint16_t)(press_mask & 0xFFFFu), hold_steps, release_steps, data, err))
+        if (!backend_.tap_pad_buttons(slot, (uint16_t)(press_mask & 0xFFFFu), hold_steps, release_steps, data, err))
             return json_error(id_raw, -32039, err.empty() ? "tap pad buttons failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("pad buttons tapped", data));
     }
@@ -1092,13 +1124,85 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
             return json_error(id_raw, -32602, "missing names_csv");
         uint32_t hold_steps = 200000;
         uint32_t release_steps = 0;
+        uint32_t slot = 0;
         extract_json_uint32(json, "hold_steps", hold_steps);
         extract_json_uint32(json, "release_steps", release_steps);
+        extract_json_uint32(json, "slot", slot);
         std::string data;
         std::string err;
-        if (!backend_.tap_pad_named_buttons(names.c_str(), hold_steps, release_steps, data, err))
+        if (!backend_.tap_pad_named_buttons(slot, names.c_str(), hold_steps, release_steps, data, err))
             return json_error(id_raw, -32040, err.empty() ? "tap pad named buttons failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("pad buttons tapped by name", data));
+    }
+
+    if (name == "emu.hold_pad_buttons")
+    {
+        uint32_t press_mask = 0;
+        if (!extract_json_uint32(json, "press_mask", press_mask))
+            return json_error(id_raw, -32602, "missing press_mask");
+        uint32_t slot = 0;
+        extract_json_uint32(json, "slot", slot);
+        std::string data;
+        std::string err;
+        if (!backend_.hold_pad_buttons(slot, (uint16_t)(press_mask & 0xFFFFu), data, err))
+            return json_error(id_raw, -32060, err.empty() ? "hold pad buttons failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad buttons held", data));
+    }
+
+    if (name == "emu.hold_pad_named_buttons")
+    {
+        std::string names = extract_json_string(json, "names_csv");
+        if (names.empty())
+            names = extract_json_string(json, "names");
+        if (names.empty())
+            return json_error(id_raw, -32602, "missing names_csv");
+        uint32_t slot = 0;
+        extract_json_uint32(json, "slot", slot);
+        std::string data;
+        std::string err;
+        if (!backend_.hold_pad_named_buttons(slot, names.c_str(), data, err))
+            return json_error(id_raw, -32061, err.empty() ? "hold pad named buttons failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad buttons held by name", data));
+    }
+
+    if (name == "emu.release_pad_buttons")
+    {
+        uint32_t release_mask = 0xFFFFu;
+        uint32_t slot = 0;
+        extract_json_uint32(json, "release_mask", release_mask);
+        extract_json_uint32(json, "slot", slot);
+        std::string data;
+        std::string err;
+        if (!backend_.release_pad_buttons(slot, (uint16_t)(release_mask & 0xFFFFu), data, err))
+            return json_error(id_raw, -32062, err.empty() ? "release pad buttons failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad buttons released", data));
+    }
+
+    if (name == "emu.release_pad_named_buttons")
+    {
+        std::string names = extract_json_string(json, "names_csv");
+        if (names.empty())
+            names = extract_json_string(json, "names");
+        if (names.empty())
+            return json_error(id_raw, -32602, "missing names_csv");
+        uint32_t slot = 0;
+        extract_json_uint32(json, "slot", slot);
+        std::string data;
+        std::string err;
+        if (!backend_.release_pad_named_buttons(slot, names.c_str(), data, err))
+            return json_error(id_raw, -32063, err.empty() ? "release pad named buttons failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad buttons released by name", data));
+    }
+
+    if (name == "emu.release_pad")
+    {
+        uint32_t slot = 0;
+        extract_json_uint32(json, "slot", slot);
+        std::string data;
+        std::string err;
+        if (!backend_.release_pad_buttons(slot, 0xFFFFu, data, err))
+            return json_error(id_raw, -32064, err.empty() ? "release pad failed" : err.c_str());
+        return json_result(id_raw, mcp_text_result("pad released", data));
     }
 
     if (name == "emu.get_scene_vector_snapshot")
@@ -1193,13 +1297,15 @@ std::string McpServer::handle_tools_call(const std::string& id_raw, const std::s
         uint32_t observe_steps = 0;
         uint32_t max_groups = 24;
         uint32_t max_targets = 6;
+        uint32_t slot = 0;
         extract_json_uint32(json, "hold_steps", hold_steps);
         extract_json_uint32(json, "observe_steps", observe_steps);
         extract_json_uint32(json, "max_groups", max_groups);
         extract_json_uint32(json, "max_targets", max_targets);
+        extract_json_uint32(json, "slot", slot);
         std::string data;
         std::string err;
-        if (!backend_.step_with_pad_observation(names.c_str(), hold_steps, observe_steps, max_groups, max_targets, data, err))
+        if (!backend_.step_with_pad_observation(slot, names.c_str(), hold_steps, observe_steps, max_groups, max_targets, data, err))
             return json_error(id_raw, -32046, err.empty() ? "step with pad observation failed" : err.c_str());
         return json_result(id_raw, mcp_text_result("step with pad observation", data));
     }
@@ -1339,7 +1445,31 @@ std::string McpServer::handle_request(const std::string& json)
     if (method == "tools/list")
         return handle_tools_list(id_raw);
     if (method == "tools/call")
-        return handle_tools_call(id_raw, json);
+    {
+        struct GuardScope
+        {
+            IMcpCallGuard* guard{nullptr};
+            std::string tool_name{};
+            bool armed{false};
+            bool succeeded{false};
+            ~GuardScope()
+            {
+                if (armed && guard)
+                    guard->after_tool_call(tool_name.c_str(), succeeded);
+            }
+        } guard_scope{call_guard_, extract_json_string(json, "name"), false, false};
+
+        if (call_guard_)
+        {
+            std::string err;
+            if (!call_guard_->before_tool_call(guard_scope.tool_name.c_str(), err))
+                return json_error(id_raw, -32090, err.empty() ? "MCP call guard failed" : err.c_str());
+            guard_scope.armed = true;
+        }
+        const std::string response = handle_tools_call(id_raw, json);
+        guard_scope.succeeded = response.find("\"error\"") == std::string::npos;
+        return response;
+    }
     if (method == "notifications/initialized")
         return {};
 
@@ -1358,6 +1488,309 @@ int McpServer::run_stdio(std::FILE* in, std::FILE* out)
             return 1;
     }
     emu::logf(emu::LogLevel::info, "MCP", "stdio loop ended");
+    return 0;
+}
+
+} // namespace emu
+
+// =====================================================================
+// TCP transport — Winsock on Windows, BSD sockets elsewhere.
+// Wire format is identical to stdio: `Content-Length: N\r\n\r\n<body>`.
+// =====================================================================
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  pragma comment(lib, "ws2_32.lib")
+   using socket_t = SOCKET;
+   static constexpr socket_t kInvalidSocket = INVALID_SOCKET;
+   static int sock_close(socket_t s) { return ::closesocket(s); }
+   static int sock_errno() { return ::WSAGetLastError(); }
+#else
+#  include <arpa/inet.h>
+#  include <netinet/in.h>
+#  include <sys/select.h>
+#  include <sys/socket.h>
+#  include <sys/time.h>
+#  include <unistd.h>
+#  include <errno.h>
+   using socket_t = int;
+   static constexpr socket_t kInvalidSocket = -1;
+   static int sock_close(socket_t s) { return ::close(s); }
+   static int sock_errno() { return errno; }
+#endif
+
+#include <cstdlib>
+
+namespace emu
+{
+
+namespace
+{
+
+// Buffered reader that pulls from a TCP socket in ≤4KB chunks and exposes
+// line + fixed-size-bytes reads (what the LSP framing needs). Honors the
+// stop flag between recv() calls by using a 500 ms SO_RCVTIMEO on the socket.
+class TcpReader
+{
+public:
+    TcpReader(socket_t s, std::atomic<bool>& stop) : s_(s), stop_(stop) {}
+
+    // Read one line ending with \n (trailing \r stripped). Returns false on
+    // socket error, peer close, or stop-requested.
+    bool read_line(std::string& out)
+    {
+        for (;;)
+        {
+            const auto nl = buf_.find('\n');
+            if (nl != std::string::npos)
+            {
+                out.assign(buf_, 0, nl);
+                if (!out.empty() && out.back() == '\r')
+                    out.pop_back();
+                buf_.erase(0, nl + 1);
+                return true;
+            }
+            if (!recv_more())
+                return false;
+        }
+    }
+
+    // Read exactly `n` bytes. Returns false on socket error / stop / close.
+    bool read_bytes(size_t n, std::string& out)
+    {
+        while (buf_.size() < n)
+        {
+            if (!recv_more())
+                return false;
+        }
+        out.assign(buf_, 0, n);
+        buf_.erase(0, n);
+        return true;
+    }
+
+private:
+    bool recv_more()
+    {
+        while (!stop_.load(std::memory_order_relaxed))
+        {
+            char tmp[4096];
+            const int n = ::recv(s_, tmp, (int)sizeof(tmp), 0);
+            if (n > 0)
+            {
+                buf_.append(tmp, (size_t)n);
+                return true;
+            }
+            if (n == 0)
+                return false; // peer closed
+#ifdef _WIN32
+            const int err = sock_errno();
+            if (err == WSAETIMEDOUT)
+                continue;      // SO_RCVTIMEO tick — re-check stop flag
+#else
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                continue;
+#endif
+            emu::logf(emu::LogLevel::warn, "MCP", "tcp recv failed err=%d", sock_errno());
+            return false;
+        }
+        return false;
+    }
+
+    socket_t s_;
+    std::atomic<bool>& stop_;
+    std::string buf_;
+};
+
+static bool tcp_send_all(socket_t s, const char* data, size_t n)
+{
+    size_t sent = 0;
+    while (sent < n)
+    {
+        const int r = ::send(s, data + sent, (int)(n - sent), 0);
+        if (r <= 0)
+        {
+            emu::logf(emu::LogLevel::warn, "MCP", "tcp send failed err=%d", sock_errno());
+            return false;
+        }
+        sent += (size_t)r;
+    }
+    return true;
+}
+
+static bool tcp_write_message(socket_t s, const std::string& json)
+{
+    char header[64];
+    const int hlen = std::snprintf(header, sizeof(header), "Content-Length: %zu\r\n\r\n", json.size());
+    if (hlen <= 0)
+        return false;
+    if (!tcp_send_all(s, header, (size_t)hlen))
+        return false;
+    if (!json.empty() && !tcp_send_all(s, json.data(), json.size()))
+        return false;
+    return true;
+}
+
+static bool tcp_read_message(TcpReader& r, std::string& out_json)
+{
+    out_json.clear();
+    int content_length = -1;
+    std::string line;
+    for (;;)
+    {
+        if (!r.read_line(line))
+            return false;
+        if (line.empty())
+            break;
+        if (line.rfind("Content-Length:", 0) == 0)
+            content_length = std::atoi(line.c_str() + 15);
+    }
+    if (content_length < 0)
+    {
+        emu::logf(emu::LogLevel::warn, "MCP", "tcp missing Content-Length");
+        return false;
+    }
+    return r.read_bytes((size_t)content_length, out_json);
+}
+
+struct WinsockLife
+{
+#ifdef _WIN32
+    bool ok = false;
+    WinsockLife()
+    {
+        WSADATA d{};
+        ok = (::WSAStartup(MAKEWORD(2, 2), &d) == 0);
+    }
+    ~WinsockLife() { if (ok) ::WSACleanup(); }
+#else
+    bool ok = true;
+#endif
+};
+
+} // anon namespace
+
+int McpServer::run_tcp(uint16_t port, std::atomic<bool>& stop,
+                       std::atomic<int>* startup_result)
+{
+    auto set_startup_result = [startup_result](int value)
+    {
+        if (startup_result)
+            startup_result->store(value, std::memory_order_release);
+    };
+
+    WinsockLife wsa;
+    if (!wsa.ok)
+    {
+        emu::logf(emu::LogLevel::error, "MCP", "WSAStartup failed err=%d", sock_errno());
+        set_startup_result(1);
+        return 1;
+    }
+
+    socket_t listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listener == kInvalidSocket)
+    {
+        emu::logf(emu::LogLevel::error, "MCP", "socket() failed err=%d", sock_errno());
+        set_startup_result(1);
+        return 1;
+    }
+
+    // Allow fast re-bind after editor PIE session restarts.
+    int yes = 1;
+    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&yes), sizeof(yes));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // 127.0.0.1 only
+    addr.sin_port = htons(port);
+    if (::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
+    {
+        emu::logf(emu::LogLevel::error, "MCP", "bind port=%u failed err=%d",
+            (unsigned)port, sock_errno());
+        sock_close(listener);
+        set_startup_result(1);
+        return 1;
+    }
+    if (::listen(listener, 1) != 0)
+    {
+        emu::logf(emu::LogLevel::error, "MCP", "listen failed err=%d", sock_errno());
+        sock_close(listener);
+        set_startup_result(1);
+        return 1;
+    }
+
+    emu::logf(emu::LogLevel::info, "MCP", "TCP server listening on 127.0.0.1:%u", (unsigned)port);
+    set_startup_result(0);
+
+    // Accept loop — one client at a time.
+    while (!stop.load(std::memory_order_relaxed))
+    {
+        // select() with 500ms timeout so we can poll stop between accept attempts.
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(listener, &rfds);
+        timeval tv{0, 500 * 1000};
+        const int sel = ::select((int)listener + 1, &rfds, nullptr, nullptr, &tv);
+        if (sel < 0)
+        {
+#ifdef _WIN32
+            if (sock_errno() == WSAEINTR) continue;
+#else
+            if (errno == EINTR) continue;
+#endif
+            emu::logf(emu::LogLevel::warn, "MCP", "select failed err=%d", sock_errno());
+            break;
+        }
+        if (sel == 0)
+            continue; // timeout — re-check stop
+
+        sockaddr_in peer{};
+#ifdef _WIN32
+        int plen = (int)sizeof(peer);
+#else
+        socklen_t plen = sizeof(peer);
+#endif
+        socket_t client = ::accept(listener, reinterpret_cast<sockaddr*>(&peer), &plen);
+        if (client == kInvalidSocket)
+        {
+            emu::logf(emu::LogLevel::warn, "MCP", "accept failed err=%d", sock_errno());
+            continue;
+        }
+        emu::logf(emu::LogLevel::info, "MCP", "TCP client connected port=%u", (unsigned)ntohs(peer.sin_port));
+
+        // Per-socket 500ms recv timeout so the reader can notice stop.
+#ifdef _WIN32
+        DWORD to_ms = 500;
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
+#else
+        timeval rto{0, 500 * 1000};
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &rto, sizeof(rto));
+#endif
+
+        TcpReader reader(client, stop);
+        std::string req;
+        while (!stop.load(std::memory_order_relaxed) && tcp_read_message(reader, req))
+        {
+            emu::logf(emu::LogLevel::debug, "MCP", "tcp request method=%s",
+                extract_json_string(req, "method").c_str());
+            const std::string resp = handle_request(req);
+            if (!resp.empty() && !tcp_write_message(client, resp))
+                break;
+        }
+
+        sock_close(client);
+        emu::logf(emu::LogLevel::info, "MCP", "TCP client disconnected");
+    }
+
+    sock_close(listener);
+    emu::logf(emu::LogLevel::info, "MCP", "TCP server stopped");
     return 0;
 }
 

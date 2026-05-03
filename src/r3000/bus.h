@@ -45,6 +45,7 @@ class Bus
 {
   public:
     static constexpr uint32_t kNoFaceToken = 0xFFFFFFFFu;
+    static constexpr uint32_t kPadSlotCount = 8;
     struct MemFault
     {
         enum class Kind
@@ -114,6 +115,8 @@ class Bus
     // Bit layout: [Select L3 R3 Start Up Right Down Left | L2 R2 L1 R1 Tri Cir X Sqr]
     void set_pad_buttons(uint16_t v);
     uint16_t pad_buttons() const;
+    void set_pad_slot_buttons(uint32_t slot, uint16_t v);
+    uint16_t pad_slot_buttons(uint32_t slot) const;
     static const void* pad_buttons_addr(); // debug: verify same storage
 
     // Debug: watch d'une adresse RAM (physique) - log les writes byte qui la touchent.
@@ -267,6 +270,8 @@ class Bus
     void sio0_write_data(uint8_t v);
     uint16_t sio0_read_data();
     uint16_t sio0_stat_value(); // non-const: clears ACKINPUT on read
+    void log_sio0_mmio_access(const char* op, uint32_t off, uint32_t value, uint32_t width);
+    void sio0_finalize_short_poll_completion(const char* source);
 
     uint8_t* ram_{nullptr};
     uint32_t ram_size_{0};
@@ -401,6 +406,21 @@ class Bus
     uint8_t sio0_irq_flag_{0};    // IRQ flag (STAT bit 9): cleared by CTRL ACK bit
     uint8_t sio0_tx_phase_{0};    // protocol phase: 0=idle, 1-4=pad transfer bytes
     uint8_t sio0_tx_value_{0};    // value being transmitted (buffered from write)
+    uint8_t sio0_selected_pad_slot_{0};
+    uint8_t sio0_multitap_long_pending_{0};
+    uint8_t sio0_multitap_long_active_{0};
+    uint8_t sio0_short_poll_high_valid_{0};
+    uint8_t sio0_short_poll_high_byte_{0xFF};
+    uint8_t sio0_short_poll_complete_delivered_{0};
+
+    // Controller snapshots sampled at the start of a serial transaction.
+    // Slot 0 is the direct pad path used today; slots 1-7 are reserved so the
+    // same SIO0 packet path can grow into multitap support instead of adding a
+    // separate HLE/input shortcut later.
+    uint16_t sio0_latched_pad_buttons_[kPadSlotCount]{
+        0xFFFFu, 0xFFFFu, 0xFFFFu, 0xFFFFu,
+        0xFFFFu, 0xFFFFu, 0xFFFFu, 0xFFFFu
+    };
 
     // Memory card stub state (device 0x81)
     uint8_t  mc_phase_{0};        // 0=idle, 1+=protocol phases
@@ -425,6 +445,19 @@ class Bus
     void stop_sio0_thread();
     void sio0_wake_thread(uint8_t reason);
     uint8_t  sio0_ack_input_flag_{0};    // ACKINPUT latched flag (set by do_ack, cleared on STAT read)
+
+    // SIO0 diagnostics are per-Bus, not function-static, so UE Live Coding and
+    // repeated Play runs do not exhaust log quotas across emulator instances.
+    uint32_t sio0_mmio_log_count_{0};
+    uint32_t sio0_pad_read_log_count_{0};
+    uint32_t sio0_select_drop_log_count_{0};
+    uint32_t sio0_phase_log_count_{0};
+    uint32_t sio0_pressed_phase_log_count_{0};
+    uint32_t sio0_xfer_log_count_{0};
+    uint32_t sio0_pressed_xfer_log_count_{0};
+    uint32_t sio0_ack_log_count_{0};
+    uint32_t sio0_short_poll_high_log_count_{0};
+    uint32_t sio0_highbyte_focus_log_count_{0};
 
     // pad_buttons_ member REMOVED — now uses global g_pad_buttons in bus.cpp
     // to avoid Hot Reload class-layout offset mismatch.

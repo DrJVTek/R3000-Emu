@@ -74,6 +74,30 @@ Important aussi pour l'architecture:
 - l'integration UE5 sert surtout ensuite a visualiser, valider le rendu, et
   exploiter plus tard le futur cache `mesh3d`
 
+Important aussi pour la strategie d'orchestration:
+
+- il ne faut pas raisonner en "one shot"
+- l'orchestrateur doit faire plusieurs passes si le signal est faible
+- il doit accumuler les preuves hors contexte LLM
+- il doit partir du runtime pour localiser
+- puis utiliser Ghidra pour comprendre
+- puis revenir au runtime pour revalider si necessaire
+
+Autrement dit, le bon schema n'est pas:
+
+- une seule observation
+- une seule ouverture Ghidra
+- une seule classification
+
+Le bon schema est:
+
+1. reconnaissance runtime
+2. ancrage statique Ghidra
+3. exploration de branches
+4. hypotheses de relation
+5. reobservation runtime
+6. synthese finale
+
 ---
 
 ## Regles De Decision LLM
@@ -567,6 +591,44 @@ Output:
 4. `detect_ot_insert_pattern(pc_or_function)`
 5. `summarize_gte_activity(...)`
 6. `find_draw_pipeline(...)`
+
+### Workflow D - "Orchestrateur autonome profond"
+
+But:
+
+- laisser le LLM choisir ses outils
+- mais dans une boucle de decision structuree
+
+Sequence recommandee:
+
+1. faire une passe runtime initiale
+   - inventorier les hotspots GTE
+   - inventorier OT / DMA2 / draw signal
+   - noter les groupes, roots et patterns utiles
+
+2. produire une memoire de notes compacte
+   - pas de dump brut massif
+   - seulement les preuves importantes et leurs relations
+
+3. ouvrir Ghidra de facon ciblee
+   - fonctions candidates
+   - xrefs
+   - callers/callees
+   - wrappers Sony 3D ou builders suspects
+
+4. noter explicitement ce qu'on comprend
+   - lien direct ou indirect entre sortie GTE et packet builder
+   - vertex fill ou poly fill
+   - helper OT, wrapper Sony, macro custom, ou builder intermediaire
+
+5. refaire une ou plusieurs passes runtime
+   - revalider les hypotheses
+   - avancer la scene si necessaire
+   - essayer plusieurs observations si le signal est faible
+
+6. ne classifier qu'a la fin d'un minimum de convergence
+   - si les preuves restent faibles, retourner "insufficient evidence"
+   - ne pas inventer une conclusion forte
 
 ---
 

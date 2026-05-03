@@ -22,7 +22,7 @@
 #include "../mdec/mdec.h"
 
 // ---- Global pad button state (avoids Hot Reload class-layout issues) ----
-static std::atomic<uint16_t> g_pad_buttons{0xFFFFu};
+static std::atomic<uint16_t> g_pad_buttons[r3000::Bus::kPadSlotCount]{};
 
 // ---- Clock period constants ----
 static constexpr double kSysclkPeriodNs = 1e9 / 33868800.0;  // ~29.5ns
@@ -440,11 +440,25 @@ void Bus::dump_stack_watch_context(const char* reason) const
     }
 }
 
-void Bus::set_pad_buttons(uint16_t v) { g_pad_buttons.store(v, std::memory_order_relaxed); }
-uint16_t Bus::pad_buttons() const    { return g_pad_buttons.load(std::memory_order_relaxed); }
+void Bus::set_pad_buttons(uint16_t v) { set_pad_slot_buttons(0, v); }
+uint16_t Bus::pad_buttons() const    { return pad_slot_buttons(0); }
+
+void Bus::set_pad_slot_buttons(uint32_t slot, uint16_t v)
+{
+    if (slot >= kPadSlotCount)
+        return;
+    g_pad_buttons[slot].store(v, std::memory_order_relaxed);
+}
+
+uint16_t Bus::pad_slot_buttons(uint32_t slot) const
+{
+    if (slot >= kPadSlotCount)
+        return 0xFFFFu;
+    return g_pad_buttons[slot].load(std::memory_order_relaxed);
+}
 
 // Debug: returns address of the global pad storage — call from both threads to verify same addr
-const void* Bus::pad_buttons_addr() { return (const void*)&g_pad_buttons; }
+const void* Bus::pad_buttons_addr() { return (const void*)&g_pad_buttons[0]; }
 
 // Forward declaration for use in CDROM IRQ callback.
 static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t cls_match);
@@ -467,7 +481,10 @@ Bus::Bus(
     , logger_(logger)
 {
     // Version marker - update when making changes!
-    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v55 (irq_ext_pending)");
+    emu::logf(emu::LogLevel::warn, "BUS", "BUS source v67 (sio0_duckstation_irq_semantics + gpu_thread_video_mode)");
+
+    for (uint32_t slot = 0; slot < kPadSlotCount; ++slot)
+        g_pad_buttons[slot].store(0xFFFFu, std::memory_order_relaxed);
 
     // Initialize EXP1 region to 0xFF (open bus)
     std::memset(exp1_, 0xFF, sizeof(exp1_));
@@ -1041,16 +1058,22 @@ void Bus::timer_check_irq(int ch, uint32_t old_count)
 // ------------------ SIO0 (minimal controller) ------------------
 uint16_t Bus::sio0_stat_value()
 {
-    // Base: TX Ready 1 (bit 0) | TX Ready 2 (bit 2)
-    uint16_t stat = (uint16_t)(sio0_stat_ | 0x0005u);
+    // Match DuckStation/real JOY_STAT semantics:
+    // - TXRDY   (bit 0): set when TX FIFO is empty
+    // - RXRDY   (bit 1): set when RX FIFO has a byte
+    // - TXDONE  (bit 2): set when TX FIFO is empty AND we are not in the
+    //   active transfer phase. Keeping this bit stuck high during
+    //   Transmitting makes the BIOS/libpad handshake look complete too early.
+    uint16_t stat = (uint16_t)(sio0_stat_ & ~0x0287u);
 
-    // Bit 7: ACKINPUT — latched flag, set by do_ack(), cleared on read.
-    // DuckStation: set in DoACK(), cleared when BIOS reads JOY_STAT.
+    if (!sio0_tx_buf_full_)
+        stat |= 0x0001u;
+    if (!sio0_tx_buf_full_ && sio0_state_ != Sio0State::Transmitting)
+        stat |= 0x0004u;
+
+    // Bit 7: ACKINPUT, latched by the ACK phase and cleared on JOY_STAT read.
     if (sio0_ack_input_flag_)
-    {
         stat |= 0x0080u;
-        sio0_ack_input_flag_ = 0; // clear on read
-    }
 
     if (sio0_rx_ready_)
         stat |= 0x0002u; // RXRDY (bit 1)
@@ -1061,23 +1084,111 @@ uint16_t Bus::sio0_stat_value()
 
 uint16_t Bus::sio0_stat_debug() const { return const_cast<Bus*>(this)->sio0_stat_value(); }
 
+void Bus::sio0_finalize_short_poll_completion(const char* source)
+{
+    if (sio0_short_poll_complete_delivered_)
+        return;
+
+    sio0_short_poll_complete_delivered_ = 1u;
+
+    const uint16_t btns = sio0_latched_pad_buttons_[sio0_selected_pad_slot_];
+    if (btns != 0xFFFFu && sio0_pressed_xfer_log_count_ < 20)
+    {
+        ++sio0_pressed_xfer_log_count_;
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "SIO0 xfer COMPLETE(short-%s, no-forced-event): btns=0x%04X lo=0x%02X hi=0x%02X (#%u)",
+            source, btns, (unsigned)(btns & 0xFF), (unsigned)(btns >> 8), sio0_pressed_xfer_log_count_);
+    }
+}
+
+void Bus::log_sio0_mmio_access(const char* op, uint32_t off, uint32_t value, uint32_t width)
+{
+    bool any_pressed = false;
+    for (uint32_t slot = 0; slot < kPadSlotCount; ++slot)
+        any_pressed = any_pressed || (pad_slot_buttons(slot) != 0xFFFFu) ||
+                      (sio0_latched_pad_buttons_[slot] != 0xFFFFu);
+
+    // Keep idle boot chatter bounded, but never hide the first pressed-pad MMIOs.
+    if (!any_pressed && sio0_mmio_log_count_ >= 160)
+        return;
+    if (any_pressed && sio0_mmio_log_count_ >= 480)
+        return;
+
+    ++sio0_mmio_log_count_;
+    emu::logf(emu::LogLevel::warn, "BUS",
+        "SIO0_MMIO_%s%u off=0x%X val=0x%0*X ctrl=0x%04X stat=0x%04X phase=%u state=%u tx_full=%u rx_ready=%u slot=%u live=0x%04X latched=0x%04X vbl=%u (#%u)",
+        op, width, off, width == 8 ? 2 : 4, value, sio0_ctrl_, sio0_stat_,
+        (unsigned)sio0_tx_phase_, (unsigned)static_cast<uint8_t>(sio0_state_),
+        sio0_tx_buf_full_ ? 1u : 0u, sio0_rx_ready_ ? 1u : 0u,
+        (unsigned)sio0_selected_pad_slot_, pad_slot_buttons(sio0_selected_pad_slot_),
+        sio0_latched_pad_buttons_[sio0_selected_pad_slot_], vblank_total_count_,
+        sio0_mmio_log_count_);
+}
+
 uint16_t Bus::sio0_read_data()
 {
     uint16_t v = sio0_rx_ready_ ? (uint16_t)sio0_rx_data_ : 0x00FFu;
     const uint8_t phase = sio0_tx_phase_;
+    const uint8_t was_ready = sio0_rx_ready_;
+    const uint16_t focused_btns = sio0_latched_pad_buttons_[sio0_selected_pad_slot_];
+    const bool focus_highbyte = (focused_btns & 0xFF00u) != 0xFF00u;
+    const uint8_t allow_short_high_fallback =
+        (!sio0_rx_ready_ &&
+         sio0_short_poll_high_valid_ &&
+         sio0_latched_pad_buttons_[sio0_selected_pad_slot_] != 0xFFFFu) ? 1u : 0u;
+    const uint8_t was_short_high = allow_short_high_fallback ? 1u : 0u;
+    if (was_short_high)
+    {
+        // Some BIOS/game pad paths read the second button byte from JOY_DATA
+        // without clocking a fifth dummy byte. Keep this strictly inside the
+        // SIO0 data path: it returns the high byte latched for the same serial
+        // packet, and never writes game memory or bypasses pad/multitap state.
+        v = sio0_short_poll_high_byte_;
+        sio0_short_poll_high_valid_ = 0u;
+    }
     sio0_rx_ready_ = 0;
 
-    // Log what the game/BIOS actually reads back (first 50 reads with buttons pressed)
+    // Pressed-pad reads are the ground truth for UE/MCP input debugging:
+    // START only proves that SIO0 latched a mask; this proves the BIOS/game
+    // actually consumed the response byte.
     {
-        static uint32_t rd_log = 0;
-        const uint16_t btns = pad_buttons();
-        if (btns != 0xFFFFu && rd_log < 50)
+        bool any_pressed = false;
+        for (uint32_t slot = 0; slot < kPadSlotCount; ++slot)
+            any_pressed = any_pressed || (sio0_latched_pad_buttons_[slot] != 0xFFFFu);
+        if (any_pressed && sio0_pad_read_log_count_ < 160)
         {
-            ++rd_log;
-            emu::logf(emu::LogLevel::debug, "BUS",
-                "SIO0 READ data=0x%02X phase=%u rxrdy=%u btns=0x%04X (#%u)",
-                v, phase, (sio0_rx_ready_ ? 1u : 0u), btns, rd_log);
+            ++sio0_pad_read_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0_PAD_READ data=0x%02X phase=%u rxrdy_before=%u short_high=%u slot=%u latched=0x%04X live=0x%04X (#%u)",
+                v, phase, was_ready ? 1u : 0u, was_short_high ? 1u : 0u, (unsigned)sio0_selected_pad_slot_,
+                sio0_latched_pad_buttons_[sio0_selected_pad_slot_],
+                pad_slot_buttons(sio0_selected_pad_slot_), sio0_pad_read_log_count_);
         }
+    }
+
+    if (focus_highbyte && sio0_highbyte_focus_log_count_ < 120)
+    {
+        ++sio0_highbyte_focus_log_count_;
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "SIO0_HIGHBYTE_FOCUS_READ data=0x%02X phase=%u rxrdy_before=%u short_high=%u ctrl=0x%04X slot=%u latched=0x%04X live=0x%04X (#%u)",
+            v, phase, was_ready ? 1u : 0u, was_short_high ? 1u : 0u, sio0_ctrl_,
+            (unsigned)sio0_selected_pad_slot_, focused_btns, pad_slot_buttons(sio0_selected_pad_slot_),
+            sio0_highbyte_focus_log_count_);
+    }
+
+    if (was_short_high && sio0_short_poll_high_log_count_ < 40)
+    {
+        ++sio0_short_poll_high_log_count_;
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "SIO0_PAD_SHORT_HIGH_FALLBACK data=0x%02X slot=%u latched=0x%04X live=0x%04X vbl=%u (#%u)",
+            v, (unsigned)sio0_selected_pad_slot_,
+            sio0_latched_pad_buttons_[sio0_selected_pad_slot_],
+            pad_slot_buttons(sio0_selected_pad_slot_), vblank_total_count_,
+            sio0_short_poll_high_log_count_);
+    }
+    if (was_short_high)
+    {
+        sio0_finalize_short_poll_completion("read");
     }
 
     return v;
@@ -1086,6 +1197,8 @@ uint16_t Bus::sio0_read_data()
 void Bus::sio0_write_ctrl(uint16_t v)
 {
     const uint16_t old_ctrl = sio0_ctrl_; // save BEFORE overwrite
+    const uint16_t focused_btns = sio0_latched_pad_buttons_[sio0_selected_pad_slot_];
+    const bool focus_highbyte = (focused_btns & 0xFF00u) != 0xFF00u;
 
     // Bit 6 (0x0040) = Reset: soft-reset SIO (like DuckStation SoftReset)
     if (v & 0x0040u)
@@ -1105,6 +1218,12 @@ void Bus::sio0_write_ctrl(uint16_t v)
         sio0_tx_buf_full_ = 0;
         sio0_tx_value_ = 0;
         sio0_ack_input_flag_ = 0;
+        sio0_selected_pad_slot_ = 0;
+        sio0_multitap_long_pending_ = 0;
+        sio0_multitap_long_active_ = 0;
+        sio0_short_poll_high_valid_ = 0;
+        sio0_short_poll_high_byte_ = 0xFFu;
+        sio0_short_poll_complete_delivered_ = 0u;
         return; // reset clears everything, nothing more to do
     }
 
@@ -1125,7 +1244,57 @@ void Bus::sio0_write_ctrl(uint16_t v)
     const bool new_select = (v & 0x0002u) != 0;
     if (old_select && !new_select)
     {
+        if (sio0_tx_phase_ == 4u && sio0_short_poll_high_valid_ && !sio0_multitap_long_active_ && !sio0_rx_ready_)
+        {
+            // Some BIOS/game pad polls drop SELECT immediately after reading the
+            // low byte, before the controller ACK window completes. Preserve the
+            // second button byte in RX on this deselect edge so the following
+            // JOY_DATA read still sees the same latched packet.
+            sio0_rx_data_ = sio0_short_poll_high_byte_;
+            sio0_rx_ready_ = 1u;
+            sio0_short_poll_high_valid_ = 0u;
+            if (sio0_short_poll_high_log_count_ < 40)
+            {
+                ++sio0_short_poll_high_log_count_;
+                emu::logf(emu::LogLevel::warn, "BUS",
+                    "SIO0_PAD_SHORT_HIGH_SELECT data=0x%02X slot=%u latched=0x%04X live=0x%04X vbl=%u (#%u)",
+                    sio0_rx_data_, (unsigned)sio0_selected_pad_slot_,
+                    sio0_latched_pad_buttons_[sio0_selected_pad_slot_],
+                    pad_slot_buttons(sio0_selected_pad_slot_), vblank_total_count_,
+                    sio0_short_poll_high_log_count_);
+            }
+
+            // Normal long transfers deliver the pad event when phase 4 ends.
+            // Short polls that drop SELECT early must still complete that same
+            // logical pad transaction for BIOS/libpad users.
+            sio0_finalize_short_poll_completion("select");
+        }
+
+        if (focus_highbyte && sio0_highbyte_focus_log_count_ < 120)
+        {
+            ++sio0_highbyte_focus_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0_HIGHBYTE_FOCUS_SELECT old=0x%04X new=0x%04X phase=%u state=%u rxrdy=%u short_valid=%u short_byte=0x%02X slot=%u latched=0x%04X live=0x%04X (#%u)",
+                old_ctrl, v, (unsigned)sio0_tx_phase_, (unsigned)static_cast<uint8_t>(sio0_state_),
+                sio0_rx_ready_ ? 1u : 0u, sio0_short_poll_high_valid_ ? 1u : 0u, sio0_short_poll_high_byte_,
+                (unsigned)sio0_selected_pad_slot_, focused_btns, pad_slot_buttons(sio0_selected_pad_slot_),
+                sio0_highbyte_focus_log_count_);
+        }
+
+        bool any_pressed = false;
+        for (uint32_t slot = 0; slot < kPadSlotCount; ++slot)
+            any_pressed = any_pressed || (sio0_latched_pad_buttons_[slot] != 0xFFFFu);
+        if ((any_pressed || sio0_tx_phase_ != 0u || sio0_state_ != Sio0State::Idle) && sio0_select_drop_log_count_ < 80)
+        {
+            ++sio0_select_drop_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0_PAD_SELECT_DROP phase=%u state=%u ctrl_old=0x%04X ctrl_new=0x%04X slot=%u latched=0x%04X (#%u)",
+                (unsigned)sio0_tx_phase_, (unsigned)static_cast<uint8_t>(sio0_state_), old_ctrl, v,
+                (unsigned)sio0_selected_pad_slot_, sio0_latched_pad_buttons_[sio0_selected_pad_slot_],
+                sio0_select_drop_log_count_);
+        }
         sio0_tx_phase_ = 0u; // reset protocol phase (device deselected)
+        sio0_multitap_long_active_ = 0;
     }
 
     // If SELECT=0 or TXEN=0, abort any in-progress transfer
@@ -1179,13 +1348,41 @@ void Bus::sio0_do_transfer()
     const uint8_t v = sio0_tx_value_;
     uint8_t resp = 0xFFu;
     const uint32_t prev_phase = sio0_tx_phase_;
+    const uint16_t focused_btns_before = sio0_latched_pad_buttons_[sio0_selected_pad_slot_];
+    const bool focus_highbyte_before = (focused_btns_before & 0xFF00u) != 0xFF00u;
+    const auto multitap_byte = [this](uint32_t index) -> uint8_t {
+        const uint32_t slot = index / 8u;
+        const uint32_t off = index % 8u;
+        const uint16_t btns = (slot < kPadSlotCount) ? sio0_latched_pad_buttons_[slot] : 0xFFFFu;
+        switch (off)
+        {
+            case 0: return 0x41u; // digital pad ID low
+            case 1: return 0x5Au; // digital pad ID high/status
+            case 2: return (uint8_t)(btns & 0xFFu);
+            case 3: return (uint8_t)(btns >> 8);
+            default: return 0xFFu; // digital pads have no analog halfwords
+        }
+    };
 
     switch (sio0_tx_phase_)
     {
         case 0:
             resp = 0xFFu;
-            if (v == 0x01u)
+            if (v >= 0x01u && v <= 0x04u)
+            {
+                // Latch controller states for this serial transaction.
+                // UE/MCP may update the shared mask while SIO0 is still sending
+                // bytes; real hardware returns a coherent packet for one poll.
+                for (uint32_t slot = 0; slot < kPadSlotCount; ++slot)
+                    sio0_latched_pad_buttons_[slot] = pad_slot_buttons(slot);
+                sio0_selected_pad_slot_ = (uint8_t)(v - 1u);
+                sio0_multitap_long_active_ = (v == 0x01u && sio0_multitap_long_pending_) ? 1u : 0u;
+                sio0_short_poll_high_valid_ = 0u;
+                sio0_short_poll_complete_delivered_ = 0u;
+                if (v == 0x01u)
+                    sio0_multitap_long_pending_ = 0u;
                 sio0_tx_phase_ = 1u;
+            }
             else if (v == 0x81u)
             {
                 // Memory card (slot 1) — NOT IMPLEMENTED
@@ -1211,30 +1408,68 @@ void Bus::sio0_do_transfer()
             break;
         case 1:
             (void)v;
-            resp = 0x41u; // digital pad ID
+            resp = sio0_multitap_long_active_ ? 0x80u : 0x41u; // multitap or digital pad ID low
             sio0_tx_phase_ = 2u;
             break;
         case 2:
             resp = 0x5Au; // access byte
+            if (!sio0_multitap_long_active_ && v == 0x01u)
+                sio0_multitap_long_pending_ = 1u; // method 1: next Slot A access returns A-D data
             sio0_tx_phase_ = 3u;
             break;
         case 3:
         {
-            const uint16_t btns = pad_buttons();
-            resp = (uint8_t)(btns & 0xFF);
-            sio0_tx_phase_ = 4u;
+            if (sio0_multitap_long_active_)
+            {
+                resp = multitap_byte(0);
+                sio0_tx_phase_ = 4u;
+            }
+            else
+            {
+                const uint16_t btns = sio0_latched_pad_buttons_[sio0_selected_pad_slot_];
+                resp = (uint8_t)(btns & 0xFF);
+                sio0_short_poll_high_byte_ = (uint8_t)(btns >> 8);
+                sio0_short_poll_high_valid_ = 1u;
+                sio0_tx_phase_ = 4u;
+            }
             break;
         }
         case 4:
         {
-            const uint16_t btns = pad_buttons();
-            resp = (uint8_t)(btns >> 8);
-            sio0_tx_phase_ = 0u;
+            if (sio0_multitap_long_active_)
+            {
+                resp = multitap_byte(1);
+                sio0_tx_phase_ = 5u;
+            }
+            else
+            {
+                const uint16_t btns = sio0_latched_pad_buttons_[sio0_selected_pad_slot_];
+                resp = (uint8_t)(btns >> 8);
+                sio0_short_poll_high_valid_ = 0u;
+                sio0_tx_phase_ = 0u;
+            }
             break;
         }
         default:
-            resp = 0xFFu;
-            sio0_tx_phase_ = 0u;
+            if (sio0_multitap_long_active_ && sio0_tx_phase_ >= 5u && sio0_tx_phase_ < 35u)
+            {
+                const uint32_t index = (uint32_t)sio0_tx_phase_ - 3u;
+                resp = multitap_byte(index);
+                if (sio0_tx_phase_ == 34u)
+                {
+                    sio0_tx_phase_ = 0u;
+                    sio0_multitap_long_active_ = 0u;
+                }
+                else
+                {
+                    sio0_tx_phase_ = (uint8_t)(sio0_tx_phase_ + 1u);
+                }
+            }
+            else
+            {
+                resp = 0xFFu;
+                sio0_tx_phase_ = 0u;
+            }
             break;
     }
 
@@ -1244,23 +1479,51 @@ void Bus::sio0_do_transfer()
 
     // Debug: log SIO0 phase transitions after game boot (vbl > 300)
     {
-        static uint32_t phase_log = 0;
-        if (phase_log < 50 && vblank_total_count_ > 300)
+        if (sio0_phase_log_count_ < 50 && vblank_total_count_ > 300)
         {
-            ++phase_log;
+            ++sio0_phase_log_count_;
             emu::logf(emu::LogLevel::warn, "SIO0_PHASE",
                 "[%u] tx=0x%02X resp=0x%02X phase=%u->%u ack=%d vbl=%u",
-                phase_log, v, resp, prev_phase, sio0_tx_phase_,
+                sio0_phase_log_count_, v, resp, prev_phase, sio0_tx_phase_,
                 (sio0_tx_phase_ != 0u) ? 1 : 0, vblank_total_count_);
+        }
+
+        bool any_pressed = false;
+        for (uint32_t slot = 0; slot < kPadSlotCount; ++slot)
+            any_pressed = any_pressed || (sio0_latched_pad_buttons_[slot] != 0xFFFFu);
+        if (any_pressed && sio0_pressed_phase_log_count_ < 240)
+        {
+            ++sio0_pressed_phase_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0_PAD_PHASE tx=0x%02X resp=0x%02X phase=%u->%u ack=%u slot=%u latched=0x%04X live=0x%04X long=%u vbl=%u (#%u)",
+                v, resp, (unsigned)prev_phase, (unsigned)sio0_tx_phase_,
+                (sio0_tx_phase_ != 0u) ? 1u : 0u, (unsigned)sio0_selected_pad_slot_,
+                sio0_latched_pad_buttons_[sio0_selected_pad_slot_],
+                pad_slot_buttons(sio0_selected_pad_slot_),
+                (unsigned)sio0_multitap_long_active_, vblank_total_count_,
+                sio0_pressed_phase_log_count_);
         }
     }
 
-    // SIO0 IRQ: fire on every transfer completion.
-    // The PS1 SIO0 fires IRQ7 whenever a byte transfer completes.
-    // Games (especially Soul Reaver's custom MC driver) poll i_stat
-    // bit 7 directly without necessarily setting RXINTEN/ACKINTEN.
-    sio0_irq_flag_ = 1;
-    i_stat_ |= (1u << 7); // SIO0 IRQ
+    if (focus_highbyte_before && sio0_highbyte_focus_log_count_ < 120)
+    {
+        ++sio0_highbyte_focus_log_count_;
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "SIO0_HIGHBYTE_FOCUS_PHASE tx=0x%02X resp=0x%02X phase=%u->%u ack=%u ctrl=0x%04X state=%u rxrdy=%u short_valid=%u short_byte=0x%02X slot=%u latched=0x%04X live=0x%04X (#%u)",
+            v, resp, (unsigned)prev_phase, (unsigned)sio0_tx_phase_, (sio0_tx_phase_ != 0u) ? 1u : 0u,
+            sio0_ctrl_, (unsigned)static_cast<uint8_t>(sio0_state_), sio0_rx_ready_ ? 1u : 0u,
+            sio0_short_poll_high_valid_ ? 1u : 0u, sio0_short_poll_high_byte_,
+            (unsigned)sio0_selected_pad_slot_, focused_btns_before, pad_slot_buttons(sio0_selected_pad_slot_),
+            sio0_highbyte_focus_log_count_);
+    }
+
+    // DuckStation/real JOY semantics: a completed RX byte raises INTR only
+    // when RXINTEN is enabled, not on every transfer completion.
+    if (sio0_ctrl_ & 0x0800u)
+    {
+        sio0_irq_flag_ = 1u;
+        i_stat_ |= (1u << 7);
+    }
 
     // Does the device ACK this byte? All bytes except the last one.
     bool ack = (sio0_tx_phase_ != 0u);
@@ -1270,11 +1533,12 @@ void Bus::sio0_do_transfer()
         // No ACK: transfer ends here
         sio0_end_transfer();
 
-        // Deliver SIO0 event when full pad transfer completes (phase 4→0)
-        if (prev_phase == 4u)
+        // Full pad transfer completes here, but we no longer force the BIOS
+        // event table to READY from the bus. The last known-good input path
+        // relied on the real SIO0/IRQ/BIOS chain rather than a direct RAM
+        // mutation in the event table.
+        if (prev_phase == 4u || prev_phase == 34u)
         {
-            deliver_events_for_class(ram_, ram_size_, 0xF000'0009u);
-
             // Debug: dump pad buffer after SIO0 transfer complete.
             // Scan RAM for the BIOS pad buffer by looking for the pattern
             // that InitTAP wrote (IsOK + ID at known addresses).
@@ -1300,7 +1564,7 @@ void Bus::sio0_do_transfer()
                     rd8(base + 1),
                     rd16(base + 2),
                     rd8(base + 4), rd8(base + 5),
-                    pad_buttons());
+                    sio0_latched_pad_buttons_[0]);
             }
         }
     }
@@ -1319,27 +1583,39 @@ void Bus::sio0_do_transfer()
 
     // Trace SIO0 transfers
     {
-        static uint32_t sio0_xfer_count = 0;
-        static uint32_t sio0_pressed_log = 0;
-        const uint16_t btns = pad_buttons();
+        const uint16_t btns = sio0_latched_pad_buttons_[0];
 
         if (prev_phase == 0 && sio0_tx_phase_ == 1u)
         {
-            ++sio0_xfer_count;
-            if (sio0_xfer_count <= 20 || (sio0_xfer_count % 100 == 0))
+            ++sio0_xfer_log_count_;
+            if (sio0_latched_pad_buttons_[0] != 0xFFFFu ||
+                sio0_xfer_log_count_ <= 20 ||
+                (sio0_xfer_log_count_ % 100 == 0))
             {
                 emu::logf(emu::LogLevel::warn, "BUS",
-                    "SIO0 xfer #%u START: btns=0x%04X baud=%u vbl=%u",
-                    sio0_xfer_count, btns, (unsigned)sio0_baud_, vblank_total_count_);
+                    "SIO0 xfer #%u START: slot=%u long=%u latched_btns=0x%04X live_btns=0x%04X baud=%u vbl=%u",
+                    sio0_xfer_log_count_, (unsigned)sio0_selected_pad_slot_,
+                    (unsigned)sio0_multitap_long_active_,
+                    sio0_latched_pad_buttons_[sio0_selected_pad_slot_], pad_slot_buttons(sio0_selected_pad_slot_),
+                    (unsigned)sio0_baud_, vblank_total_count_);
             }
         }
 
-        if (btns != 0xFFFFu && prev_phase == 4u && sio0_pressed_log < 20)
+        if (btns != 0xFFFFu && prev_phase == 4u && !sio0_multitap_long_active_ && sio0_pressed_xfer_log_count_ < 20)
         {
-            ++sio0_pressed_log;
-            emu::logf(emu::LogLevel::debug, "BUS",
+            ++sio0_pressed_xfer_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
                 "SIO0 xfer COMPLETE: btns=0x%04X lo=0x%02X hi=0x%02X (#%u)",
-                btns, (unsigned)(btns & 0xFF), (unsigned)(btns >> 8), sio0_pressed_log);
+                btns, (unsigned)(btns & 0xFF), (unsigned)(btns >> 8), sio0_pressed_xfer_log_count_);
+        }
+        if (prev_phase == 34u && sio0_pressed_xfer_log_count_ < 20)
+        {
+            ++sio0_pressed_xfer_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0 multitap COMPLETE: A=0x%04X B=0x%04X C=0x%04X D=0x%04X (#%u)",
+                sio0_latched_pad_buttons_[0], sio0_latched_pad_buttons_[1],
+                sio0_latched_pad_buttons_[2], sio0_latched_pad_buttons_[3],
+                sio0_pressed_xfer_log_count_);
         }
     }
 }
@@ -1348,12 +1624,70 @@ void Bus::sio0_do_transfer()
 void Bus::sio0_do_ack()
 {
     sio0_ack_input_flag_ = 1; // Latched — cleared when BIOS reads STAT
+    const uint16_t focused_btns = sio0_latched_pad_buttons_[sio0_selected_pad_slot_];
+    const bool focus_highbyte = (focused_btns & 0xFF00u) != 0xFF00u;
 
     // ACKINTEN: CTRL bit 12 (0x1000)
-    sio0_irq_flag_ = 1;
     if (sio0_ctrl_ & 0x1000u)
     {
+        sio0_irq_flag_ = 1u;
         i_stat_ |= (1u << 7); // SIO0 IRQ via ACK
+    }
+
+    if (sio0_tx_phase_ == 4u && sio0_short_poll_high_valid_ && !sio0_multitap_long_active_)
+    {
+        // Ridge Racer's short pad poll consumes the second button byte via a
+        // plain JOY_DATA read after ACK, without clocking an extra dummy TX
+        // byte. Queue the already-latched high byte in RX so the BIOS/game sees
+        // a normal RX-ready byte instead of depending on a read-time fallback.
+        sio0_rx_data_ = sio0_short_poll_high_byte_;
+        sio0_rx_ready_ = 1u;
+        // Keep phase 4 alive here: some games read the queued byte directly
+        // after ACK, others still clock one more dummy TX and expect the
+        // regular phase-4 response path to return the same high byte.
+        // Dropping back to phase 0 too early makes that 5th byte come back
+        // as 0xFF, which is exactly what broke "fire" while movement worked.
+        if (sio0_short_poll_high_log_count_ < 40)
+        {
+            ++sio0_short_poll_high_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0_PAD_SHORT_HIGH_QUEUE data=0x%02X slot=%u latched=0x%04X live=0x%04X vbl=%u (#%u)",
+                sio0_rx_data_, (unsigned)sio0_selected_pad_slot_,
+                sio0_latched_pad_buttons_[sio0_selected_pad_slot_],
+                pad_slot_buttons(sio0_selected_pad_slot_), vblank_total_count_,
+                sio0_short_poll_high_log_count_);
+        }
+
+        // The short-poll path now exposes the last byte via RX-ready after ACK.
+        // Finalize the SIO0 controller event here so BIOS/libpad code sees the
+        // same transaction completion semantics as the original 5-byte path.
+        sio0_finalize_short_poll_completion("ack");
+    }
+
+    if (focus_highbyte && sio0_highbyte_focus_log_count_ < 120)
+    {
+        ++sio0_highbyte_focus_log_count_;
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "SIO0_HIGHBYTE_FOCUS_ACK phase=%u ctrl=0x%04X tx_full=%u can_next=%u rxrdy=%u short_valid=%u short_byte=0x%02X slot=%u latched=0x%04X live=0x%04X (#%u)",
+            (unsigned)sio0_tx_phase_, sio0_ctrl_, sio0_tx_buf_full_ ? 1u : 0u, sio0_can_transfer() ? 1u : 0u,
+            sio0_rx_ready_ ? 1u : 0u, sio0_short_poll_high_valid_ ? 1u : 0u, sio0_short_poll_high_byte_,
+            (unsigned)sio0_selected_pad_slot_, focused_btns, pad_slot_buttons(sio0_selected_pad_slot_),
+            sio0_highbyte_focus_log_count_);
+    }
+
+    {
+        bool any_pressed = false;
+        for (uint32_t slot = 0; slot < kPadSlotCount; ++slot)
+            any_pressed = any_pressed || (sio0_latched_pad_buttons_[slot] != 0xFFFFu);
+        if (any_pressed && sio0_ack_log_count_ < 160)
+        {
+            ++sio0_ack_log_count_;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "SIO0_PAD_ACK phase=%u ctrl=0x%04X tx_full=%u can_next=%u slot=%u latched=0x%04X (#%u)",
+                (unsigned)sio0_tx_phase_, sio0_ctrl_, sio0_tx_buf_full_ ? 1u : 0u,
+                sio0_can_transfer() ? 1u : 0u, (unsigned)sio0_selected_pad_slot_,
+                sio0_latched_pad_buttons_[sio0_selected_pad_slot_], sio0_ack_log_count_);
+        }
     }
 
     sio0_end_transfer();
@@ -1498,6 +1832,11 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
     if (phys >= kSio0Base && phys < kSio0Base + kSio0Size)
     {
         const uint32_t off = phys - kSio0Base;
+        if (sio0_state_ == Sio0State::Transmitting && (off == 0x0u || off == 0x4u || off == 0x5u))
+        {
+            sio0_transfer_countdown_ = 0;
+            sio0_do_transfer();
+        }
         switch (off)
         {
             case 0x0: out = (uint8_t)(sio0_read_data() & 0xFFu); break;       // DATA
@@ -1511,6 +1850,9 @@ bool Bus::read_u8(uint32_t addr, uint8_t& out, MemFault& fault)
             case 0xF: out = (uint8_t)((sio0_baud_ >> 8) & 0xFFu); break;       // BAUD high
             default: out = 0; break;
         }
+        if (off == 0x4u || off == 0x5u)
+            sio0_ack_input_flag_ = 0;
+        log_sio0_mmio_access("RD", off, out, 8);
         return true;
     }
 
@@ -1647,6 +1989,11 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
     if (phys >= kSio0Base && phys < kSio0Base + kSio0Size)
     {
         const uint32_t off = phys - kSio0Base;
+        if (sio0_state_ == Sio0State::Transmitting && (off == 0x0u || off == 0x4u))
+        {
+            sio0_transfer_countdown_ = 0;
+            sio0_do_transfer();
+        }
         switch (off)
         {
             case 0x0: out = sio0_read_data(); break;    // DATA
@@ -1656,6 +2003,9 @@ bool Bus::read_u16(uint32_t addr, uint16_t& out, MemFault& fault)
             case 0xE: out = sio0_baud_; break;          // BAUD
             default: out = 0; break;
         }
+        if (off == 0x4u)
+            sio0_ack_input_flag_ = 0;
+        log_sio0_mmio_access("RD", off, out, 16);
         return true;
     }
 
@@ -2263,6 +2613,7 @@ bool Bus::write_u8(uint32_t addr, uint8_t v, MemFault& fault)
             default:
                 break;
         }
+        log_sio0_mmio_access("WR", off, v, 8);
         return true;
     }
 
@@ -2486,6 +2837,7 @@ bool Bus::write_u16(uint32_t addr, uint16_t v, MemFault& fault)
             case 0x4: sio0_stat_ = v; break;  // STAT (rarely written)
             default: break;
         }
+        log_sio0_mmio_access("WR", off, v, 16);
         return true;
     }
 
@@ -3861,6 +4213,7 @@ void Bus::dma_finish(int ch)
 // dispatch certain IRQs (e.g. CDROM) without re-entrancy issues.
 static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t cls_match)
 {
+    static uint32_t s_pad_event_log_count = 0;
     const uint32_t ptr_off = 0x0120 & (ram_size - 1);
     const uint32_t evt_ptr = (uint32_t)ram[ptr_off] |
                              ((uint32_t)ram[ptr_off + 1] << 8) |
@@ -3876,6 +4229,8 @@ static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t c
                               ((uint32_t)ram[size_off + 3] << 24);
     const uint32_t max_entries = (tbl_size > 0) ? (tbl_size / 0x1C) : 16;
     const uint32_t base_phys = evt_ptr & (ram_size - 1);
+    uint32_t matched = 0;
+    uint32_t readied = 0;
 
     for (uint32_t i = 0; i < max_entries && i < 64; ++i)
     {
@@ -3889,12 +4244,29 @@ static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t c
                              ((uint32_t)ram[eoff + 3] << 24);
         if (cls != cls_match)
             continue;
+        ++matched;
 
         const uint32_t st_off = eoff + 0x04;
         const uint32_t status = (uint32_t)ram[st_off] |
                                 ((uint32_t)ram[st_off + 1] << 8) |
                                 ((uint32_t)ram[st_off + 2] << 16) |
                                 ((uint32_t)ram[st_off + 3] << 24);
+        const uint32_t spec = (uint32_t)ram[eoff + 8] |
+                              ((uint32_t)ram[eoff + 9] << 8) |
+                              ((uint32_t)ram[eoff + 10] << 16) |
+                              ((uint32_t)ram[eoff + 11] << 24);
+        const uint32_t mode = (uint32_t)ram[eoff + 12] |
+                              ((uint32_t)ram[eoff + 13] << 8) |
+                              ((uint32_t)ram[eoff + 14] << 16) |
+                              ((uint32_t)ram[eoff + 15] << 24);
+
+        if (cls_match == 0xF000'0009u && s_pad_event_log_count < 64u)
+        {
+            ++s_pad_event_log_count;
+            emu::logf(emu::LogLevel::warn, "BUS",
+                "PAD_EVENT_SCAN[%u] idx=%u cls=0x%08X spec=0x%08X status=0x%08X mode=0x%08X evt_ptr=0x%08X",
+                s_pad_event_log_count, i, cls, spec, status, mode, evt_ptr);
+        }
 
         if (!(status & 0x2000u))
             continue;
@@ -3905,6 +4277,15 @@ static void deliver_events_for_class(uint8_t* ram, uint32_t ram_size, uint32_t c
         ram[st_off + 1] = (uint8_t)((new_status >> 8) & 0xFF);
         ram[st_off + 2] = (uint8_t)((new_status >> 16) & 0xFF);
         ram[st_off + 3] = (uint8_t)((new_status >> 24) & 0xFF);
+        ++readied;
+    }
+
+    if (cls_match == 0xF000'0009u && s_pad_event_log_count < 64u)
+    {
+        ++s_pad_event_log_count;
+        emu::logf(emu::LogLevel::warn, "BUS",
+            "PAD_EVENT_DELIVER[%u] cls=0x%08X matched=%u readied=%u evt_ptr=0x%08X tbl_size=0x%08X",
+            s_pad_event_log_count, cls_match, matched, readied, evt_ptr, tbl_size);
     }
 }
 
@@ -3940,7 +4321,11 @@ void Bus::set_external_vblank(bool enabled)
         // The drive motor is async but the CDROM controller state machine
         // (pending IRQ, seek delay, read_pending_irq1_) is clocked by sysclk.
         // A sector thread conflicts with this state machine.
-        start_gpu_thread(true); // PAL default — TODO: detect from disc region
+        const bool pal = gpu_ ? (gpu_->stage67_debug().is_pal != 0u) : true;
+        emu::logf(emu::LogLevel::info, "BUS",
+            "External VBlank enable: gpu_video_mode=%s (stage67.is_pal=%u)",
+            pal ? "PAL" : "NTSC", gpu_ ? gpu_->stage67_debug().is_pal : 1u);
+        start_gpu_thread(pal);
         start_timer_threads();
         emu::logf(emu::LogLevel::info, "BUS", "IRQ threads started (GPU + Timers)");
     }
@@ -4014,22 +4399,42 @@ void Bus::start_gpu_thread(bool pal)
     gpu_thread_pal_ = pal;
     gpu_thread_running_.store(true, std::memory_order_release);
     gpu_thread_ = std::thread([this]() {
-        // Scanline timing:
-        // PAL:  314 scanlines/frame, 50 frames/s → ~63.7µs per scanline
-        // NTSC: 263 scanlines/frame, 60 frames/s → ~63.5µs per scanline
-        const uint32_t scanlines_per_frame = gpu_thread_pal_ ? 314u : 263u;
-        const uint32_t vblank_start = gpu_thread_pal_ ? 288u : 240u;
-        const auto scanline_interval = gpu_thread_pal_
-            ? std::chrono::nanoseconds(63694)  // 20ms / 314
-            : std::chrono::nanoseconds(63492); // 16.67ms / 263
+        auto current_scanline_interval = [this]() -> std::chrono::nanoseconds
+        {
+            return gpu_thread_pal_
+                ? std::chrono::nanoseconds(63694)  // 20ms / 314
+                : std::chrono::nanoseconds(63492); // 16.67ms / 263
+        };
+        auto current_scanlines_per_frame = [this]() -> uint32_t
+        {
+            return gpu_thread_pal_ ? 314u : 263u;
+        };
+        auto current_vblank_start = [this]() -> uint32_t
+        {
+            return gpu_thread_pal_ ? 288u : 240u;
+        };
+        auto refresh_video_mode = [this, &current_scanline_interval, &current_scanlines_per_frame, &current_vblank_start](bool force_log) -> bool
+        {
+            const bool new_pal = gpu_ ? (gpu_->stage67_debug().is_pal != 0u) : gpu_thread_pal_;
+            const bool changed = (new_pal != gpu_thread_pal_);
+            gpu_thread_pal_ = new_pal;
+            if (changed || force_log)
+            {
+                emu::logf(emu::LogLevel::info, "GPU_THREAD",
+                    "%s (%s, %u scanlines, VBlank@%u, %lld ns/line)",
+                    changed ? "Mode switch" : "Started",
+                    gpu_thread_pal_ ? "PAL" : "NTSC",
+                    current_scanlines_per_frame(),
+                    current_vblank_start(),
+                    (long long)current_scanline_interval().count());
+            }
+            return changed;
+        };
 
-        emu::logf(emu::LogLevel::info, "GPU_THREAD",
-            "Started (%s, %u scanlines, VBlank@%u, %lld ns/line)",
-            gpu_thread_pal_ ? "PAL" : "NTSC",
-            scanlines_per_frame, vblank_start,
-            (long long)scanline_interval.count());
+        refresh_video_mode(true);
 
         uint32_t scanline = 0;
+        auto scanline_interval = current_scanline_interval();
         auto next = std::chrono::steady_clock::now() + scanline_interval;
 
         while (gpu_thread_running_.load(std::memory_order_acquire))
@@ -4041,14 +4446,19 @@ void Bus::start_gpu_thread(bool pal)
             fire_hblank_external();
 
             scanline++;
-            if (scanline == vblank_start)
+            if (scanline == current_vblank_start())
             {
                 // VBlank start
                 fire_vblank_external();
             }
-            if (scanline >= scanlines_per_frame)
+            if (scanline >= current_scanlines_per_frame())
             {
                 scanline = 0;
+                if (refresh_video_mode(false))
+                {
+                    scanline_interval = current_scanline_interval();
+                    next = std::chrono::steady_clock::now() + scanline_interval;
+                }
             }
         }
 

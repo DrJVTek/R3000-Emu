@@ -27,6 +27,7 @@ set(CORE_SOURCES
   src/cdrom/cdrom.cpp
   src/debug/debug_server.cpp
   src/emu/core.cpp
+  src/emu/core_mcp_backend.cpp
   src/emu/mcp_server.cpp
   src/emu/provenance_hotspot_profiler.cpp
   src/emu/psx3d_profile_store.cpp

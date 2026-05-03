@@ -466,17 +466,35 @@ void UPSX2DRenderComponent::RebuildMesh()
     const float PsxH = FMath::Max(1.0f, static_cast<float>(Disp.height()));
     const float ScaleX  = FixedW / PsxW;   // may differ from ScaleY for non-4:3 PS1 modes
     const float ScaleY  = FixedH / PsxH;
-    // Screen centre in game coordinate space:
-    //   draw_env.offset is where the GPU places game(0,0) in VRAM — so the display
-    //   centre in game coords = PsxW/2 - offset_x (avoid display_x: it flips with
-    //   double-buffering and would shift the whole image every other frame).
-    const float CenterGx = PsxW * 0.5f - static_cast<float>(DrawList.draw_env.offset_x);
-    const float CenterGy = PsxH * 0.5f - static_cast<float>(DrawList.draw_env.offset_y);
+    // =====================================================================
+    // ABSOLUTELY DO NOT APPLY PS1 DOUBLE-BUFFER OFFSETS HERE.
+    //
+    // Our UE renderer is NOT a PS1 VRAM scan-out renderer. It does not render
+    // the two PS1 VRAM pages separately and it must not emulate the display
+    // page flip by moving meshes around. The core draw list is already the
+    // logical list of GP0 polygons for "the screen" as seen by the game.
+    //
+    // draw_env.offset_x/y is only where the original PS1 GPU writes into VRAM.
+    // display.display_x/y is only where the original CRTC scans out from VRAM.
+    // Those values can and will alternate in double-buffered games. If they are
+    // folded into the UE transform, every other frame is shifted and the 2D GPU
+    // appears to flicker/jump.
+    //
+    // Keep the UE mesh centered on the logical display size only:
+    //     CenterGx = width  * 0.5f
+    //     CenterGy = height * 0.5f
+    //
+    // If this looks wrong, fix the producer/primitive coordinates or the
+    // dedicated VRAM/video surface path. Do NOT "fix" it by subtracting
+    // draw_env.offset_x/y here. We already broke this once.
+    // =====================================================================
+    const float CenterGx = PsxW * 0.5f;
+    const float CenterGy = PsxH * 0.5f;
 
     if (bDebugMeshLog)
     {
         emu::logf(emu::LogLevel::info, "GPU",
-            "MeshRebuild: %d tris | psx=%ux%u | fixed=%.0fx%.0f | scaleX=%.3f scaleY=%.3f | center=(%.1f,%.1f) offset=(%d,%d)",
+                "MeshRebuild: %d tris | psx=%ux%u | fixed=%.0fx%.0f | scaleX=%.3f scaleY=%.3f | center=(%.1f,%.1f) ignored_offset=(%d,%d)",
             NumCmds, Disp.width(), Disp.height(), FixedW, FixedH, ScaleX, ScaleY,
             CenterGx, CenterGy, DrawList.draw_env.offset_x, DrawList.draw_env.offset_y);
     }

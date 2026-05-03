@@ -33,6 +33,12 @@ public class R3000EmuRuntime : ModuleRules
         // Same defines as CMake
         PublicDefinitions.Add("R3000_DBG_LOOP_DETECTORS=1");
         PublicDefinitions.Add("_CRT_SECURE_NO_WARNINGS=1");
+
+        // Winsock for the MCP TCP server (UPSXMcpServerComponent → McpServer::run_tcp).
+        if (Target.Platform == UnrealTargetPlatform.Win64)
+        {
+            PublicSystemLibraries.Add("ws2_32.lib");
+        }
     }
 
     private string FindRepoRoot()

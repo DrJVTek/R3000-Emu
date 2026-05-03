@@ -1,11 +1,20 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <string>
 
 namespace emu
 {
+
+class IMcpCallGuard
+{
+public:
+    virtual ~IMcpCallGuard() = default;
+    virtual bool before_tool_call(const char* tool_name, std::string& err) = 0;
+    virtual void after_tool_call(const char* tool_name, bool succeeded) = 0;
+};
 
 enum class McpFrontendKind : uint32_t
 {
@@ -98,17 +107,21 @@ public:
     virtual bool get_transform_roots(std::string& out_json, std::string& err) const = 0;
     virtual bool get_group_transform_links(std::string& out_json, std::string& err) const = 0;
     virtual bool get_mesh_cache_candidates(std::string& out_json, std::string& err) const = 0;
-    virtual bool get_pad_state(std::string& out_json, std::string& err) const = 0;
-    virtual bool set_pad_state(uint16_t buttons_mask, std::string& out_json, std::string& err) = 0;
-    virtual bool tap_pad_buttons(uint16_t press_mask, uint32_t hold_steps, uint32_t release_steps, std::string& out_json, std::string& err) = 0;
-    virtual bool tap_pad_named_buttons(const char* names_csv, uint32_t hold_steps, uint32_t release_steps, std::string& out_json, std::string& err) = 0;
+    virtual bool get_pad_state(uint32_t slot, std::string& out_json, std::string& err) const = 0;
+    virtual bool set_pad_state(uint32_t slot, uint16_t buttons_mask, std::string& out_json, std::string& err) = 0;
+    virtual bool tap_pad_buttons(uint32_t slot, uint16_t press_mask, uint32_t hold_steps, uint32_t release_steps, std::string& out_json, std::string& err) = 0;
+    virtual bool tap_pad_named_buttons(uint32_t slot, const char* names_csv, uint32_t hold_steps, uint32_t release_steps, std::string& out_json, std::string& err) = 0;
+    virtual bool hold_pad_buttons(uint32_t slot, uint16_t press_mask, std::string& out_json, std::string& err) = 0;
+    virtual bool hold_pad_named_buttons(uint32_t slot, const char* names_csv, std::string& out_json, std::string& err) = 0;
+    virtual bool release_pad_buttons(uint32_t slot, uint16_t release_mask, std::string& out_json, std::string& err) = 0;
+    virtual bool release_pad_named_buttons(uint32_t slot, const char* names_csv, std::string& out_json, std::string& err) = 0;
     virtual bool get_scene_vector_snapshot(uint32_t max_groups, uint32_t max_roots, bool include_hud, bool include_raw_triangles, std::string& out_json, std::string& err) const = 0;
     virtual bool get_scene_delta(uint32_t max_groups, std::string& out_json, std::string& err) = 0;
     virtual bool get_object_candidates(uint32_t max_objects, std::string& out_json, std::string& err) const = 0;
     virtual bool get_scene_salience_summary(uint32_t max_targets, std::string& out_json, std::string& err) const = 0;
     virtual bool get_hierarchy_candidates(uint32_t max_nodes, std::string& out_json, std::string& err) const = 0;
     virtual bool get_focus_candidate(std::string& out_json, std::string& err) const = 0;
-    virtual bool step_with_pad_observation(const char* names_csv, uint32_t hold_steps, uint32_t observe_steps, uint32_t max_groups, uint32_t max_targets, std::string& out_json, std::string& err) = 0;
+    virtual bool step_with_pad_observation(uint32_t slot, const char* names_csv, uint32_t hold_steps, uint32_t observe_steps, uint32_t max_groups, uint32_t max_targets, std::string& out_json, std::string& err) = 0;
     // Aggregates existing observations (GTE trace, DMA2, scene, producer, transform roots)
     // into a single render-loop fingerprint JSON that the LLM consumes for classification
     // against the 6 canonical types documented in docs/PSX_RENDER_LOOP_PLAYBOOK.md.
@@ -127,12 +140,22 @@ public:
 class McpServer
 {
 public:
-    explicit McpServer(IMcpBackend& backend);
+    explicit McpServer(IMcpBackend& backend, IMcpCallGuard* call_guard = nullptr);
     int run_stdio(std::FILE* in, std::FILE* out);
+
+    // TCP transport (LSP framing: Content-Length: N\r\n\r\n<body>).
+    // Blocks until `stop` becomes true OR a fatal socket error occurs.
+    // Accepts one client at a time; on disconnect, loops back to accept.
+    // Returns 0 on graceful stop, non-zero on socket/bind/listen failure.
+    // Single-client is intentional: Claude Code is the only expected client.
+    int run_tcp(uint16_t port, std::atomic<bool>& stop,
+                std::atomic<int>* startup_result = nullptr);
+
     static std::string json_escape(const std::string& s);
 
 private:
     IMcpBackend& backend_;
+    IMcpCallGuard* call_guard_{nullptr};
 
     static bool read_stdio_message(std::FILE* in, std::string& out_json);
     static bool write_stdio_message(std::FILE* out, const std::string& json);

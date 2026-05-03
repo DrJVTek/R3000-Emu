@@ -67,6 +67,44 @@ struct Hooks
         return on_step_count++;
     }
 
+    bool remove_write(int handle)
+    {
+        if (handle < 0 || handle >= on_write_count) return false;
+        for (int i = handle; i + 1 < on_write_count; ++i)
+            on_write[i] = on_write[i + 1];
+        on_write[--on_write_count] = {};
+        on_write_has_wildcard = 0;
+        for (int i = 0; i < on_write_count; ++i)
+            if (on_write[i].watch_addr == 0) on_write_has_wildcard = 1;
+        return true;
+    }
+
+    bool remove_write(WriteHook fn, void* user)
+    {
+        for (int i = 0; i < on_write_count; ++i)
+            if (on_write[i].fn == fn && on_write[i].user == user)
+                return remove_write(i);
+        return false;
+    }
+
+    bool remove_step(int handle)
+    {
+        if (handle < 0 || handle >= on_step_count) return false;
+        for (int i = handle; i + 1 < on_step_count; ++i)
+            on_step[i] = on_step[i + 1];
+        on_step[--on_step_count] = {};
+        return true;
+    }
+
+    bool remove_step(StepHook fn, void* user)
+    {
+        void* raw_fn = reinterpret_cast<void*>(fn);
+        for (int i = 0; i < on_step_count; ++i)
+            if (on_step[i].fn == raw_fn && on_step[i].user == user)
+                return remove_step(i);
+        return false;
+    }
+
     // --- Fast-path guards ---
 
     bool has_vblank() const { return on_vblank_count > 0; }

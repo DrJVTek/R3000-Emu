@@ -18,6 +18,256 @@
 
 ## 📌 ÉTAT ACTUEL (2026-03-23) - TEKKEN stage67, plus un bug BIOS/CD brut
 
+### Note live DevPSX/MCP Doodle Jump (2026-04-19)
+
+- Un mini-jeu `devpsx/doodle_jump` sert de test volontairement sensible pour la
+  politique de collapse double-buffer 2D et la "vision vectorielle" MCP.
+- Diagnostic corrige: ce n'etait pas un probleme de synchro GPU/CPU, mais une
+  regression dans les transforms UE 2D (`PSX2DRenderComponent::RebuildMesh()`
+  et l'overlay 2D de `PSX3DRenderComponent::RebuildMesh3D()`).
+- La regle correcte reste: `DrawCmd.v[].x/y` sont des coordonnees GP0 logiques;
+  le renderer UE 2D doit ignorer `draw_env.offset_x/y` et `display.display_x/y`
+  pour placer les polygones.
+- Regression trouvee: le code calculait `CenterGx/Gy = PsxW/H/2 - draw_env.offset_*`,
+  ce qui reintroduisait le decalage de page VRAM et faisait bouger la geometrie
+  entre les deux buffers.
+- Fix applique: les centres 2D sont stables (`width * 0.5f`, `height * 0.5f`);
+  l'offset reste loggue en diagnostic uniquement.
+- Correctif CLI associe: la boucle principale incremente a nouveau `steps`, donc
+  `--max-steps=N` fonctionne pour les smoke tests bornes.
+- A retenir: si le test se fait via UE/plugin, reconstruire aussi l'integration UE;
+  le rebuild CLI seul ne compile pas `PSX2DRenderComponent.cpp`.
+- Note pad UE/MCP (2026-04-26): le serveur MCP ne doit PAS couper le joystick
+  local au demarrage. L'ownership pad est dynamique: `tap_*` et
+  `step_with_pad_observation` prennent le pad temporairement; `hold_*` /
+  `set_pad_state` le gardent jusqu'a `release_pad`. Sinon UE5 semble perdre
+  tous les inputs des que le serveur MCP est actif.
+- Note input local UE (2026-04-26): si `bForwardLocalPadInput=true` mais que
+  les logs SIO0 restent `btns=0xFFFF`, le probleme est cote polling UE avant
+  SIO0, pas cote BIOS/HLE. Le polling local lit maintenant aussi le stick
+  analogique gauche comme D-pad PS1 actif-bas, et ne desactive plus le Pawn UE
+  par defaut (`bDisablePawnInputForPad=false`) car certains setups ne reportent
+  plus correctement l'etat pad apres `DisableInput`.
+- Correction mixer pad UE/MCP (2026-04-26): ne jamais modifier
+  `bForwardLocalPadInput` depuis le thread TCP MCP. Cette propriete reste une
+  preference UE/game-thread. Par defaut il n'y a plus d'ownership exclusif:
+  le local ecrit `Core::set_pad_local_buttons()`, le MCP ecrit
+  `Core::set_pad_mcp_buttons()`, et le core expose a SIO0 le AND actif-bas des
+  deux sources (`local_mask & mcp_mask`). Donc un appui local ou MCP est vu par
+  le jeu; un relachement n'est vu que lorsque les deux sources relachent.
+  SIO0 renvoie toujours ce masque hardware au jeu en phases 3/4, sans HLE.
+- Correction SIO0 pad latch (2026-04-26): le masque pad est maintenant
+  echantillonne au debut d'une transaction controleur (`0x01`) et les phases
+  3/4 renvoient ce snapshot. Avant, les phases boutons relisaient le masque
+  live; avec UE/MCP en thread separe, un appui court pouvait apparaitre dans le
+  log `SIO0 START` puis disparaitre avant les octets low/high effectivement lus.
+- Note PAD/Multitap (2026-04-26): le latch SIO0 est structure en slots
+  (`sio0_latched_pad_buttons_[0..7]`). Aujourd'hui seul le slot 0 est alimente
+  par `Core::set_pad_*_buttons()`, mais le chemin hardware ne doit pas etre
+  duplique ou contourne pour le multitap: les pads supplementaires devront
+  etendre les memes snapshots SIO0, pas ajouter une voie HLE separee.
+- Extension input slots (2026-04-26): le stockage effectif pad est aussi
+  slot-based dans `Bus` et dans `Core` (`local` + `mcp` par slot, mix actif-bas
+  par slot). Les tools MCP pad acceptent maintenant `slot` optionnel (`0..7`,
+  defaut `0`) et le composant UE expose `LocalPadSlot`. Cela ne rend pas encore
+  le protocole multitap complet, mais evite la regression importante: les
+  inputs ne sont plus codes comme une source unique "PAD direct seulement".
+- Multitap minimal SIO0 (2026-04-26): le bus reconnait maintenant les acces
+  controleur `0x01..0x04` comme slots A-D, et implemente la methode multitap 1
+  minimale: un acces Slot A avec TAP byte `0x01` arme la lecture longue suivante,
+  qui retourne `0x5A80` puis 4 blocs digital-pad (ID `0x5A41`, boutons,
+  padding `0xFFFF`). Les boutons viennent des memes slots hardware `Bus/Core`;
+  ce n'est pas une voie HLE. A revalider en priorite sur Moto Racer 1/2/3,
+  confirmes comme utilisant le multitap meme pour le joueur principal, avant de
+  declarer le protocole complet.
+- Log utile pad UE (2026-04-26): avec `CoreLogLevel=info`, le diagnostic
+  `SIO0 xfer COMPLETE` etait trop bas (`debug`) pour confirmer que les octets
+  low/high etaient vraiment envoyes au BIOS/jeu. Les completes non-idle passent
+  maintenant en `warn` sur les 20 premiers appuis observes.
+- Diagnostic Ridge Racer pad UE (2026-04-26): les logs utilisateur prouvent que
+  le controleur UE atteint le bus/SIO0 (`set_pad slot=0 ... local!=0xFFFF`, puis
+  `SIO0 xfer START ... latched_btns!=0xFFFF`). Le probleme restant est donc
+  apres le latch SIO0: confirmer que les phases et les reads `JOY_DATA` vont
+  jusqu'au BIOS/jeu. Le bus porte maintenant le marqueur
+  `BUS source v56 (sio0_pad_trace)` et loggue, uniquement quand un bouton est
+  appuye, `SIO0_PAD_PHASE`, `SIO0_PAD_ACK`, `SIO0_PAD_READ` et
+  `SIO0_PAD_SELECT_DROP`. Si le prochain run ne montre pas `v56`, l'UE utilise
+  encore une ancienne DLL. Si `START` apparait sans `READ`, la transaction est
+  coupee avant consommation par le BIOS; si `READ` renvoie les bons octets mais
+  le jeu ne reagit pas, chercher cote buffer BIOS / routine Pad du jeu.
+- Note Live Coding UE pad (2026-04-30): attention aux patchs Live Coding dans
+  `E:\Projects\github\Live\PSXVR\Plugins\R3000Emu\Binaries\Win64`. Un run a
+  loggue `BUS source v57 (sio0_u32_pad_path)` alors que le DLL principal sur
+  disque contenait encore `BUS source v56`; les modules charges par Unreal
+  incluaient `UnrealEditor-R3000EmuRuntime.patch_2.exe` et `patch_3.exe` avec
+  le marqueur v57. L'hypothese temporaire SIO0 32-bit v57 a ete retiree du
+  source. Ce n'est pas une raison pour ignorer Live Coding: utiliser
+  `scripts\ue_runtime_markers.ps1` pour lire le `BuildId` du plugin et les
+  marqueurs embarques dans les modules R3000EmuRuntime charges. Exemple observe:
+  `BuildId=47537391`, DLL principal v56, patchs Live Coding `patch_2/patch_3`
+  v57. La source de verite est le marqueur runtime effectif, pas la demande de
+  rebuild/restart.
+- Note SIO0 diagnostics pad (2026-04-30): les logs profonds
+  `SIO0_PAD_PHASE`, `SIO0_PAD_READ`, `SIO0_PAD_ACK`, `SIO0_MMIO` etaient
+  limites par des compteurs `static` locaux aux fonctions. Avec Live Coding et
+  un process Unreal qui reste vivant, ces compteurs survivent aux relances et
+  peuvent cacher les diagnostics. Fix source: marqueur
+  `BUS source v58 (sio0_diag_counters_per_bus)`, compteurs diagnostics SIO0
+  stockes dans l'instance `Bus`. Le log UE pad decode aussi les noms de boutons
+  (`names=cross,start,left,...`) pour ne plus interpreter les masques a l'oeil.
+- Test CLI Ridge Racer (2026-04-30): `--auto-input` ecrit bien le masque pad
+  (`set_pad slot=0 effective=0xBFFF`), mais le run CLI ne touche pas du tout
+  `JOY_DATA/JOY_CTRL` (`SIO0_MMIO=0`, `SIO0 xfer=0`) avant `--max-time=45`.
+- Note debug pad UE (2026-05-03): le self-test CLI `--selftest-sio0-pad`
+  valide maintenant le cas "poll court + select drop" pour le high-byte
+  digital (`cross` => `0xBF`). Donc le bug restant n'est plus "le core ne sait
+  pas sortir le 2e octet", mais "en runtime UE/Ridge on ne voit pas encore
+  exactement comment ce 2e octet est consomme ou coupe". Pour sortir de la
+  boucle, le bus expose des logs dedies `SIO0_HIGHBYTE_FOCUS_*` qui ne se
+  declenchent que quand un bouton du high-byte est latche (cross/start/square,
+  etc.) et contournent les quotas generiques `SIO0_PAD_PHASE/ACK/READ`.
+- Mise a jour pad UE Ridge (2026-05-03): les logs runtime UE prouvent
+  maintenant la chaine complete `UE PadInput -> Core -> SIO0 -> JOY_DATA`.
+  Exemple observe: `PadInput buttons=0xBF7F names=left,cross`, puis
+  `SIO0_HIGHBYTE_FOCUS_READ data=0xBF`. Donc la voie hardware pad n'est plus la
+  cause immediate. Un second bug UE restait actif: `Bus::set_external_vblank()`
+  demarrait le thread GPU externe en PAL par defaut (`start_gpu_thread(true)`),
+  ce qui forcait un cadenceur 50 Hz meme pour des jeux NTSC comme Ridge Racer
+  (U). Correctif applique: le thread GPU externe lit maintenant `gpu`
+  `display.is_pal` au demarrage et se recale aussi si le jeu bascule PAL/NTSC
+  apres le boot.
+  Meme avec `--cycle-multiplier=2` pour matcher la config UE, le run reste dans
+  la zone stage67/CDDMA et ne reproduit pas le polling pad vu dans UE. Le CLI
+  est donc utile pour valider le stockage/mix pad, mais pas encore pour trancher
+  la regression UE tant qu'il ne rejoint pas la meme scene/poll path. Le CLI a
+  maintenant `--cycle-multiplier=N` pour les tests de parite UE, et le bus loggue
+  aussi `SIO0_MMIO_RD/WR` sur les registres `1F801040..1F80104F`.
+- Fix probable pad UE Ridge Racer (2026-04-30): les logs v58 prouvent que le pad
+  physique arrive bien au core (`PadInput buttons=...`) puis a SIO0
+  (`SIO0_PAD_PHASE`). La transaction renvoie `0xFF,0x41,0x5A,low`, mais le jeu
+  deselectionne avant le high byte. Cause trouvee cote UE worker: les
+  peripheriques etaient ticks par paquets hardcodes de `1024` cycles au lieu de
+  respecter `BusTickBatch`. Or l'ACK SIO0 pad attendu apres le low byte est a
+  environ `450` cycles; avec un batch de `1024`, l'ACK peut arriver trop tard et
+  le jeu coupe la transaction. Fix source: le worker UE utilise maintenant
+  `EffectiveBusTickBatch(Owner->bThreadedMode, Owner->BusTickBatch)`. Garder
+  `BusTickBatch=1` pour les tests pad/Ridge/Moto Racer. Ce fix reste hardware
+  SIO0, sans HLE et sans mapping clavier.
+- Diagnostic v58 invalide partiellement le point precedent: apres recompilation
+  UE/Live Coding, le pad arrive toujours jusqu'a SIO0, les phases repetent
+  `0x01,0x42,0x00,0x00 -> 0xFF,0x41,0x5A,low`, mais Ridge Racer ne clocke pas
+  de cinquieme octet avant de relancer/deselectionner. Donc les boutons dans
+  l'octet haut (`start`, `cross`, `square`, etc.) ne peuvent pas etre vus par le
+  jeu, meme si le D-pad bas (`left/right/...`) apparait dans les logs.
+- Fix SIO0 v59 (`BUS source v59 (sio0_short_poll_high_byte)`): quand un packet
+  digital pad court renvoie l'octet bas, le bus garde l'octet haut du meme
+  snapshot SIO0. Si le code BIOS/jeu lit ensuite `JOY_DATA` sans `RXRDY` ni
+  cinquieme dummy write, le bus retourne ce high byte latche une seule fois et
+  loggue `SIO0_PAD_SHORT_HIGH` puis `SIO0 xfer COMPLETE(short-read)`. Ce n'est
+  pas une voie HLE: aucune RAM jeu n'est patchée et le masque vient toujours du
+  chemin hardware commun local+MCP+slots. Le but est de couvrir les poll paths
+  courts observes en UE tout en gardant le meme modele pour PAD et futur
+  multitap.
+- Ajustement v59b: le fallback de lecture seule etait trop faible pour certains
+  poll paths. Le high byte est maintenant mis en file dans le RX a la fin de
+  l'ACK de l'octet bas (`SIO0_PAD_SHORT_HIGH_QUEUE`), ce qui expose un vrai
+  `RXRDY` au BIOS/jeu avant la lecture suivante. Le fallback `..._FALLBACK`
+  reste seulement comme filet de securite si un run lit encore `JOY_DATA` sans
+  consommer ce RX.
+- Ajustement v59c: le log runtime montre que Ridge Racer deselectionne parfois
+  le pad avant meme la fin de cet ACK, donc `QUEUE` peut ne jamais arriver. Le
+  bus preserve maintenant aussi l'octet haut sur le front `SELECT 1->0` quand
+  la transaction est en phase 4 (`SIO0_PAD_SHORT_HIGH_SELECT`). C'est toujours
+  le meme snapshot SIO0, sans HLE, mais aligne sur le poll court reel observe.
+- Marqueur runtime v60 (2026-05-03): pour sortir de l'ambiguite Live Coding,
+  le core loggue maintenant `BUS source v60 (sio0_short_poll_high_byte +
+  gpu_thread_video_mode)` et, quand `set_external_vblank(true)` s'active, une
+  ligne explicite `External VBlank enable: gpu_video_mode=NTSC|PAL
+  (stage67.is_pal=...)`. Pour Ridge Racer (U), on veut voir `NTSC` des le
+  demarrage du thread GPU externe; si le log UE reste sur `v59`, le fix de mode
+  video n'est pas encore charge cote plugin.
+- Correctif pad global v61 (2026-05-03): le poll court SIO0 introduit en v59
+  envoyait bien l'octet haut au BIOS/jeu, mais ne finalisait plus
+  systematiquement l'evenement pad `0xF0000009` au meme moment logique que le
+  chemin long normal. Resultat plausible: les logs montraient des lectures
+  `JOY_DATA` correctes, mais les routines BIOS/libpad pouvaient ne jamais voir
+  la transaction comme "complete". Le bus loggue maintenant
+  `BUS source v61 (sio0_short_poll_event + gpu_thread_video_mode)` et
+  finalise explicitement le poll court sur les chemins `ack`, `select` ou
+  `read` de secours, une seule fois par transaction.
+- Mise a jour pad globale v62 (2026-05-03): les logs UE montrent maintenant
+  que l'evenement BIOS pad existe bien et passe de `BUSY (0x2000)` a
+  `READY (0x4000)` via `PAD_EVENT_DELIVER ... matched=1 readied=1` pour
+  `cls=0xF0000009 spec=0x20`. Donc le bug "aucun jeu ne reagit" n'est plus
+  dans la chaine `UE input -> Core -> SIO0 -> DeliverEvent`. Le suspect
+  restant est la toute derniere etape: buffers BIOS pad (`InitPad/StartPad/
+  ChangeClearPad`) ou consommation de ces buffers par le jeu.
+- Instrumentation CPU ajoutee apres v62: traces `PAD_BIOS` sur les appels
+  reels `B(12h) InitPad`, `B(13h) StartPad`, `B(4Bh) StartPAD`,
+  `B(5Bh) ChangeClearPad`, avec capture des deux buffers et de leurs tailles.
+  Les stores CPU dans ces buffers logguent maintenant `PAD_BUF` avec snapshot
+  des 8 premiers octets. Si les prochains runs montrent `PAD_BIOS` mais aucun
+  `PAD_BUF`, le BIOS ne remplit pas les buffers. Si `PAD_BUF` bouge mais que le
+  jeu reste muet, le probleme est probablement cote consommation/libpad jeu.
+- Correctif v63 (2026-05-03): comparaison Git avec l'ancien etat `fea9cf5`
+  (dernier point "pad OK" retrouve) montre que `deliver_events_for_class()`
+  etait utilise pour le CDROM, pas pour le pad. Les versions recentes
+  forcaient l'event pad `0xF0000009` a `READY` directement depuis le bus,
+  y compris sur les short-polls. Ce court-circuit est retire:
+  `BUS source v63 (sio0_no_forced_pad_event + gpu_thread_video_mode)`.
+  Le bus garde la fin de transaction SIO0 et les IRQ hardware, mais ne mute
+  plus la table d'events pad en RAM a la place du vrai chemin BIOS/IRQ.
+- Correctif v64 (2026-05-03): autre regression critique identifiee par
+  comparaison avec l'ancien chemin pad fonctionnel. `JOY_STAT bit 7`
+  (`/ACK input`) etait historiquement expose comme un niveau:
+  HIGH quand idle, LOW pendant la fenetre d'ACK. Le code recent l'avait
+  transforme en flag latche "clear-on-read", ce qui casse le polling BIOS
+  pad qui surveille ce bit comme un niveau hardware. Le runtime passe a
+  `BUS source v64 (sio0_ack_level_restore + gpu_thread_video_mode)` et
+  restaure `bit7` comme niveau derive de `WaitingForACK/ack_countdown`.
+- Mise a jour v65 (2026-05-03): comparaison directe avec la copie locale
+  DuckStation montre que le point vraiment critique n'est pas seulement le
+  bit `ACKINPUT`, mais aussi la semantique de lecture:
+  `ReadRegister(JOY_DATA/JOY_STAT)` force un `InvokeEarly()` si la
+  transmission est encore en cours, et `JOY_STAT.ACKINPUT` est un flag
+  latche efface a la lecture de `JOY_STAT`. Le core passe maintenant a
+  `BUS source v65 (sio0_duckstation_read_semantics + gpu_thread_video_mode)`:
+  lecture `JOY_DATA/JOY_STAT` force immediatement `sio0_do_transfer()`
+  pendant `Transmitting`, et `ACKINPUT` est de nouveau clear-on-read sur
+  `JOY_STAT`, aligne sur DuckStation.
+- Mise a jour v66 (2026-05-03): un ecart plus subtil subsistait dans
+  `JOY_STAT`. Le core forcait encore `0x0005`, donc `TXRDY=1` et surtout
+  `TXDONE=1` restaient visibles meme pendant `Transmitting`. Or DuckStation
+  recalcule ces bits dynamiquement:
+  `TXRDY = !transmit_buffer_full`, `TXDONE = !transmit_buffer_full &&
+  state != Transmitting`. Ce detail peut faire croire au BIOS/libpad que la
+  transaction pad est deja finie alors que seul un octet intermediaire a ete
+  echange. Le runtime passe a
+  `BUS source v66 (sio0_duckstation_stat_bits + gpu_thread_video_mode)` et
+  recalcule maintenant `JOY_STAT` comme DuckStation au lieu de renvoyer un
+  `0x0005` statique.
+- Mise a jour v67 (2026-05-03): apres v66, les logs UE montrent bien un
+  `JOY_STAT` dynamique (`0x0000`, `0x0287`, `0x0205`, `0x0207`), mais aussi un
+  `i_stat=0x80` quasi colle au runtime jeu. Le point suivant etait donc la
+  semantique IRQ PAD: notre core levait encore `INTR/IRQ7` trop souvent
+  (completion de transfert, chemins short-poll), alors que DuckStation ne
+  leve l'interruption que sur les chemins actives par `TXINTEN`, `RXINTEN` ou
+  `ACKINTEN`. Le runtime passe a
+  `BUS source v67 (sio0_duckstation_irq_semantics + gpu_thread_video_mode)`:
+  fin de transfert RX ne leve `IRQ7` que si `RXINTEN` est actif, `ACK` ne leve
+  `IRQ7` que si `ACKINTEN` est actif, et les aides short-poll high-byte ne
+  polluent plus `i_stat` toutes seules.
+- Correctif short-poll high-byte suite au retour live (2026-05-03): apres
+  v67, les deplacements reviennent, mais certains boutons d'action restent
+  muets. Les logs montrent alors un pattern cle: le jeu lit bien l'octet bas
+  (ex. `0x7F` pour `left`), l'ACK queue le high-byte en RX, puis le jeu clocke
+  quand meme un 5e octet `0x00`. Comme le core etait deja retombe en phase 0
+  dans `sio0_do_ack()`, ce 5e octet recevait `0xFF` au lieu du high-byte
+  digital attendu (`0xBF`, `0xDF`, etc.). Fix source: le chemin short-poll qui
+  queue le high-byte apres ACK ne force plus `sio0_tx_phase_ = 0`. Ainsi, les
+  jeux qui lisent "court" gardent le byte en RX, et ceux qui clockent encore
+  un dummy byte recuperent le meme high-byte via le chemin normal de phase 4.
+
 ### Politique CD timing (2026-03-23)
 
 - Le core expose maintenant deux modes de timing CD pour `seek/spin-up`:

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -199,7 +200,16 @@ class Core
 
     // Controller input (thread-safe, forwarded to Bus).
     void set_pad_buttons(uint16_t v);
+    void set_pad_local_buttons(uint16_t v);
+    void set_pad_mcp_buttons(uint16_t v);
+    void set_pad_local_buttons_for_slot(uint32_t slot, uint16_t v);
+    void set_pad_mcp_buttons_for_slot(uint32_t slot, uint16_t v);
     uint16_t pad_buttons() const;
+    uint16_t pad_local_buttons() const;
+    uint16_t pad_mcp_buttons() const;
+    uint16_t pad_buttons_for_slot(uint32_t slot) const;
+    uint16_t pad_local_buttons_for_slot(uint32_t slot) const;
+    uint16_t pad_mcp_buttons_for_slot(uint32_t slot) const;
 
     // Cycle multiplier for timing accuracy (1=simplified, 2=approximate real R3000)
     void set_cycle_multiplier(uint32_t n);
@@ -333,6 +343,10 @@ class Core
     uint64_t psx3d_cam_serial_seen_{0};
     std::vector<uint32_t> psx3d_last_nohint_top_pcs_{};
     std::vector<uint32_t> psx3d_step_hook_pcs_{};
+
+    std::atomic<uint16_t> pad_local_buttons_[r3000::Bus::kPadSlotCount]{};
+    std::atomic<uint16_t> pad_mcp_buttons_[r3000::Bus::kPadSlotCount]{};
+    void apply_effective_pad_buttons(uint32_t slot);
 
     // PSX EXE params (devkit mode, written to scratchpad at boot)
     std::vector<int32_t> psx_params_{};

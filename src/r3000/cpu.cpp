@@ -128,6 +128,15 @@ void Cpu::reset(uint32_t reset_pc)
     spin_pc_ = 0;
     spin_count_ = 0;
     bus_tick_accum_ = 0;
+    bios_pad_buf1_vaddr_ = 0;
+    bios_pad_buf1_paddr_ = 0;
+    bios_pad_buf1_size_ = 0;
+    bios_pad_buf2_vaddr_ = 0;
+    bios_pad_buf2_paddr_ = 0;
+    bios_pad_buf2_size_ = 0;
+    bios_pad_trace_count_ = 0;
+    bios_pad_write_log_count_ = 0;
+    bios_pad_last_clear_mode_ = 0;
 
     for (int i = 0; i < 256; ++i)
     {
@@ -683,6 +692,63 @@ Cpu::StepResult Cpu::step()
         exc_trace_pc_log_ = 0;
         emu::logf(emu::LogLevel::debug, "EXC-TRACE", "ARMED at B(0x4B) StartPAD, Status=0x%08X",
             cop0_[COP0_STATUS]);
+    }
+
+    if (pc_ == 0xB0u)
+    {
+        const uint32_t fn = gpr_[9] & 0xFFu;
+        if (fn == 0x12u)
+        {
+            bios_pad_buf1_vaddr_ = gpr_[4];
+            bios_pad_buf1_paddr_ = virt_to_phys(gpr_[4]);
+            bios_pad_buf1_size_ = gpr_[5];
+            bios_pad_buf2_vaddr_ = gpr_[6];
+            bios_pad_buf2_paddr_ = virt_to_phys(gpr_[6]);
+            bios_pad_buf2_size_ = gpr_[7];
+            if (bios_pad_trace_count_ < 64u)
+            {
+                ++bios_pad_trace_count_;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "PAD_BIOS",
+                    "InitPad[%u] buf1=0x%08X phys1=0x%08X sz1=0x%08X buf2=0x%08X phys2=0x%08X sz2=0x%08X ra=0x%08X",
+                    bios_pad_trace_count_,
+                    bios_pad_buf1_vaddr_,
+                    bios_pad_buf1_paddr_,
+                    bios_pad_buf1_size_,
+                    bios_pad_buf2_vaddr_,
+                    bios_pad_buf2_paddr_,
+                    bios_pad_buf2_size_,
+                    gpr_[31]);
+            }
+        }
+        else if (fn == 0x13u || fn == 0x4Bu || fn == 0x5Bu)
+        {
+            if (fn == 0x5Bu)
+                bios_pad_last_clear_mode_ = gpr_[4];
+            if (bios_pad_trace_count_ < 64u)
+            {
+                ++bios_pad_trace_count_;
+                emu::logf(
+                    emu::LogLevel::warn,
+                    "PAD_BIOS",
+                    "%s[%u] a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X buf1=0x%08X/%08X sz1=0x%08X buf2=0x%08X/%08X sz2=0x%08X clear=0x%08X",
+                    fn == 0x13u ? "StartPad" : (fn == 0x4Bu ? "StartPAD" : "ChangeClearPad"),
+                    bios_pad_trace_count_,
+                    gpr_[4],
+                    gpr_[5],
+                    gpr_[6],
+                    gpr_[7],
+                    gpr_[31],
+                    bios_pad_buf1_vaddr_,
+                    bios_pad_buf1_paddr_,
+                    bios_pad_buf1_size_,
+                    bios_pad_buf2_vaddr_,
+                    bios_pad_buf2_paddr_,
+                    bios_pad_buf2_size_,
+                    bios_pad_last_clear_mode_);
+            }
+        }
     }
 
     // After the critical exception fires, log PC trace for 2000 instructions
@@ -2002,6 +2068,68 @@ Cpu::StepResult Cpu::step()
             return kNoFaceToken;
         return st.token;
     };
+    auto trace_pad_buffer_write = [&](const char* op, uint32_t vaddr, uint32_t paddr, uint32_t value, uint32_t size) -> void
+    {
+        if (bios_pad_write_log_count_ >= 256u)
+            return;
+
+        uint32_t hit_buf = 0;
+        uint32_t base_v = 0;
+        uint32_t base_p = 0;
+        uint32_t span = 0;
+        if (bios_pad_buf1_size_ != 0u &&
+            paddr >= bios_pad_buf1_paddr_ &&
+            paddr < bios_pad_buf1_paddr_ + bios_pad_buf1_size_)
+        {
+            hit_buf = 1;
+            base_v = bios_pad_buf1_vaddr_;
+            base_p = bios_pad_buf1_paddr_;
+            span = bios_pad_buf1_size_;
+        }
+        else if (bios_pad_buf2_size_ != 0u &&
+                 paddr >= bios_pad_buf2_paddr_ &&
+                 paddr < bios_pad_buf2_paddr_ + bios_pad_buf2_size_)
+        {
+            hit_buf = 2;
+            base_v = bios_pad_buf2_vaddr_;
+            base_p = bios_pad_buf2_paddr_;
+            span = bios_pad_buf2_size_;
+        }
+        if (hit_buf == 0u)
+            return;
+
+        ++bios_pad_write_log_count_;
+        const uint32_t offset = paddr - base_p;
+        uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, b7 = 0;
+        Bus::MemFault mf{};
+        (void)bus_.read_u8(base_p + 0u, b0, mf);
+        (void)bus_.read_u8(base_p + 1u, b1, mf);
+        (void)bus_.read_u8(base_p + 2u, b2, mf);
+        (void)bus_.read_u8(base_p + 3u, b3, mf);
+        (void)bus_.read_u8(base_p + 4u, b4, mf);
+        (void)bus_.read_u8(base_p + 5u, b5, mf);
+        (void)bus_.read_u8(base_p + 6u, b6, mf);
+        (void)bus_.read_u8(base_p + 7u, b7, mf);
+        emu::logf(
+            emu::LogLevel::warn,
+            "PAD_BUF",
+            "%s[%u] pc=0x%08X buf=%u addr=0x%08X phys=0x%08X off=0x%X size=%u val=0x%08X base=0x%08X/0x%08X span=0x%X bytes=%02X %02X %02X %02X %02X %02X %02X %02X ra=0x%08X",
+            op ? op : "store",
+            bios_pad_write_log_count_,
+            r.pc,
+            hit_buf,
+            vaddr,
+            paddr,
+            offset,
+            size,
+            value,
+            base_v,
+            base_p,
+            span,
+            b0 & 0xFFu, b1 & 0xFFu, b2 & 0xFFu, b3 & 0xFFu,
+            b4 & 0xFFu, b5 & 0xFFu, b6 & 0xFFu, b7 & 0xFFu,
+            gpr_[31]);
+    };
     auto store_u8 = [&](uint32_t vaddr, uint8_t v, uint32_t face_token = kNoFaceToken) -> int
     {
         Bus::MemFault f{};
@@ -2018,6 +2146,7 @@ Cpu::StepResult Cpu::step()
         // JIT-prep: store into main-RAM code window → bump invalidation token
         if (paddr < 0x00200000u)
             ++code_ram_dirty_token_;
+        trace_pad_buffer_write("sb", vaddr, paddr, v, 1u);
         if (face_token != kNoFaceToken)
         {
             bus_.set_ram_face_token(paddr, face_token);
@@ -2042,6 +2171,7 @@ Cpu::StepResult Cpu::step()
         // JIT-prep: store into main-RAM code window → bump invalidation token
         if (paddr < 0x00200000u)
             ++code_ram_dirty_token_;
+        trace_pad_buffer_write("sh", vaddr, paddr, v, 2u);
         if (face_token != kNoFaceToken)
         {
             bus_.set_ram_face_token(paddr, face_token);
@@ -2066,6 +2196,7 @@ Cpu::StepResult Cpu::step()
         // JIT-prep: store into main-RAM code window → bump invalidation token
         if (paddr < 0x00200000u)
             ++code_ram_dirty_token_;
+        trace_pad_buffer_write("sw", vaddr, paddr, v, 4u);
         bus_.set_ram_face_token(paddr, face_token);
         remember_callctx_face(face_token);
         return 1;

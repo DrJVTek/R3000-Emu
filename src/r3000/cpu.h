@@ -625,6 +625,15 @@ class Cpu
     uint32_t stage67_post_log_count_{0};
     uint32_t irq_rfe_log_count_{0};
     uint32_t bios_cd_pending_log_count_{0};
+    uint32_t bios_pad_buf1_vaddr_{0};
+    uint32_t bios_pad_buf1_paddr_{0};
+    uint32_t bios_pad_buf1_size_{0};
+    uint32_t bios_pad_buf2_vaddr_{0};
+    uint32_t bios_pad_buf2_paddr_{0};
+    uint32_t bios_pad_buf2_size_{0};
+    uint32_t bios_pad_trace_count_{0};
+    uint32_t bios_pad_write_log_count_{0};
+    uint32_t bios_pad_last_clear_mode_{0};
 
     // HLE BIOS vectors (bring-up): petit état pour quelques services kernel.
     // NOTE: ce n'est pas "PS1-accurate"; objectif = permettre au BIOS d'avancer,

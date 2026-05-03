@@ -238,6 +238,11 @@ void Gpu::push_triangle(
     int16_t x2, int16_t y2, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t u2, uint8_t v2,
     uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth)
 {
+    // The external VBlank thread swaps/clears draw lists asynchronously.
+    // Keep each logical triangle and its parallel 3D metadata atomic so UE/MCP
+    // never sees half-built or just-cleared vector frames.
+    std::lock_guard<std::mutex> lock(draw_list_mutex_);
+
     // No bounding-box span rejection here.
     //
     // The previous version rejected triangles whose bbox span exceeded 1023

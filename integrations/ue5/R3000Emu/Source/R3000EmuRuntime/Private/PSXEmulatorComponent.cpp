@@ -186,11 +186,16 @@ public:
             {
                 r3000::Bus* Bus = Core->bus();
                 uint32 PeriphAccum = 0;
-                constexpr uint32 kPeriphBatch = 1024; // match CLI for timing parity
+                // Do not hardcode a large peripheral batch here. SIO0 pad ACKs
+                // are sub-1024-cycle events; batching them late makes games
+                // deselect the controller before the high button byte arrives.
+                const uint32 PeriphBatch = EffectiveBusTickBatch(Owner->bThreadedMode, Owner->BusTickBatch);
 
-                while (CycleDebt > 0.0 && !Owner->bWorkerShouldStop_.Load())
+                while (CycleDebt > 0.0 && !Owner->bWorkerShouldStop_.Load() && !Owner->bWorkerPaused_.Load())
                 {
+                    Owner->bWorkerInCoreStep_.Store(true);
                     const auto Res = Core->step();
+                    Owner->bWorkerInCoreStep_.Store(false);
                     if (Res.kind != r3000::Cpu::StepResult::Kind::ok)
                     {
                         emu::logf(emu::LogLevel::warn, "CORE",
@@ -206,7 +211,7 @@ public:
                     ++LocalSteps;
                     PeriphAccum += Cycles;
 
-                    if (PeriphAccum >= kPeriphBatch)
+                    if (PeriphAccum >= PeriphBatch)
                     {
                         if (Bus)
                             Bus->tick_peripherals(PeriphAccum);
@@ -1679,6 +1684,44 @@ void UPSXEmulatorComponent::PollPadInput()
 {
     if (!Core_) { return; }
 
+    if (PadInputPollLogCount_ < 8)
+    {
+        ++PadInputPollLogCount_;
+        emu::logf(emu::LogLevel::warn, "CORE",
+            "PadInput poll #%u forward=%d mcp_owned=%d local_slot=%d disable_pawn=%d mapping_added=%d mapping=%p",
+            PadInputPollLogCount_,
+            bForwardLocalPadInput ? 1 : 0,
+            bMcpPadInputOwned_.Load() ? 1 : 0,
+            (int)LocalPadSlot,
+            bDisablePawnInputForPad ? 1 : 0,
+            bPadMappingAdded_ ? 1 : 0,
+            (void*)PadMappingContext.Get());
+    }
+
+    // IMPORTANT: do not gate local controller input on MCP activity.
+    //
+    // The emulator has two hardware-level input sources:
+    //   local UE pad mask  -> set_pad_local_buttons_for_slot()
+    //   MCP pad mask       -> set_pad_mcp_buttons_for_slot()
+    //
+    // Core merges them with an active-low AND before SIO0 sees the controller.
+    // That means local pad and MCP can coexist naturally: either source can
+    // press a button, and no high-level/HLE shortcut is involved. Older MCP
+    // experiments tried to "own" the pad and skip this poll, which regressed
+    // normal UE gameplay. Keep bForwardLocalPadInput as an explicit user/debug
+    // switch only; MCP ownership must not silently disable the real controller.
+    if (!bForwardLocalPadInput)
+    {
+        static double LastForwardDisabledLogTime = 0.0;
+        const double Now = FPlatformTime::Seconds();
+        if (Now - LastForwardDisabledLogTime > 2.0)
+        {
+            UE_LOG(LogPSXEmu, Log, TEXT("PadInput: local UE pad forwarding disabled by bForwardLocalPadInput"));
+            LastForwardDisabledLogTime = Now;
+        }
+        return;
+    }
+
     if (!bPadMappingAdded_)
         SetupPadInput();
 
@@ -1689,6 +1732,7 @@ void UPSXEmulatorComponent::PollPadInput()
         if (!bWarnedNoPC)
         {
             UE_LOG(LogPSXEmu, Warning, TEXT("PadInput: No PlayerController found"));
+            emu::logf(emu::LogLevel::warn, "CORE", "PadInput: No PlayerController found");
             bWarnedNoPC = true;
         }
         return;
@@ -1706,16 +1750,18 @@ void UPSXEmulatorComponent::PollPadInput()
         bPauseToggleWasDown_ = false;
     }
 
-    // Disable default pawn input so gamepad buttons don't move the UE5 camera.
-    // We consume all gamepad input for the PS1 emulator.
-    if (!bPawnInputDisabled_)
+    // Original working path: do NOT call Pawn->DisableInput() here.
+    // DisableInput can also prevent the PlayerController path from seeing
+    // gamepad state on some UE setups. The known-good implementation only
+    // told the PlayerController to ignore movement/look so the pawn/camera
+    // stops reacting while IsInputKeyDown() remains readable for the PS1 pad.
+    if (bDisablePawnInputForPad && !bPawnInputDisabled_)
     {
-        if (APawn* Pawn = PC->GetPawn())
-        {
-            Pawn->DisableInput(PC);
-            bPawnInputDisabled_ = true;
-            UE_LOG(LogPSXEmu, Log, TEXT("PadInput: Disabled default pawn input (gamepad goes to PS1 only)"));
-        }
+        PC->SetIgnoreMoveInput(true);
+        PC->SetIgnoreLookInput(true);
+        bPawnInputDisabled_ = true;
+        UE_LOG(LogPSXEmu, Log, TEXT("PadInput: PlayerController ignores move/look (gamepad goes to PS1 pad poll)"));
+        emu::logf(emu::LogLevel::warn, "CORE", "PadInput: PlayerController ignores move/look (gamepad goes to PS1 pad poll)");
     }
 
     // PS1 digital pad button bits (active-low: 0=pressed, 1=released)
@@ -1744,6 +1790,48 @@ void UPSXEmulatorComponent::PollPadInput()
     Check(14, EKeys::Gamepad_FaceButton_Bottom);     // Cross    (A)
     Check(15, EKeys::Gamepad_FaceButton_Left);       // Square   (X)
 
+    float LeftX = 0.0f;
+    float LeftY = 0.0f;
+    if (bUseGamepadAnalogForDPad)
+    {
+        LeftX = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX);
+        LeftY = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY);
+        const float Threshold = FMath::Clamp(GamepadAnalogDPadThreshold, 0.05f, 0.95f);
+
+        if (LeftX <= -Threshold) { Buttons &= ~(1u << 7); } // Left
+        if (LeftX >=  Threshold) { Buttons &= ~(1u << 5); } // Right
+        if (LeftY >=  Threshold) { Buttons &= ~(1u << 4); } // Up
+        if (LeftY <= -Threshold) { Buttons &= ~(1u << 6); } // Down
+    }
+
+    auto DecodeButtons = [](uint16_t Mask)
+    {
+        FString Names;
+        auto Add = [&Names](const TCHAR* Name)
+        {
+            if (!Names.IsEmpty()) { Names += TEXT(","); }
+            Names += Name;
+        };
+
+        if (!(Mask & (1u << 0)))  { Add(TEXT("select")); }
+        if (!(Mask & (1u << 1)))  { Add(TEXT("l3")); }
+        if (!(Mask & (1u << 2)))  { Add(TEXT("r3")); }
+        if (!(Mask & (1u << 3)))  { Add(TEXT("start")); }
+        if (!(Mask & (1u << 4)))  { Add(TEXT("up")); }
+        if (!(Mask & (1u << 5)))  { Add(TEXT("right")); }
+        if (!(Mask & (1u << 6)))  { Add(TEXT("down")); }
+        if (!(Mask & (1u << 7)))  { Add(TEXT("left")); }
+        if (!(Mask & (1u << 8)))  { Add(TEXT("l2")); }
+        if (!(Mask & (1u << 9)))  { Add(TEXT("r2")); }
+        if (!(Mask & (1u << 10))) { Add(TEXT("l1")); }
+        if (!(Mask & (1u << 11))) { Add(TEXT("r1")); }
+        if (!(Mask & (1u << 12))) { Add(TEXT("triangle")); }
+        if (!(Mask & (1u << 13))) { Add(TEXT("circle")); }
+        if (!(Mask & (1u << 14))) { Add(TEXT("cross")); }
+        if (!(Mask & (1u << 15))) { Add(TEXT("square")); }
+        return Names;
+    };
+
     // Debug: log when any button is pressed (throttled)
     if (Buttons != 0xFFFF)
     {
@@ -1751,12 +1839,17 @@ void UPSXEmulatorComponent::PollPadInput()
         const double Now = FPlatformTime::Seconds();
         if (Now - LastLogTime > 0.5)
         {
-            UE_LOG(LogPSXEmu, Log, TEXT("PadInput: buttons=0x%04X"), Buttons);
+            const FString ButtonNames = DecodeButtons(Buttons);
+            UE_LOG(LogPSXEmu, Log, TEXT("PadInput: buttons=0x%04X names=%s analog=(%.2f,%.2f)"), Buttons, *ButtonNames, LeftX, LeftY);
+            emu::logf(emu::LogLevel::warn, "CORE",
+                "PadInput buttons=0x%04X names=%s analog=(%.2f,%.2f) slot=%d",
+                Buttons, TCHAR_TO_UTF8(*ButtonNames), LeftX, LeftY, (int)LocalPadSlot);
             LastLogTime = Now;
         }
     }
 
-    Core_->set_pad_buttons(Buttons);
+    const uint32 Slot = (uint32)FMath::Clamp(LocalPadSlot, 0, (int32)r3000::Bus::kPadSlotCount - 1);
+    Core_->set_pad_local_buttons_for_slot(Slot, Buttons);
 }
 
 void UPSXEmulatorComponent::TogglePause()
@@ -1782,3 +1875,44 @@ bool UPSXEmulatorComponent::IsEmulationPaused() const
     return !bRunning;
 }
 
+bool UPSXEmulatorComponent::PauseWorkerForMcpAccess(bool& bWasPaused, double TimeoutSeconds)
+{
+    bWasPaused = false;
+    if (!Core_)
+        return false;
+
+    if (bThreadedMode && EmuWorker_)
+    {
+        bWasPaused = bWorkerPaused_.Load();
+        bWorkerPaused_.Store(true);
+
+        const double Deadline = FPlatformTime::Seconds() + FMath::Max(TimeoutSeconds, 0.01);
+        while (bWorkerInCoreStep_.Load())
+        {
+            if (FPlatformTime::Seconds() >= Deadline)
+            {
+                UE_LOG(LogPSXEmu, Warning, TEXT("MCP core access timed out waiting for worker pause"));
+                return false;
+            }
+            FPlatformProcess::Sleep(0.0005f);
+        }
+    }
+
+    return true;
+}
+
+void UPSXEmulatorComponent::RestoreWorkerAfterMcpAccess(bool bWasPaused)
+{
+    if (bThreadedMode && EmuWorker_)
+        bWorkerPaused_.Store(bWasPaused);
+}
+
+void UPSXEmulatorComponent::SetMcpPadInputOwned(bool bOwned)
+{
+    bMcpPadInputOwned_.Store(bOwned);
+}
+
+bool UPSXEmulatorComponent::IsMcpPadInputOwned() const
+{
+    return bMcpPadInputOwned_.Load();
+}

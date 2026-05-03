@@ -1321,6 +1321,10 @@ void Gpu3D::push_triangle(
     uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
     PrimOrigin origin, uint32_t face_idx)
 {
+    // The external VBlank thread swaps/clears draw lists asynchronously.
+    // Keep the command and its parallel 3D metadata in the same frame.
+    std::lock_guard<std::mutex> lock(draw_list_mutex_);
+
     DrawCmd3D cmd3d{};
     cmd3d.is_quad = false;
     cmd3d.quad_half = 0;
@@ -1424,6 +1428,10 @@ void Gpu3D::push_quad(
     uint16_t clut, uint16_t texpage, uint8_t flags, uint8_t semi_mode, uint8_t tex_depth,
     PrimOrigin origin, uint32_t face_idx, uint32_t face_idx_secondary_hint, uint32_t producer_pc)
 {
+    // A quad is emitted as two triangles; a VBlank swap between halves would
+    // produce exactly the kind of partial vector frame that flickers in MCP/UE.
+    std::lock_guard<std::mutex> lock(draw_list_mutex_);
+
     // Face/quad cache lookup — done once for both triangles
     bool is_3d = false;
     const gte::GteCacheFace* face = nullptr;

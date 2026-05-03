@@ -461,13 +461,26 @@ void UPSX3DRenderComponent::RebuildMesh3D()
     int32 Tri3DCount = 0;
     int32 Skip2DCount = 0;
 
-    // ── Screen centre in game coordinate space (mirrors PSX2DRenderComponent) ──
-    // draw_env.offset places game(0,0) in VRAM; display centre = PsxW/2 - offset.
-    // We intentionally skip display_x/y to avoid double-buffer frame jumps.
+    // =====================================================================
+    // ABSOLUTELY DO NOT APPLY PS1 DOUBLE-BUFFER OFFSETS HERE.
+    //
+    // This is the 2D overlay path inside the 3D renderer, so it must follow the
+    // same rule as PSX2DRenderComponent: UE is not rendering PS1 VRAM pages and
+    // must not move the mesh when the game flips draw/display buffers.
+    //
+    // draw_env.offset_x/y and display.display_x/y describe PS1 VRAM placement.
+    // They are diagnostic state for this path, not world-space transform input.
+    // Subtracting either of them from CenterGx2D/CenterGy2D reintroduces the
+    // classic "one frame here, one frame shifted" double-buffer bug.
+    //
+    // Keep this centred on the logical display size only. If a future change
+    // needs real VRAM scan-out behaviour, implement it in a separate surface
+    // renderer instead of moving polygon meshes here.
+    // =====================================================================
     const float Psx2DW = FMath::Max(1.0f, static_cast<float>(DL.display.width()));
     const float Psx2DH = FMath::Max(1.0f, static_cast<float>(DL.display.height()));
-    const float CenterGx2D = Psx2DW * 0.5f - static_cast<float>(DL.draw_env.offset_x);
-    const float CenterGy2D = Psx2DH * 0.5f - static_cast<float>(DL.draw_env.offset_y);
+    const float CenterGx2D = Psx2DW * 0.5f;
+    const float CenterGy2D = Psx2DH * 0.5f;
 
     // ── Effective 2D parameters (auto-scale from previous frame's 3D bbox) ──
     float EffScale2D = WorldScale2D;
@@ -924,5 +937,3 @@ void UPSX3DRenderComponent::RebuildMesh3D()
             "======== END FRAME %u ========", DL.frame_id);
     }
 }
-
-

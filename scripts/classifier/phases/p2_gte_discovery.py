@@ -60,6 +60,8 @@ def _count_xrefs(payload: Any) -> int:
             value = payload.get(key)
             if isinstance(value, list):
                 return len(value)
+    if isinstance(payload, str):
+        return len(re.findall(r"\b(?:From|To)\s+(?:0x)?[0-9A-Fa-f]{6,8}\b", payload))
     return 0
 
 
@@ -69,10 +71,33 @@ def _normalize_address(value: Any) -> str | None:
     text = str(value).strip()
     if not text:
         return None
+    if re.fullmatch(r"(?:0x)?[0-9A-Fa-f]{6,8}", text):
+        return f"0x{int(text.removeprefix('0x').removeprefix('0X'), 16):08X}"
     try:
         return f"0x{int(text, 0):08X}"
     except Exception:
         return text
+
+
+def _address_to_int(value: Any) -> int | None:
+    normalized = _normalize_address(value)
+    if not normalized or not normalized.startswith("0x"):
+        return None
+    try:
+        return int(normalized, 16)
+    except ValueError:
+        return None
+
+
+def _is_runtime_psx_address(value: Any) -> bool:
+    addr = _address_to_int(value)
+    if addr is None:
+        return False
+    return (
+        0x00010000 <= addr <= 0x001FFFFF
+        or 0x80000000 <= addr <= 0x807FFFFF
+        or 0xA0000000 <= addr <= 0xA07FFFFF
+    )
 
 
 def _extract_xref_addresses(payload: Any) -> list[str]:
@@ -84,6 +109,11 @@ def _extract_xref_addresses(payload: Any) -> list[str]:
                 normalized = _normalize_address(item.get(key))
                 if normalized:
                     out.append(normalized)
+    if isinstance(payload, str):
+        for match in re.finditer(r"\b(?:From|To)\s+((?:0x)?[0-9A-Fa-f]{6,8})\b", payload):
+            normalized = _normalize_address(match.group(1))
+            if normalized:
+                out.append(normalized)
     deduped: list[str] = []
     seen: set[str] = set()
     for addr in out:
@@ -301,8 +331,11 @@ def run(ctx: dict[str, Any]) -> dict[str, Any]:
     exploration_candidates: list[dict[str, Any]] = []
     for item in list(result["draw_calls"])[:seed_limit]:
         if isinstance(item, dict) and item.get("address"):
+            address = _normalize_address(item.get("address"))
+            if not _is_runtime_psx_address(address):
+                continue
             exploration_candidates.append({
-                "address": _normalize_address(item.get("address")),
+                "address": address,
                 "source": f"draw_call:{item.get('query')}",
                 "name": item.get("name"),
                 "depth": 0,
@@ -311,8 +344,11 @@ def run(ctx: dict[str, Any]) -> dict[str, Any]:
             })
     for item in list(result["gte_functions"])[:seed_limit]:
         if isinstance(item, dict) and item.get("address"):
+            address = _normalize_address(item.get("address"))
+            if not _is_runtime_psx_address(address):
+                continue
             exploration_candidates.append({
-                "address": _normalize_address(item.get("address")),
+                "address": address,
                 "source": item.get("source"),
                 "name": _extract_name(item.get("function", {})),
                 "depth": 0,
@@ -325,7 +361,7 @@ def run(ctx: dict[str, Any]) -> dict[str, Any]:
     while queue:
         candidate = queue.pop(0)
         address = _normalize_address(candidate.get("address"))
-        if not address or address in explored_seen:
+        if not address or address in explored_seen or not _is_runtime_psx_address(address):
             continue
         explored_seen.add(address)
         explored = _summarize_function(
@@ -369,7 +405,7 @@ def run(ctx: dict[str, Any]) -> dict[str, Any]:
         if next_depth > branch_depth:
             continue
         for neighbor in list(explored.get("xrefs_to_addresses", []) or [])[:branch_fanout]:
-            if neighbor not in explored_seen:
+            if neighbor not in explored_seen and _is_runtime_psx_address(neighbor):
                 queue.append({
                     "address": neighbor,
                     "source": f"branch_from:{address}",
@@ -378,7 +414,7 @@ def run(ctx: dict[str, Any]) -> dict[str, Any]:
                     "parent_address": address,
                 })
         for neighbor in list(explored.get("xrefs_from_addresses", []) or [])[:branch_fanout]:
-            if neighbor not in explored_seen:
+            if neighbor not in explored_seen and _is_runtime_psx_address(neighbor):
                 queue.append({
                     "address": neighbor,
                     "source": f"branch_to:{address}",

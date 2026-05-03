@@ -107,6 +107,11 @@ static bool parse_psx_exe_header_fields(
 Core::Core(rlog::Logger* logger) : logger_(logger), cdrom_(logger), gpu_(logger)
 {
     emu::logf(emu::LogLevel::debug, "CORE", "Core created");
+    for (uint32_t slot = 0; slot < r3000::Bus::kPadSlotCount; ++slot)
+    {
+        pad_local_buttons_[slot].store(0xFFFFu, std::memory_order_relaxed);
+        pad_mcp_buttons_[slot].store(0xFFFFu, std::memory_order_relaxed);
+    }
     psx3d_mode_mgr_.reset();
     provenance_profiler_.reset();
 }
@@ -1046,27 +1051,98 @@ gte::Gte* Core::gte()
 
 void Core::set_pad_buttons(uint16_t v)
 {
+    set_pad_local_buttons(v);
+}
+
+void Core::set_pad_local_buttons(uint16_t v)
+{
+    set_pad_local_buttons_for_slot(0, v);
+}
+
+void Core::set_pad_mcp_buttons(uint16_t v)
+{
+    set_pad_mcp_buttons_for_slot(0, v);
+}
+
+void Core::set_pad_local_buttons_for_slot(uint32_t slot, uint16_t v)
+{
+    if (slot >= r3000::Bus::kPadSlotCount)
+        return;
+    pad_local_buttons_[slot].store(v, std::memory_order_relaxed);
+    apply_effective_pad_buttons(slot);
+}
+
+void Core::set_pad_mcp_buttons_for_slot(uint32_t slot, uint16_t v)
+{
+    if (slot >= r3000::Bus::kPadSlotCount)
+        return;
+    pad_mcp_buttons_[slot].store(v, std::memory_order_relaxed);
+    apply_effective_pad_buttons(slot);
+}
+
+void Core::apply_effective_pad_buttons(uint32_t slot)
+{
+    if (slot >= r3000::Bus::kPadSlotCount)
+        return;
+
     // Diagnostic: log first non-idle call with address verification
-    if (v != 0xFFFFu)
+    const uint16_t effective = uint16_t(
+        pad_local_buttons_[slot].load(std::memory_order_relaxed) &
+        pad_mcp_buttons_[slot].load(std::memory_order_relaxed));
+
+    if (effective != 0xFFFFu)
     {
         static uint32_t log_count = 0;
         if (log_count < 10)
         {
             ++log_count;
             emu::logf(emu::LogLevel::warn, "BUS",
-                "set_pad(0x%04X) bus=%p g_pad=%p (#%u)",
-                v, (void*)bus_.get(),
+                "set_pad slot=%u effective=0x%04X local=0x%04X mcp=0x%04X bus=%p g_pad=%p (#%u)",
+                slot,
+                effective,
+                pad_local_buttons_[slot].load(std::memory_order_relaxed),
+                pad_mcp_buttons_[slot].load(std::memory_order_relaxed),
+                (void*)bus_.get(),
                 bus_ ? r3000::Bus::pad_buttons_addr() : nullptr,
                 log_count);
         }
     }
     if (bus_)
-        bus_->set_pad_buttons(v);
+        bus_->set_pad_slot_buttons(slot, effective);
 }
 
 uint16_t Core::pad_buttons() const
 {
-    return bus_ ? bus_->pad_buttons() : 0xFFFFu;
+    return pad_buttons_for_slot(0);
+}
+
+uint16_t Core::pad_local_buttons() const
+{
+    return pad_local_buttons_for_slot(0);
+}
+
+uint16_t Core::pad_mcp_buttons() const
+{
+    return pad_mcp_buttons_for_slot(0);
+}
+
+uint16_t Core::pad_buttons_for_slot(uint32_t slot) const
+{
+    return bus_ ? bus_->pad_slot_buttons(slot) : 0xFFFFu;
+}
+
+uint16_t Core::pad_local_buttons_for_slot(uint32_t slot) const
+{
+    if (slot >= r3000::Bus::kPadSlotCount)
+        return 0xFFFFu;
+    return pad_local_buttons_[slot].load(std::memory_order_relaxed);
+}
+
+uint16_t Core::pad_mcp_buttons_for_slot(uint32_t slot) const
+{
+    if (slot >= r3000::Bus::kPadSlotCount)
+        return 0xFFFFu;
+    return pad_mcp_buttons_[slot].load(std::memory_order_relaxed);
 }
 
 void Core::set_cycle_multiplier(uint32_t n)

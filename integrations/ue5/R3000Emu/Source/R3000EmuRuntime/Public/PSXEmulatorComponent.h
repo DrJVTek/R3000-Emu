@@ -99,6 +99,20 @@ class UPSXEmulatorComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
     bool bDevKitMode{false};
 
+    /** When true, the per-tick UE gamepad poll forwards input to the emulator.
+     *
+     *  Leave this ON when MCP is also driving the pad: local UE input and MCP
+     *  input are separate active-low source masks mixed in Core before SIO0.
+     *  This is a debug/user override only, not an MCP ownership switch. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu")
+    bool bForwardLocalPadInput{true};
+
+    /** Hardware controller slot driven by the UE local gamepad path.
+     *  0 is the direct pad path; later multitap support must reuse the same
+     *  low-level SIO0 slot storage rather than bypassing pad hardware. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input", meta = (ClampMin = "0", ClampMax = "7"))
+    int32 LocalPadSlot{0};
+
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu")
     bool IsDevKitMode() const { return bDevKitMode; }
 
@@ -322,11 +336,29 @@ class UPSXEmulatorComponent : public UActorComponent
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input|Debug", meta = (EditCondition = "bEnablePauseHotkey"))
     FKey PauseToggleKey{EKeys::P};
 
+    /** Map the physical gamepad left stick to the PS1 digital D-pad.
+     *  This is still real UE/controller input forwarded to SIO0, not HLE. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input")
+    bool bUseGamepadAnalogForDPad{true};
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input", meta = (ClampMin = "0.05", ClampMax = "0.95"))
+    float GamepadAnalogDPadThreshold{0.35f};
+
+    /** Keep true by default, matching the original working UE pad path: the
+     *  default pawn must not consume gamepad input that is meant for SIO0. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PSXEmu|Input|Debug")
+    bool bDisablePawnInputForPad{true};
+
     UFUNCTION(BlueprintCallable, Category = "PSXEmu")
     void TogglePause();
 
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "PSXEmu")
     bool IsEmulationPaused() const;
+
+    bool PauseWorkerForMcpAccess(bool& bWasPaused, double TimeoutSeconds = 1.0);
+    void RestoreWorkerAfterMcpAccess(bool bWasPaused);
+    void SetMcpPadInputOwned(bool bOwned);
+    bool IsMcpPadInputOwned() const;
 
     // Routing struct for emu::logf callback (tag → file).
     struct EmuLogFiles
@@ -374,6 +406,7 @@ class UPSXEmulatorComponent : public UActorComponent
     bool bPadMappingAdded_{false};
     bool bPawnInputDisabled_{false};
     bool bPauseToggleWasDown_{false};
+    uint32 PadInputPollLogCount_{0};
 
     emu::Core* Core_{nullptr};
     TAtomic<uint64> StepsExecuted_{0};
@@ -434,4 +467,6 @@ class UPSXEmulatorComponent : public UActorComponent
     // Thread control flags
     TAtomic<bool> bWorkerShouldStop_{false};
     TAtomic<bool> bWorkerPaused_{false};
+    TAtomic<bool> bWorkerInCoreStep_{false};
+    TAtomic<bool> bMcpPadInputOwned_{false};
 };
